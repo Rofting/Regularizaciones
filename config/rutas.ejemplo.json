@@ -1,0 +1,12 @@
+{
+  "_descripcion": "Copia este archivo como rutas.json y ajusta solo lo que cambie. Lo que no aparezca usa la ruta por defecto (relativa a la carpeta del proyecto).",
+  "bd": "",
+  "entrada": "",
+  "procesados": "",
+  "cuarentena": "",
+  "excels": "",
+  "plantilla_cartas": "",
+  "cartas": "",
+  "logs": "",
+  "proveedores": ""
+}

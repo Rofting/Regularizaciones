@@ -1,0 +1,302 @@
+{
+  "_descripcion": "Firmas de identificación de facturas por proveedor. Editable sin tocar código.",
+  "_version": "1.0",
+  "_instrucciones": [
+    "Cada proveedor tiene: 'tipo_suministro', 'firma_identificacion' (texto único en el PDF),",
+    "campos 'regex' para extraer cada dato, y 'cups_validos' para validar contra la comunidad.",
+    "Para añadir un nuevo proveedor: copia un bloque existente, cambia el nombre y ajusta los regex.",
+    "Los regex usan grupos nombrados: (?P<nombre>patrón)"
+  ],
+  "proveedores": {
+    "BASER_GAS": {
+      "nombre_display": "Baser Comercializadora de Referencia",
+      "tipo_suministro": "GAS",
+      "unidad_consumo": "kWh",
+      "_notas": "Factura de gas TUR. Formato ZIP con 1.txt (portada) y 2.txt (detalle consumo).",
+      "firmas_identificacion": [
+        "BASER COMERCIALIZADORA DE REFERENCIA",
+        "basercor.es",
+        "TUR GAS"
+      ],
+      "regex": {
+        "num_factura": "N[º°]\\s*de\\s*factura[:\\s]+(?P<valor>[\\w]+)",
+        "fecha_factura": "Fecha de emisi[oó]n[:\\s]+(?P<valor>\\d{2}\\.\\d{2}\\.\\d{4})",
+        "fecha_inicio": "CONSUMOS\\s+(?P<valor>\\d{2}\\.\\d{2}\\.\\d{4})\\s+-\\s+\\d{2}\\.\\d{2}\\.\\d{4}",
+        "fecha_fin": "CONSUMOS\\s+\\d{2}\\.\\d{2}\\.\\d{4}\\s+-\\s+(?P<valor>\\d{2}\\.\\d{2}\\.\\d{4})",
+        "dias_facturados": "(?P<valor>\\d+)\\s+d[íi]a\\(s\\)\\s+$",
+        "consumo_m3": "Consumo\\s+\\(real\\)\\s+(?P<valor>[\\d\\.]+)\\s+m3",
+        "consumo_kwh": "Consumo\\s+\\(real\\)\\s+[\\d\\.,]+\\s+m3\\s+(?P<valor>[\\d\\.,]+)\\s+kWh",
+        "_nota_columnas": "El PDF de Baser mezcla dos columnas al extraer texto: el valor en euros de Disponibilidad/Impuesto aparece ANTES de su etiqueta (artefacto de reconstruccion por coordenadas). El IVA se lee del bloque limpio final 'Base Imponible/IVA/Total a pagar', no del bloque 'Total IVA (21%) de X' que sale corrupto.",
+        "termino_fijo": "(?P<valor>[\\d\\.]+,[\\d]+)e\\s*\\n\\s*Lect\\.\\s*Anterior",
+        "termino_variable": "gas\\s+natural\\s*\\n(?P<valor>[\\d\\.]+,[\\d]+)e\\s*\\n\\s*CONSUMOS",
+        "impuestos": "(?P<valor>[\\d\\.]+,[\\d]+)e\\s*\\n\\s*Impuesto\\s+sobre\\s+Hidrocarburos",
+        "iva": "IVA\\s*\\(21%\\)\\s*(?P<valor>[\\d\\.]+,[\\d]+)\\s*e",
+        "importe_total": "Total[\\s\\xa0]+a[\\s\\xa0]+pagar[\\s\\xa0]+(?P<valor>[\\d\\.]+,[\\d]+)\\s+e",
+        "cups": "CUPS[:\\s]+(?P<valor>ES\\w+)"
+      },
+      "cups_comunidades": {
+        "644": "ES0208330734612001PV"
+      }
+    },
+    "ENDESA_LUZ_COMUNIDAD": {
+      "nombre_display": "Endesa Energía — Luz comunidad (mercado libre)",
+      "tipo_suministro": "ELECTRICIDAD",
+      "unidad_consumo": "kWh",
+      "_notas": "Factura de luz mercado libre. CUPS terminado en RR0F o PS0F. PDF de doble columna — texto puede venir sin espacios entre palabras de columnas adyacentes.",
+      "firmas_identificacion": [
+        "Tu Luz",
+        "endesaclientes.com"
+      ],
+      "_cups_nota": "Si el CUPS termina en RR0F es la luz de la comunidad. Si termina en PS0F es la otra zona común.",
+      "regex": {
+        "num_factura": "Nº\\s*factura[:\\s]+(?P<valor>[A-Z0-9]+)",
+        "fecha_factura": "Fecha\\s*emisi[oó]n\\s*factura[:\\s]+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "fecha_inicio": "Periododefacturaci[oó]n:del\\s*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "fecha_fin": "Periododefacturaci[oó]n:del\\s*\\d{2}/\\d{2}/\\d{4}\\s*a\\s*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "dias_facturados": "\\((?P<valor>\\d+)\\s*d[íi]as\\)",
+        "consumo_kwh": "Consumo\\s*Total\\s+(?P<valor>[\\d\\.]+,[\\d]+)\\s+kWh",
+        "termino_fijo": "Potencia\\s+\\.+\\s*(?P<valor>[\\d,]+)\\s*€",
+        "termino_variable": "Energ[íi]a\\s+\\.+\\s*(?P<valor>[\\d,]+)\\s*€",
+        "impuestos": "Impuestos\\s+\\.+\\s*(?P<valor>[\\d,]+)\\s*€",
+        "iva": "IVA\\s*normal\\s*\\d+\\s*%\\s*s/\\s*[\\d,\\.]+[\\s\\.]+(?P<valor>[\\d,]+)\\s*€",
+        "importe_total": "TOTAL\\s+(?P<valor>[\\d\\.]+,\\d+)\\s*€",
+        "cups": "CUPS[):\\s]+(?P<valor>ES\\w+)"
+      },
+      "cups_comunidades": {
+        "644": "ES0031300718354001RR0F",
+        "644_ps0f": "ES0031300718351002PS0F"
+      },
+      "firma_exclusion": "Energ.a XXI",
+      "cups_sufijos_validos": [
+        "RR0F",
+        "PS0F"
+      ],
+      "cups_multiples": {
+        "644": [
+          "ES0031300718354001RR0F",
+          "ES0031300718351002PS0F"
+        ]
+      }
+    },
+    "ENERGIAXXI_BOMBA": {
+      "nombre_display": "Energía XXI — Bomba de incendios (mercado regulado)",
+      "tipo_suministro": "ELECTRICIDAD",
+      "unidad_consumo": "kWh",
+      "_notas": "Factura de luz PVPC regulado. CUPS terminado en DY0F. PDF de doble columna — texto puede venir sin espacios entre palabras de columnas adyacentes.",
+      "firmas_identificacion": [
+        "Energ[íi]a XXI Comercializadora de Referencia",
+        "energiaxxi.com",
+        "PVPC",
+        "EnergíaXXIComercializadora",
+        "PVPC-MERCADOREGULADO"
+      ],
+      "regex": {
+        "num_factura": "Nº\\s*factura:(?P<valor>[A-Z0-9]+?)(?=emitida|\\s|$)",
+        "fecha_factura": "emitidael\\s*(?P<valor>\\d{2}\\s*de\\s*\\w+\\s*de\\s*\\d{4})",
+        "fecha_inicio": "Periododeconsumo:\\s*(?P<valor>\\d{1,2}\\s*de\\s*\\w+\\s*de\\s*\\d{4})\\s*a",
+        "fecha_fin": "Periododeconsumo:[^(]+a\\s*(?P<valor>\\d{1,2}\\s*de\\s*\\w+\\s*de\\s*\\d{4})\\s*\\(",
+        "dias_facturados": "\\((?P<valor>\\d+)\\s*d[íi]as\\)",
+        "consumo_kwh": "periodofacturadohasido\\s*(?P<valor>[\\d,\\.]+)\\s*kWh",
+        "termino_fijo": "TÉRMINOFIJO[\"»)]\\s*\\)?\\s*(?P<valor>[\\d,]+)\\s*€",
+        "termino_variable": "TÉRMINOVARIABLE[\"»)]\\s*\\)?\\s*(?P<valor>[\\d,]+)\\s*€",
+        "impuestos": "Impuestoelectricidad:\\s*\\([^)]+\\)\\s*(?P<valor>[\\d,]+)\\s*€",
+        "iva": "IVAnormal:\\s*\\d+%\\s*s/[\\d,\\.]+[\\s\\.]+(?P<valor>[\\d,]+)\\s*€",
+        "importe_total": "TOTAL\\s*IMPORTE\\s*FACTURA\\s+(?P<valor>[\\d\\.]+,\\d+)\\s*€",
+        "cups": "\\(CUPS\\)[:\\s]+(?P<valor>ES\\w+)"
+      },
+      "cups_comunidades": {
+        "644": "ES0031300718351016DY0F"
+      }
+    },
+    "RIOS_RENOVABLES": {
+      "nombre_display": "Ríos Renovables — Lectura contadores",
+      "tipo_suministro": "MANTENIMIENTO",
+      "unidad_consumo": null,
+      "_notas": "Factura de lectura de contadores ACS y calefacción. Una línea por servicio.",
+      "firmas_identificacion": [
+        "riosrenovables.com",
+        "Lectura contadores",
+        "Ríos Renovables",
+        "Rios Renovables",
+        "B31745177"
+      ],
+      "regex": {
+        "num_factura": "N[º°]\\s*Factura[:\\s]+(?P<valor>[\\w]+)",
+        "fecha_factura": "Fecha Factura[:\\s]+(?P<valor>\\d{2}/\\d{2}/\\d{2,4})",
+        "importe_total": "\\d{2}/\\d{2}/\\d{2,4}\\s+(?P<valor>[\\d\\.]+,[\\d]+)\\s+€\\s+BIC",
+        "linea_acs": "Lectura contadores mes \\w+ ACS\\s+(?P<unidades>[\\d,\\.]+)\\s+(?P<precio>[\\d,\\.]+)\\s+(?P<importe>[\\d,\\.]+)",
+        "linea_calef": "Lectura contadores mes \\w+ calefacci[oó]n\\s+(?P<unidades>[\\d,\\.]+)\\s+(?P<precio>[\\d,\\.]+)\\s+(?P<importe>[\\d,\\.]+)"
+      },
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "METRIGEST_ACS": {
+      "nombre_display": "Metrigest — Resumen lecturas ACS",
+      "tipo_suministro": "LECTURA_ACS",
+      "unidad_consumo": "m3",
+      "_notas": "Resumen de lecturas de contadores ACS por vivienda. Formato ZIP con N páginas.",
+      "firmas_identificacion": [
+        "METRIGEST",
+        "metrigest.net",
+        "B99375867",
+        "ACS"
+      ],
+      "regex_cabecera": {
+        "comunidad": "C\\.P\\.\\s+(?P<valor>[^\\n]+)",
+        "periodo": "Periodo[:\\s]+(?P<inicio>\\d{2}/\\d{2}/\\d{4})\\s+-\\s+(?P<fin>\\d{2}/\\d{2}/\\d{4})"
+      },
+      "regex_linea_vecino": "^(?P<vivienda>[A-Z]{2}\\d{2}\\s+[^-]+)\\s+-\\s+(?P<nombre>[^\\n]+)\\n(?:ACS|CALEFACCION)\\s+(?P<fecha_ant>\\d{2}/\\d{2}/\\d{4})\\s+(?P<val_ant>[\\d,\\.]+)\\s+(?P<fecha_act>\\d{2}/\\d{2}/\\d{4})\\s+(?P<val_act>[\\d,\\.]+)\\s+(?P<consumo>[\\d,\\.]+)\\s+(?P<unidad>M3|kWh)",
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "METRIGEST_CALEF": {
+      "nombre_display": "Metrigest — Resumen lecturas Calefacción",
+      "tipo_suministro": "LECTURA_CALEF",
+      "unidad_consumo": "kWh",
+      "_notas": "Resumen de lecturas de contadores Calefacción por vivienda. Formato ZIP.",
+      "firmas_identificacion": [
+        "METRIGEST",
+        "metrigest.net",
+        "B99375867",
+        "CALEFACCION"
+      ],
+      "regex_cabecera": {
+        "comunidad": "C\\.P\\.\\s+(?P<valor>[^\\n]+)",
+        "periodo": "Periodo[:\\s]+(?P<inicio>\\d{2}/\\d{2}/\\d{4})\\s+-\\s+(?P<fin>\\d{2}/\\d{2}/\\d{4})"
+      },
+      "regex_linea_vecino": "^(?P<vivienda>[A-Z]{2}\\d{2}\\s+[^-]+)\\s+-\\s+(?P<nombre>[^\\n]+)\\n(?:ACS|CALEFACCION)\\s+(?P<fecha_ant>\\d{2}/\\d{2}/\\d{4})\\s+(?P<val_ant>[\\d,\\.]+)\\s+(?P<fecha_act>\\d{2}/\\d{2}/\\d{4})\\s+(?P<val_act>[\\d,\\.]+)\\s+(?P<consumo>[\\d,\\.]+)\\s+(?P<unidad>M3|kWh)",
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "AGUA_ZARAGOZA": {
+      "nombre_display": "Oficina Municipal del Agua — Ayuntamiento de Zaragoza",
+      "tipo_suministro": "AGUA",
+      "unidad_consumo": "m3",
+      "_notas": "Factura escaneada — requiere OCR (pdfplumber no extrae texto). Se procesa con pytesseract si está instalado.",
+      "requiere_ocr": true,
+      "firmas_identificacion": [
+        "OFICINA MUNICIPAL DEL AGUA",
+        "aguaszaragoza.es",
+        "Ayuntamiento de Zaragoza",
+        "ECOCIUDAD ZARAGOZA",
+        "TOTAL A PAGAR AYUNTAMIENTO"
+      ],
+      "regex": {
+        "num_factura": "FACTURA\\s+N[eº°o]\\s+(?P<valor>\\S+)",
+        "fecha_factura": "en su cuenta el\\s+(?P<valor>\\d{2}-\\d{2}-\\d{4})",
+        "fecha_inicio": "del\\s+(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})\\s+al",
+        "fecha_fin": "al\\s+(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
+        "dias_facturados": "Dias\\s+de\\s+facturacion\\s+(?P<valor>\\d+)",
+        "consumo_m3": "Saneamiento\\s+\\(m[3°o]\\)\\s+(?P<valor>\\d+)",
+        "termino_fijo": "Cuota fija.*?Importe.*?\\n.*?(?P<valor>[\\d\\.,]+)\\s*$",
+        "termino_variable": "Total cuota variable\\s+(?P<valor>[\\d\\.,]+)",
+        "iva": "IVA\\s+\\(\\d+%\\)\\s+de\\s+[\\d\\.,]+\\s+(?P<valor>[\\d\\.,]+)",
+        "importe_total": "TOTAL\\s+A\\s+PAGAR\\s+(?P<valor>[\\d\\.,]+)",
+        "cups": "N[eº°o]\\s+de\\s+p[oó]liza\\s+(?P<valor>\\d+)",
+        "lec_ini": "Lectura\\s+anterior\\s+\\(m.\\)\\s+(?P<valor>[\\d]{2}\\.[\\d]{3})",
+        "lec_fin": "[UÚu]ltima\\s+lectura\\s+\\(m.\\)\\s+(?P<valor>[\\d]{2}\\.[\\d]{3})"
+      },
+      "cups_comunidades": {
+        "644": "1027952"
+      }
+    },
+    "BANKINTER_TRANSFERENCIA": {
+      "nombre_display": "Bankinter — Justificante de transferencia",
+      "tipo_suministro": "JUSTIFICANTE_PAGO",
+      "unidad_consumo": null,
+      "_notas": "No es una factura de suministro. Es un justificante de pago de Metrigest. Se registra como pago, no como gasto.",
+      "es_justificante": true,
+      "firmas_identificacion": [
+        "bankinter",
+        "Adeudo por transferencia",
+        "BKBKESMM"
+      ],
+      "regex": {
+        "num_factura": "N[úu]mero de transferencia\\s+(?P<valor>\\d+)",
+        "fecha_factura": "Fecha\\s+(?P<valor>\\d{2}-\\d{2}-\\d{2,4})",
+        "importe_total": "\\d{2}-\\d{2}-\\d{2}\\s+(?P<valor>[\\d\\.]+,\\d{2})",
+        "ordenante": "Ordenante\\s+(?P<valor>[A-Z][^\\n]+)",
+        "concepto": "Observaciones\\s+(?P<valor>[^\\n]+)"
+      },
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "ENVAC_RESIDUOS": {
+      "nombre_display": "Envac Iberia S.A. — Recogida pneumática de residuos",
+      "tipo_suministro": "MANTENIMIENTO",
+      "unidad_consumo": null,
+      "_notas": "Factura anual de mantenimiento del sistema de recogida de residuos. Los puntos suspensivos se intercalan con los dígitos del importe.",
+      "firmas_identificacion": [
+        "Envac Iberia",
+        "envac.es",
+        "A-78779550",
+        "Valdespartera",
+        "bocas"
+      ],
+      "regex": {
+        "num_factura": "(?:CAT|FAC|INV)-(?P<valor>[\\w/]+)",
+        "fecha_factura": "(?:CAT|FAC|INV)-[\\w/]+\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "fecha_inicio": "desde\\s+(?P<valor>\\d{2}/\\d{2}/\\d{2,4})",
+        "fecha_fin": "hasta\\s+el\\s+(?P<valor>\\d{2}/\\d{2}/\\d{2,4})",
+        "iva": "I\\.V\\.A\\.\\s+\\d+%(?P<resto>[.\\s\\d,]+€)",
+        "importe_total": "TOTAL\\s+FACTURA\\s+[.\\s]+(?P<valor>[\\d.,\\s]+)€"
+      },
+      "importe_tiene_puntos_decorativos": true,
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "LEBAL_LIMPIEZA": {
+      "nombre_display": "Limpieza Lebal y Jardinería Lebal SLU",
+      "tipo_suministro": "MANTENIMIENTO",
+      "unidad_consumo": null,
+      "_notas": "Factura mensual de limpieza. Formato PDF de texto limpio generado digitalmente.",
+      "firmas_identificacion": [
+        "Limpieza Lebal",
+        "Jardinería Lebal",
+        "B99483901",
+        "LEBAL"
+      ],
+      "regex": {
+        "num_factura": "N[úu]mero:\\s*(?P<valor>\\d+)",
+        "fecha_factura": "Fecha:\\s*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "_nota_fechas": "fecha_inicio/fecha_fin no tienen regex propio: el periodo viene como 'del D al D2 de MES de AAAA' en una sola frase y se resuelve con el rescate generico de rango de fechas (Capa B) en lector_pdf.py.",
+        "iva": "IVA\\s+\\d+%\\s+(?P<valor>[\\d\\.,]+)\\s+€",
+        "importe_total": "^Total\\s+(?P<valor>[\\d\\.,]+)\\s+€"
+      },
+      "regex_flags": "MULTILINE",
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "IAA_AGUA_ARAGON": {
+      "nombre_display": "Instituto Aragonés del Agua — Comunidad de Aragón",
+      "tipo_suministro": "AGUA",
+      "unidad_consumo": "m3",
+      "_notas": "Recibo trimestral. PDF con texto extraíble. El consumo es la suma de 3 meses.",
+      "firmas_identificacion": [
+        "Instituto Aragones del Agua",
+        "Instituto Aragonés del Agua",
+        "Q5000454H",
+        "DATOS DE LA DOMICILIACIÓN",
+        "2026ZROR"
+      ],
+      "regex": {
+        "num_factura": "Recibo:\\s*(?P<valor>\\d+)",
+        "fecha_factura": "Pago hasta el\\s+(?P<valor>\\d{2}/\\d{2}/\\d{2,4})",
+        "fecha_inicio": "(?P<valor>\\d{2}/\\d{2}/\\d{2,4})\\s+-\\s+\\d{2}/\\d{2}/\\d{2,4}\\s+SEPTIMO",
+        "fecha_fin": "\\d{2}/\\d{2}/\\d{2,4}\\s+-\\s+(?P<valor>\\d{2}/\\d{2}/\\d{2,4})\\s+SEPTIMO",
+        "consumo_m3": "T1\\s+[\\d,]+\\s+(?P<valor>\\d+)\\s+m3",
+        "importe_total": "Cuota l[íi]quida\\s+(?P<valor>[\\d\\.,]+)\\s+€",
+        "cups": "Fijo:\\s+(?P<valor>\\d+)"
+      },
+      "cups_comunidades": {
+        "644": "50297001701027952"
+      }
+    }
+  }
+}

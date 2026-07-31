@@ -1,0 +1,84 @@
+════════════════════════════════════════════════════════════════
+  PROCESAR TODO — Guía rápida del nuevo flujo automático
+  (actualizado 04/07/2026)
+════════════════════════════════════════════════════════════════
+
+QUÉ HA CAMBIADO
+───────────────
+1. La BD (data/gestion.db) es ahora la ÚNICA fuente de verdad.
+   El Excel de cada comunidad ya no se edita: se REGENERA entero
+   desde la BD cada vez. Se acabaron los descuadres y corrupciones.
+   El libro anterior queda siempre en Excels_Maestros/backups/.
+
+2. Nuevo módulo core/pipeline.py: hace todo el flujo de una vez,
+   con o sin ventana:
+     entrada/ → BD → reparto → Excel regenerado → cartas
+   Lo que no reconoce va a cuarentena/ con el motivo apuntado en
+   cuarentena/motivos.log. Cada ejecución deja su registro en
+   salidas/logs/.
+
+3. El botón "TODO EN UNO" de la app usa ahora este pipeline.
+   El botón "Actualizar Excel" regenera el libro completo.
+
+4. El histórico de facturas de la 644 (2020-2024) ya está importado
+   en la BD (144 facturas, verificadas al céntimo contra el Excel).
+   La BD anterior está en data/backups/.
+
+5. Nueva plantilla plantillas/Comunidad_PLANTILLA.xlsx: cualquier
+   comunidad nueva estrena un libro con la misma estructura que el
+   de la 644 (incluidas hojas ANALISIS y RESUMEN).
+
+CÓMO SE USA
+───────────
+• Con ventana:  abre la app y pulsa "TODO EN UNO".
+• Sin ventana (para Power Automate o el Programador de tareas):
+
+    python C:\Users\Jose\Proyectos\Flujo_Regularizacion\core\pipeline.py
+
+  Opciones:
+    --comunidad 644        solo esa comunidad
+    --carpeta "C:\ruta"    ingesta también los archivos de esa carpeta
+                           (útil para regularizaciones ya descargadas
+                           que ya no están en el correo)
+    --sin-cartas           no genera cartas
+    --sin-reparto          solo registra, sin calcular
+
+FLUJO COMPLETO RECOMENDADO (todo desatendido)
+─────────────────────────────────────────────
+  1. Power Automate descarga adjuntos del correo a Facturas_Mail
+  2. C:\RPA\procesar_facturas.py los clasifica y renombra
+  3. Copia/mueve los reconocidos a Flujo_Regularizacion\entrada\
+  4. Lanza: python ...\core\pipeline.py
+  5. Revisa cuarentena/ de vez en cuando (única intervención manual)
+
+PARA INSTALAR EN OTRO DESPACHO
+──────────────────────────────
+  1. Copia la carpeta Flujo_Regularizacion completa
+  2. pip install openpyxl python-docx pdfplumber
+  3. Importa su listado de comunidades (botón Sincronizar en la app)
+  4. Si sus carpetas están en otra ruta, crea config/rutas.json
+     (ejemplo en config/rutas.ejemplo.json) — sin tocar código
+  5. Ajusta config/proveedores.json con los CUPS de sus comunidades
+
+DISEÑO NUEVO DE LA APP (core/ui_moderna.py)
+───────────────────────────────────────────
+• Interfaz minimalista: paleta indigo/grises, tarjetas blancas planas.
+• Botón principal "▶ PROCESAR TODO" destacado; los 4 pasos quedan como
+  botones secundarios en la sección "Paso a paso".
+• Botones redondeados con animación suave al pasar el ratón y efecto
+  de pulsación; utilidades como botones de texto con hover.
+• Punto de estado en la barra inferior: verde = listo, pulso indigo
+  animado = procesando.
+• Todo con tkinter estándar, sin instalar nada nuevo. Si ui_moderna.py
+  faltara, la app arranca igualmente con el aspecto clásico.
+
+PENDIENTE / LIMITACIONES CONOCIDAS
+──────────────────────────────────
+• En las hojas ANALISIS regeneradas, las celdas de comparación con
+  el año anterior pueden arrastrar referencias antiguas (las cifras
+  del año propio sí son correctas). Se pulirá en la próxima ronda.
+• En RESUMEN queda una columna semilla 2020-2021 duplicada (cosmético).
+• Comunidad_644_REGENERADO_PREVIEW.xlsx es la vista previa del libro
+  regenerado para que lo compares con el tuyo. Cuando te convenza,
+  pulsa "Actualizar Excel" en la app y el oficial pasará a generarse
+  igual (el viejo queda en backups/).

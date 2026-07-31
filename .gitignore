@@ -1,0 +1,17 @@
+# Entorno Python
+.venv/
+__pycache__/
+*.pyc
+
+# Datos reales de vecinos y facturas (BD, entrada/salida del pipeline)
+data/
+entrada/
+procesados/
+cuarentena/
+salidas/
+Excels_Maestros/
+
+# Archivos temporales de Office
+~$*.xlsx
+~$*.xls
+~$*.docx

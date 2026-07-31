@@ -1,0 +1,298 @@
+# GUÍA DE INSTALACIÓN Y PRUEBA
+# Sistema de Gestión de Fincas — Meditrade
+# ==========================================
+
+# ============================================================
+# 1. ESTRUCTURA DE CARPETAS QUE DEBES CREAR EN TU PC
+# ============================================================
+
+# En tu disco Y: (o donde quieras), crea esta estructura:
+#
+# GestionFincas/
+# ├── core/                    ← aquí van todos los scripts .py
+# │   ├── gestor_bd.py
+# │   ├── lector_pdf.py
+# │   ├── motor_reparto.py
+# │   ├── excel_writer.py
+# │   └── carta_writer.py
+# ├── config/
+# │   └── proveedores.json     ← configuración de proveedores
+# ├── data/
+# │   └── gestion.db           ← se crea automáticamente
+# ├── plantillas/
+# │   └── Plantilla_Cartas.docx
+# ├── Excels_Maestros/
+# │   └── Comunidad_644.xlsx
+# ├── entrada/                 ← aquí dejas caer los PDFs nuevos
+# ├── procesados/              ← PDFs ya procesados (se mueven solos)
+# └── salidas/
+#     ├── cartas/              ← cartas Word generadas
+#     └── excels/              ← copias de Excel actualizadas
+
+
+# ============================================================
+# 2. INSTALACIÓN DE DEPENDENCIAS (una sola vez)
+# ============================================================
+
+# Abre una terminal (cmd o PowerShell) y ejecuta:
+
+pip install openpyxl python-docx pdfplumber
+
+# Verifica que todo instaló bien:
+python -c "import openpyxl; import docx; import pdfplumber; print('OK')"
+
+
+# ============================================================
+# 3. INICIALIZACIÓN (primera vez con una comunidad nueva)
+# ============================================================
+
+# Paso 3a: Crear la base de datos
+cd GestionFincas/core
+python gestor_bd.py --ruta ../data
+# Salida esperada:
+#   ✅ BD lista en: ../data/gestion.db
+#   comunidades          0 filas
+#   propietarios         0 filas
+#   ...
+
+# Paso 3b: Registrar la comunidad 644 en la BD
+# (por ahora hazlo con este script de prueba, luego la GUI lo hará)
+python -c "
+import sys; sys.path.insert(0, '.')
+from gestor_bd import conectar, obtener_o_crear_comunidad, obtener_o_crear_periodo
+
+con = conectar('../data/gestion.db')
+
+# Registrar comunidad
+id_com = obtener_o_crear_comunidad(
+    con, '644',
+    'El Séptimo Sello 14-22 / El Tambor de Hojalata 13-21',
+    cif='H99258139'
+)
+print(f'Comunidad creada con id={id_com}')
+
+# Registrar periodo
+id_per = obtener_o_crear_periodo(
+    con, id_com, '2024-2025', '2024-09-01'
+)
+print(f'Periodo 2024-2025 creado con id={id_per}')
+con.close()
+"
+
+# Paso 3c: Importar los vecinos desde el Excel CAL-ACS
+# (esto lo haremos con un script de migración — pendiente)
+# De momento puedes importarlos manualmente o esperar a la GUI
+
+
+# ============================================================
+# 4. FLUJO NORMAL — PROCESAR UNA FACTURA NUEVA
+# ============================================================
+
+# Cuando llegue una factura de gas (ej: basergas644.pdf):
+# 1. Ponla en la carpeta GestionFincas/entrada/
+# 2. Ejecuta:
+
+python -c "
+import sys; sys.path.insert(0, '.')
+from lector_pdf import procesar_archivo
+from gestor_bd import conectar, buscar_comunidad_por_cif, insertar_factura, marcar_archivo_procesado, archivo_ya_procesado
+import shutil, os
+
+CARPETA_ENTRADA   = '../entrada'
+CARPETA_PROCESADOS = '../procesados'
+RUTA_BD = '../data/gestion.db'
+
+con = conectar(RUTA_BD)
+
+archivos = [f for f in os.listdir(CARPETA_ENTRADA) if f.lower().endswith('.pdf')]
+for nombre in archivos:
+    ruta = os.path.join(CARPETA_ENTRADA, nombre)
+
+    # ¿Ya fue procesado?
+    if archivo_ya_procesado(con, nombre):
+        print(f'⏭️  Ya procesado: {nombre}')
+        continue
+
+    # Detectar comunidad por nombre del archivo
+    # Convención: el archivo empieza con el código de comunidad
+    # ej: '644_basergas.pdf' -> código '644'
+    codigo = nombre.split('_')[0] if '_' in nombre else '644'
+
+    resultado = procesar_archivo(ruta, codigo, con_bd=con)
+
+    if resultado['ok'] and resultado['tipo'] == 'FACTURA':
+        datos = resultado['datos']
+        # Obtener id_comunidad e id_periodo
+        com = buscar_comunidad_por_cif(con, resultado['cif_pdf'])
+        if not com:
+            print(f'⚠️  CIF {resultado[\"cif_pdf\"]} no encontrado en BD: {nombre}')
+            continue
+        # Obtener o crear periodo (por defecto el más reciente abierto)
+        per = con.execute(
+            \"SELECT id_periodo FROM periodos WHERE id_comunidad=? AND estado='abierto' ORDER BY fecha_inicio DESC LIMIT 1\",
+            (com['id_comunidad'],)
+        ).fetchone()
+        if not per:
+            print(f'⚠️  Sin periodo abierto para comunidad {codigo}')
+            continue
+        datos['id_comunidad'] = com['id_comunidad']
+        datos['id_periodo']   = per['id_periodo']
+        id_fac = insertar_factura(con, datos)
+        if id_fac:
+            marcar_archivo_procesado(con, nombre, resultado['hash_md5'], id_fac)
+            shutil.move(ruta, os.path.join(CARPETA_PROCESADOS, nombre))
+            print(f'✅ {nombre} → {datos[\"tipo_suministro\"]} {datos[\"importe_total\"]}€')
+        else:
+            print(f'⚠️  Duplicado (ya estaba en BD): {nombre}')
+    elif resultado['ok'] and resultado['tipo'] == 'LECTURA_METRIGEST':
+        print(f'📊 Metrigest: {len(resultado[\"datos\"][\"vecinos\"])} lecturas — pendiente de importar a BD')
+    else:
+        print(f'❌ {nombre}: {resultado[\"motivo\"]} — {resultado.get(\"detalle\",\"\")}')
+
+con.close()
+"
+
+
+# ============================================================
+# 5. ACTUALIZAR EL EXCEL MAESTRO
+# ============================================================
+
+python -c "
+import sys; sys.path.insert(0, '.')
+from excel_writer import actualizar_excel_maestro
+from gestor_bd import conectar
+
+con = conectar('../data/gestion.db')
+per = con.execute(
+    \"SELECT id_periodo, nombre, id_comunidad FROM periodos WHERE estado='abierto' ORDER BY fecha_inicio DESC LIMIT 1\"
+).fetchone()
+con.close()
+
+resultado = actualizar_excel_maestro(
+    ruta_excel='../Excels_Maestros/Comunidad_644.xlsx',
+    ruta_bd='../data/gestion.db',
+    id_comunidad=per['id_comunidad'],
+    id_periodo=per['id_periodo'],
+    hacer_backup=True   # crea una copia .bak por seguridad
+)
+print('Pestañas actualizadas:', resultado['pestañas_actualizadas'])
+print('Filas escritas:', resultado['filas_escritas'])
+if resultado['errores']:
+    print('Errores:', resultado['errores'])
+"
+
+
+# ============================================================
+# 6. CALCULAR EL REPARTO (cuando tengas todas las facturas del periodo)
+# ============================================================
+
+python -c "
+import sys; sys.path.insert(0, '.')
+from motor_reparto import calcular_reparto
+from gestor_bd import conectar
+
+con = conectar('../data/gestion.db')
+per = con.execute(
+    \"SELECT id_periodo, nombre, id_comunidad FROM periodos WHERE nombre='2024-2025'\"
+).fetchone()
+
+resultado = calcular_reparto(
+    con=con,
+    id_comunidad=per['id_comunidad'],
+    id_periodo=per['id_periodo'],
+    sobrescribir=True   # True = recalcula aunque ya existan repartos
+)
+con.close()
+
+if resultado['ok']:
+    print(f'Periodo: {resultado[\"periodo\"]}')
+    print(f'Vecinos: {resultado[\"vecinos_procesados\"]}')
+    print(f'Coste ACS:    {resultado[\"resumen_costes\"][\"coste_total_acs\"]} €')
+    print(f'Coste Calef:  {resultado[\"resumen_costes\"][\"coste_total_cal\"]} €')
+else:
+    print('ERROR:', resultado['error'])
+"
+
+
+# ============================================================
+# 7. GENERAR LAS CARTAS
+# ============================================================
+
+python carta_writer.py \
+  --bd     ../data/gestion.db \
+  --comunidad 1 \
+  --periodo   2024-2025 \
+  --plantilla ../plantillas/Plantilla_Cartas.docx \
+  --salida    ../salidas/cartas/2024-2025/
+
+
+# ============================================================
+# 8. VERIFICAR QUÉ HAY EN LA BASE DE DATOS
+# ============================================================
+
+python -c "
+import sys; sys.path.insert(0, '.')
+from gestor_bd import resumen_bd
+resumen_bd('../data/gestion.db')
+"
+
+# Salida esperada:
+# ─────────────────────────────────────────────
+#   Resumen de la BD: ../data/gestion.db
+# ─────────────────────────────────────────────
+#   comunidades                        1 filas
+#   propietarios                       3 filas   (← luego 120)
+#   periodos                           1 filas
+#   facturas                           5 filas
+#   lecturas_vecino                    6 filas
+#   gastos_extra                       1 filas
+#   config_suministro                  2 filas
+#   repartos                           6 filas
+#   archivos_procesados                5 filas
+# ─────────────────────────────────────────────
+
+
+# ============================================================
+# 9. ORDEN RECOMENDADO DE PRUEBA PARA HOY
+# ============================================================
+
+# Con lo que tienes ahora mismo, puedes probar así:
+
+# PRUEBA 1 — Crear BD y comunidad
+cd GestionFincas/core
+python gestor_bd.py --ruta ../data
+
+# PRUEBA 2 — Procesar las 6 facturas PDF que ya tienes
+#   (colócalas en ../entrada/ y ejecuta el paso 4)
+#   Resultado esperado: 5 facturas procesadas, 1 Metrigest como lectura
+
+# PRUEBA 3 — Ver que las facturas están en la BD
+python -c "
+import sqlite3, sys; sys.path.insert(0,'.')
+con = sqlite3.connect('../data/gestion.db')
+con.row_factory = sqlite3.Row
+for f in con.execute('SELECT tipo_suministro, proveedor, fecha_factura, importe_total FROM facturas'):
+    print(f'  {f[\"tipo_suministro\"]:<15} {f[\"proveedor\"]:<20} {f[\"fecha_factura\"]} {f[\"importe_total\"]}€')
+con.close()
+"
+
+# PRUEBA 4 — Actualizar el Excel Maestro
+#   (necesitas tener el Comunidad_644.xlsx en ../Excels_Maestros/)
+
+# PRUEBA 5 — Generar las 3 cartas de prueba (con los 3 vecinos de test)
+#   Verifica que los .docx se abren bien en Word
+
+
+# ============================================================
+# 10. CONVENCIÓN DE NOMBRES DE ARCHIVO RECOMENDADA
+# ============================================================
+
+# Para que el lector detecte automáticamente la comunidad:
+#   644_basergas_2025-05.pdf          → comunidad 644, Baser, mayo 2025
+#   644_endesa_2025-05.pdf            → comunidad 644, Endesa
+#   644_METRIGEST_ACS_2025-08.pdf     → comunidad 644, Metrigest ACS
+#   644_METRIGEST_CAL_2025-12.pdf     → comunidad 644, Metrigest Calef
+#
+# El sistema también detecta la comunidad por CIF dentro del PDF,
+# así que si el nombre no sigue la convención, funcionará igualmente
+# siempre que el CIF esté registrado en la BD.

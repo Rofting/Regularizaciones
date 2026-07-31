@@ -1,0 +1,206 @@
+"""
+excel_generator.py
+==================
+Regenera el Excel Maestro COMPLETO de una comunidad desde la BD SQLite.
+
+FILOSOFÍA: la BD es la única fuente de verdad. El Excel es un informe de
+salida que se reconstruye entero cada vez. Así desaparecen los problemas de
+corrupción y fórmulas descuadradas de la escritura incremental:
+  - Nunca se insertan filas en un libro con datos previos.
+  - Los bloques de año se escriben en orden cronológico, append-only.
+  - Las hojas ANALISIS/RESUMEN se crean al final, cuando las filas de suma
+    ya están en su posición definitiva.
+  - La escritura es atómica: se construye en un temporal y solo si todo va
+    bien sustituye al archivo real (el anterior queda en backups/).
+
+USO:
+    python excel_generator.py --comunidad 644
+    python excel_generator.py --comunidad 644 --bd ../data/gestion.db
+
+Desde código:
+    from excel_generator import regenerar_excel_comunidad
+    resultado = regenerar_excel_comunidad("644")
+"""
+
+import os
+import sys
+import shutil
+import sqlite3
+import argparse
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+import excel_writer
+
+BASE_DIR    = Path(__file__).parent.parent
+RUTA_BD     = BASE_DIR / "data" / "gestion.db"
+RUTA_EXCELS = BASE_DIR / "Excels_Maestros"
+MAX_BACKUPS = 5
+
+
+def _log_defecto(mensaje: str, tipo: str = "neutro"):
+    print(mensaje)
+
+
+def _rotar_backups(carpeta: Path, codigo: str):
+    """Mantiene solo los MAX_BACKUPS backups más recientes de una comunidad."""
+    backups = sorted(carpeta.glob(f"Comunidad_{codigo}_*.xlsx"),
+                     key=lambda p: p.stat().st_mtime, reverse=True)
+    for viejo in backups[MAX_BACKUPS:]:
+        try:
+            viejo.unlink()
+        except OSError:
+            pass
+
+
+def _personalizar_datos(ruta_xlsx: str, com, ruta_bd: str):
+    """Escribe nombre, código y nº de viviendas de la comunidad en la hoja DATOS."""
+    import openpyxl
+    n_viv = 0
+    try:
+        con = sqlite3.connect(ruta_bd)
+        n_viv = con.execute(
+            "SELECT COUNT(*) FROM propietarios WHERE id_comunidad=? AND activo=1",
+            (com["id_comunidad"],)
+        ).fetchone()[0] or 0
+        con.close()
+    except sqlite3.Error:
+        pass
+
+    wb = openpyxl.load_workbook(ruta_xlsx)
+    if "DATOS" in wb.sheetnames:
+        ws = wb["DATOS"]
+        ws["A1"] = com["nombre"] or f"COMUNIDAD {com['codigo']}"
+        if n_viv:
+            # D7 es la celda que referencian las hojas de lecturas (=DATOS!D7)
+            ws["D7"] = n_viv
+        wb.save(ruta_xlsx)
+
+
+def regenerar_excel_comunidad(codigo: str,
+                              ruta_bd: str = None,
+                              ruta_excels: str = None,
+                              log=None) -> dict:
+    """
+    Reconstruye Comunidad_{codigo}.xlsx entero desde la BD.
+
+    Returns:
+        dict con: ok, archivo, periodos_volcados (list), filas_escritas,
+                  backup, errores (list)
+    """
+    log         = log or _log_defecto
+    ruta_bd     = str(ruta_bd or RUTA_BD)
+    ruta_excels = Path(ruta_excels or RUTA_EXCELS)
+    ruta_excels.mkdir(parents=True, exist_ok=True)
+
+    resultado = {"ok": False, "archivo": None, "periodos_volcados": [],
+                 "filas_escritas": 0, "backup": None, "errores": []}
+
+    # ── Datos de la comunidad y sus periodos ─────────────────────────────
+    con = sqlite3.connect(ruta_bd)
+    con.row_factory = sqlite3.Row
+    com = con.execute(
+        "SELECT id_comunidad, codigo, nombre FROM comunidades WHERE codigo=?",
+        (str(codigo),)
+    ).fetchone()
+    if not com:
+        con.close()
+        resultado["errores"].append(f"Comunidad '{codigo}' no existe en la BD")
+        return resultado
+
+    periodos = con.execute(
+        "SELECT id_periodo, nombre, fecha_inicio FROM periodos "
+        "WHERE id_comunidad=? ORDER BY fecha_inicio ASC, nombre ASC",
+        (com["id_comunidad"],)
+    ).fetchall()
+    con.close()
+
+    if not periodos:
+        resultado["errores"].append(
+            f"La comunidad {codigo} no tiene periodos en la BD; nada que volcar")
+        return resultado
+
+    destino  = ruta_excels / f"Comunidad_{codigo}.xlsx"
+    temporal = ruta_excels / f"~Comunidad_{codigo}_generando.xlsx"
+
+    # Plantilla rica (con hoja ANALISIS y fórmulas) si existe
+    ruta_plantilla = BASE_DIR / "plantillas" / "Comunidad_PLANTILLA.xlsx"
+
+    try:
+        # ── 1. Libro nuevo desde plantilla limpia ────────────────────────
+        if temporal.exists():
+            temporal.unlink()
+        if ruta_plantilla.exists():
+            shutil.copy2(str(ruta_plantilla), str(temporal))
+            _personalizar_datos(str(temporal), com, ruta_bd)
+        else:
+            log("  ⚠️ plantillas/Comunidad_PLANTILLA.xlsx no encontrada — "
+                "se usa plantilla básica (sin hojas ANALISIS)")
+            excel_writer.crear_plantilla_excel(str(temporal),
+                                               codigo=com["codigo"],
+                                               nombre=com["nombre"] or "")
+
+        # ── 2. Volcar cada periodo en orden cronológico ──────────────────
+        for per in periodos:
+            r = excel_writer.actualizar_excel_maestro(
+                ruta_excel=str(temporal),
+                ruta_bd=ruta_bd,
+                id_comunidad=com["id_comunidad"],
+                id_periodo=per["id_periodo"],
+                hacer_backup=False,
+            )
+            resultado["filas_escritas"] += r.get("filas_escritas", 0)
+            resultado["periodos_volcados"].append(per["nombre"])
+            for err in r.get("errores", []):
+                resultado["errores"].append(f"{per['nombre']}: {err}")
+            log(f"    · Periodo {per['nombre']}: "
+                f"{r.get('filas_escritas', 0)} filas "
+                f"({', '.join(r.get('pestañas_actualizadas', [])) or 'sin datos'})")
+
+        # ── 3. Backup del actual y sustitución atómica ───────────────────
+        if destino.exists():
+            carpeta_bak = ruta_excels / "backups"
+            carpeta_bak.mkdir(exist_ok=True)
+            nombre_bak = f"Comunidad_{codigo}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+            ruta_bak = carpeta_bak / nombre_bak
+            shutil.copy2(str(destino), str(ruta_bak))
+            resultado["backup"] = str(ruta_bak)
+            _rotar_backups(carpeta_bak, codigo)
+
+        os.replace(str(temporal), str(destino))
+        resultado["archivo"] = str(destino)
+        resultado["ok"] = True
+        log(f"  ✅ Excel regenerado: {destino.name} "
+            f"({len(periodos)} periodos, {resultado['filas_escritas']} filas)")
+
+    except PermissionError:
+        resultado["errores"].append(
+            f"No se pudo escribir {destino.name}: el archivo está abierto en Excel. "
+            "Ciérralo y vuelve a ejecutar.")
+    except Exception as e:
+        resultado["errores"].append(f"{type(e).__name__}: {e}")
+    finally:
+        if temporal.exists():
+            try:
+                temporal.unlink()
+            except OSError:
+                pass
+
+    if resultado["errores"] and not resultado["ok"]:
+        for err in resultado["errores"]:
+            log(f"  ❌ {err}", "error")
+    return resultado
+
+
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Regenera el Excel Maestro de una comunidad desde la BD")
+    parser.add_argument("--comunidad", required=True, help="Código (ej: 644)")
+    parser.add_argument("--bd", default=None, help="Ruta a gestion.db")
+    parser.add_argument("--excels", default=None, help="Carpeta Excels_Maestros")
+    args = parser.parse_args()
+
+    r = regenerar_excel_comunidad(args.comunidad, args.bd, args.excels)
+    sys.exit(0 if r["ok"] else 1)
