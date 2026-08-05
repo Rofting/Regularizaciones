@@ -636,9 +636,21 @@ def _escribir_bloque_lecturas(ws, fila_inicio_datos: int,
 
 def _actualizar_otros_gastos(ws, nombre_año: str,
                               facturas_mto: list[dict],
-                              gastos_extra: list[dict]):
+                              gastos_extra: list[dict]) -> str:
     """
-    Actualiza la sección de resumen de Otros Gastos y añade reparaciones nuevas.
+    Actualiza la sección de resumen de Otros Gastos (filas 6-9) para el año
+    fiscal indicado y devuelve la letra de columna usada (para que el
+    llamador pueda construir las referencias de ANALISIS).
+
+      Fila 6: Lecturas Contadores ACS       ← facturas MANTENIMIENTO, notas 'ACS'
+      Fila 7: Lecturas Contadores CALEF     ← facturas MANTENIMIENTO, notas 'CALEF'
+      Fila 8: Mantenimiento Placas Solares  ← facturas MANTENIMIENTO, notas 'SOLAR'
+      Fila 9: Mantenimiento Sala Calderas   ← facturas MANTENIMIENTO, notas 'CALDERA'
+
+    Las reparaciones (fila 11 en adelante) se escriben aparte con
+    _escribir_bloque_reparaciones porque son un bloque por ejercicio con
+    columnas de amortización (vienen de gastos_extra, no de facturas), no
+    un simple total de la fila 5.
     """
     # Buscar la columna del año en la fila de cabecera (fila 5)
     col_año = None
@@ -664,16 +676,156 @@ def _actualizar_otros_gastos(ws, nombre_año: str,
     # Actualizar totales de resumen (filas 6-9)
     total_lecturas_acs  = sum(f["importe_total"] for f in facturas_mto if "ACS" in (f.get("notas") or "").upper())
     total_lecturas_cal  = sum(f["importe_total"] for f in facturas_mto if "CALEF" in (f.get("notas") or "").upper())
-    total_mto_preventivo = sum(f["importe_total"] for f in facturas_mto
-                               if "MANTENIMIENTO" in f.get("tipo_suministro", "").upper()
-                               and "RIOS" in (f.get("proveedor") or "").upper())
+    total_mto_solar     = sum(f["importe_total"] for f in facturas_mto
+                               if "SOLAR" in (f.get("notas") or "").upper())
+    total_mto_calderas  = sum(f["importe_total"] for f in facturas_mto
+                               if "CALDERA" in (f.get("notas") or "").upper())
 
     if total_lecturas_acs:
         ws[f"{col_letra}6"] = round(total_lecturas_acs, 2)
     if total_lecturas_cal:
         ws[f"{col_letra}7"] = round(total_lecturas_cal, 2)
-    if total_mto_preventivo:
-        ws[f"{col_letra}9"] = round(total_mto_preventivo, 2)
+    if total_mto_solar:
+        ws[f"{col_letra}8"] = round(total_mto_solar, 2)
+    if total_mto_calderas:
+        ws[f"{col_letra}9"] = round(total_mto_calderas, 2)
+
+    return col_letra
+
+
+# ---------------------------------------------------------------------------
+# ESCRITURA DEL LIBRO DE REPARACIONES (Mantenimiento correctivo, amortizado)
+# ---------------------------------------------------------------------------
+
+OTROS_FILA_PRIMER_BLOQUE_REPARACION = 13   # como en el Excel de referencia
+OTROS_COL_PRIMER_AÑO = 7                   # columna G
+
+
+def _listar_bloques_reparaciones(ws) -> list[dict]:
+    """
+    Escanea la sección de reparaciones de OTROS GASTOS (fila 11 en adelante)
+    y devuelve cada bloque 'EJERCICIO AAAA-AAAA' encontrado, con su fila de
+    cabecera, fila de inicio de datos y fila TOTAL.
+    """
+    import re as _re
+    bloques = []
+    fila = 11
+    max_fila = max(ws.max_row, OTROS_FILA_PRIMER_BLOQUE_REPARACION)
+    while fila <= max_fila:
+        val = ws.cell(row=fila, column=4).value  # columna D
+        if isinstance(val, str):
+            m = _re.match(r"EJERCICIO\s+(\d{4})-(\d{4})", val.strip())
+            if m:
+                año_ini = int(m.group(1))
+                fila_datos_ini = fila + 2   # fila+1 = cabecera de columnas
+                fila_total = None
+                f = fila_datos_ini
+                while f <= max_fila + 5:
+                    e_val = ws.cell(row=f, column=5).value
+                    if isinstance(e_val, str) and e_val.strip().upper().startswith("TOTAL"):
+                        fila_total = f
+                        break
+                    d_val = ws.cell(row=f, column=4).value
+                    if isinstance(d_val, str) and d_val.strip().startswith("EJERCICIO"):
+                        break
+                    f += 1
+                bloques.append({
+                    "año_inicio":     año_ini,
+                    "fila_cabecera":  fila,
+                    "fila_datos_ini": fila_datos_ini,
+                    "fila_total":     fila_total,
+                })
+                fila = (fila_total or fila_datos_ini) + 1
+                max_fila = max(max_fila, fila)
+                continue
+        fila += 1
+    return bloques
+
+
+def _escribir_bloque_reparaciones(ws, nombre_año: str,
+                                   gastos_reparacion: list[dict]) -> Optional[dict]:
+    """
+    Añade un nuevo bloque 'EJERCICIO {nombre_año}' en la sección de
+    reparaciones de OTROS GASTOS, con una línea por gasto y una fila TOTAL
+    con fórmulas SUM, replicando exactamente el formato del Excel de
+    referencia: cada bloque tiene 5 columnas de amortización (año de inicio
+    del ejercicio fiscal + 4 siguientes) y usa una rejilla de columnas
+    GLOBAL a toda la hoja (col G siempre es el año-ancla, H el siguiente...),
+    de forma que el mismo año calendario cae siempre en la misma columna
+    en todos los bloques — así ANALISIS puede sumar varios bloques con una
+    sola letra de columna.
+
+    Los gastos con años_amortizacion=1 escriben el importe íntegro en la
+    PRIMERA columna del bloque (el año en que arranca el ejercicio fiscal);
+    los amortizados reparten "=$F{fila}/{años}" en las N columnas
+    siguientes. Esto reproduce el criterio real del Excel de referencia
+    (el bloque completo amortiza desde su propio año de inicio, no desde
+    la fecha exacta de cada reparación).
+
+    Si el bloque para ese año ya existe, no hace nada y devuelve None.
+    """
+    if not gastos_reparacion:
+        return None
+
+    bloques = _listar_bloques_reparaciones(ws)
+    año_inicio = int(nombre_año.split("-")[0])
+
+    for b in bloques:
+        if b["año_inicio"] == año_inicio:
+            return None   # ya escrito
+
+    años_existentes = [b["año_inicio"] for b in bloques] + [año_inicio]
+    anchor_año = min(años_existentes)
+    col_ini = OTROS_COL_PRIMER_AÑO + (año_inicio - anchor_año)
+
+    if bloques:
+        ultimo = max(bloques, key=lambda b: b["fila_total"] or b["fila_datos_ini"])
+        fila_cabecera = (ultimo["fila_total"] or ultimo["fila_datos_ini"]) + 2
+    else:
+        fila_cabecera = OTROS_FILA_PRIMER_BLOQUE_REPARACION
+
+    fila_cols = fila_cabecera + 1
+    fila_datos_ini = fila_cabecera + 2
+
+    ws.cell(row=fila_cabecera, column=4).value = f"EJERCICIO {nombre_año}"
+    ws.cell(row=fila_cols, column=4).value = "Fecha"
+    ws.cell(row=fila_cols, column=5).value = "Comentario"
+    ws.cell(row=fila_cols, column=6).value = "Debe"
+    for i in range(5):
+        ws.cell(row=fila_cols, column=col_ini + i).value = año_inicio + i
+
+    fila = fila_datos_ini
+    for g in sorted(gastos_reparacion, key=lambda g: g["fecha"]):
+        ws.cell(row=fila, column=4).value = _fecha_excel(g["fecha"])
+        ws.cell(row=fila, column=4).number_format = "DD/MM/YYYY"
+        ws.cell(row=fila, column=5).value = g.get("descripcion") or ""
+        importe = _limpiar_num_str(g["importe_total"])
+        ws.cell(row=fila, column=6).value = importe
+        ws.cell(row=fila, column=6).number_format = "#,##0.00"
+
+        años_amort = max(1, int(g.get("años_amortizacion") or 1))
+        if años_amort <= 1:
+            ws.cell(row=fila, column=col_ini).value = f"=F{fila}"
+            ws.cell(row=fila, column=col_ini).number_format = "#,##0.00"
+        else:
+            for i in range(años_amort):
+                c = ws.cell(row=fila, column=col_ini + i)
+                c.value = f"=$F{fila}/{años_amort}"
+                c.number_format = "#,##0.00"
+        fila += 1
+
+    fila_total = fila
+    ws.cell(row=fila_total, column=5).value = "TOTAL €......"
+    ws.cell(row=fila_total, column=6).value = f"=SUM(F{fila_datos_ini}:F{fila_total - 1})"
+    ws.cell(row=fila_total, column=6).number_format = "#,##0.00"
+    for i in range(5):
+        col = col_ini + i
+        letra = get_column_letter(col)
+        c = ws.cell(row=fila_total, column=col)
+        c.value = f"=SUM({letra}{fila_datos_ini}:{letra}{fila_total - 1})"
+        c.number_format = "#,##0.00"
+
+    return {"fila_total": fila_total, "año_inicio": año_inicio, "col_ini": col_ini}
 
 
 # ---------------------------------------------------------------------------
@@ -987,6 +1139,17 @@ def actualizar_excel_maestro(ruta_excel: str, ruta_bd: str,
         ORDER BY tipo_suministro, fecha_inicio
     """, (id_comunidad, id_periodo)).fetchall()
     facturas = [dict(f) for f in facturas]
+
+    # Gastos extra (mantenimiento + reparaciones amortizadas) de toda la
+    # comunidad — no están ligados a un id_periodo porque una reparación
+    # amortizada a 5 años puede aplicar a varios periodos fiscales.
+    gastos_extra_todos = cur.execute("""
+        SELECT id_gasto, descripcion, fecha, importe_total,
+               años_amortizacion, tipo_gasto, servicio_afectado
+        FROM gastos_extra
+        WHERE id_comunidad=? AND activo=1
+    """, (id_comunidad,)).fetchall()
+    gastos_extra_todos = [dict(g) for g in gastos_extra_todos]
 
     # ── Normalizar campos de consumo para los writers de Excel ──────────────
     # La BD almacena un solo campo consumo_total + unidad_consumo.
@@ -1335,10 +1498,24 @@ def actualizar_excel_maestro(ruta_excel: str, ruta_bd: str,
     # PESTAÑA OTROS GASTOS
     # ------------------------------------------------------------------
     facturas_mto = [f for f in facturas if f["tipo_suministro"] == "MANTENIMIENTO"]
-    if facturas_mto:
+    año_inicio_periodo = int(nombre_año.split("-")[0])
+    fecha_ini_periodo = periodo["fecha_inicio"] or ""
+    fecha_fin_periodo = periodo["fecha_fin"] or "9999-12-31"
+    gastos_reparacion_periodo = [
+        g for g in gastos_extra_todos
+        if (g.get("tipo_gasto") or "").upper() == "REPARACION"
+        and g["fecha"] and fecha_ini_periodo <= g["fecha"] <= fecha_fin_periodo
+    ]
+
+    col_otros_resumen = None
+    if facturas_mto or gastos_reparacion_periodo:
         try:
             ws = wb["OTROS GASTOS"]
-            _actualizar_otros_gastos(ws, nombre_año, facturas_mto, [])
+            col_otros_resumen = _actualizar_otros_gastos(
+                ws, nombre_año, facturas_mto, []
+            )
+            if gastos_reparacion_periodo:
+                _escribir_bloque_reparaciones(ws, nombre_año, gastos_reparacion_periodo)
             pestañas_actualizadas.append("OTROS GASTOS")
         except Exception as e:
             errores.append(f"OTROS GASTOS: {e}")
@@ -1386,6 +1563,42 @@ def actualizar_excel_maestro(ruta_excel: str, ruta_bd: str,
             nombre_creado = crear_hoja_analisis(wb, nombre_año, filas_suma)
             if nombre_creado:
                 pestañas_actualizadas.append(nombre_creado)
+
+                # Conectar MTO. PREVENTIVO (H26), LECTURA CONTADORES (H27) y
+                # MTO. CORRECTIVO/REPARACIONES (H30) con la hoja OTROS GASTOS,
+                # que en la plantilla vienen puestas a 0 a propósito.
+                try:
+                    ws_otros = wb["OTROS GASTOS"]
+                    ws_an = wb[nombre_creado]
+
+                    col_resumen = col_otros_resumen
+                    if col_resumen is None:
+                        for col in range(1, 15):
+                            v = ws_otros.cell(row=OTROS_FILA_CABECERA_RESUMEN, column=col).value
+                            if str(v or "").strip() == nombre_año:
+                                col_resumen = get_column_letter(col)
+                                break
+                    if col_resumen:
+                        ws_an["H26"] = f"='OTROS GASTOS'!{col_resumen}9"
+                        ws_an["H27"] = (f"='OTROS GASTOS'!{col_resumen}6"
+                                        f"+'OTROS GASTOS'!{col_resumen}7")
+
+                    bloques_rep = _listar_bloques_reparaciones(ws_otros)
+                    if bloques_rep:
+                        anchor_año = min(b["año_inicio"] for b in bloques_rep)
+                        col_año_letra = get_column_letter(
+                            OTROS_COL_PRIMER_AÑO + (año_inicio_periodo - anchor_año)
+                        )
+                        terminos = [
+                            f"'OTROS GASTOS'!{col_año_letra}{b['fila_total']}"
+                            for b in bloques_rep
+                            if b["fila_total"]
+                            and b["año_inicio"] <= año_inicio_periodo <= b["año_inicio"] + 4
+                        ]
+                        if terminos:
+                            ws_an["H30"] = "=" + "+".join(terminos)
+                except Exception as e:
+                    errores.append(f"ANALISIS OTROS GASTOS refs: {e}")
 
                 # Actualizar RESUMEN
                 actualizar_hoja_resumen(wb, nombre_año, nombre_creado, {
