@@ -239,7 +239,16 @@ def _obtener_lecturas_vecino(cur, id_propietario: int, tipo: str,
             ORDER BY fecha_lectura ASC LIMIT 1
         """, (id_propietario, tipo, fecha_inicio)).fetchone()
 
-        if antes and despues:
+        # Si el contador se sustituyó entre "antes" y "despues", interpolar
+        # entre ambos mezclaría dos aparatos distintos y daría un valor sin
+        # sentido (ej. entre 1023 del contador viejo y 10 del nuevo). En ese
+        # caso se descarta la interpolación y se cae a las ramas de abajo
+        # (usar solo "antes" si está lo bastante cerca, si no, sin lectura).
+        hay_reinicio_entre = bool(antes and despues and _detectar_reinicio_contador(
+            cur, id_propietario, tipo, antes["fecha_lectura"], despues["fecha_lectura"]
+        ))
+
+        if antes and despues and not hay_reinicio_entre:
             val_interp = _interpolar_lectura(
                 antes["valor_acumulado"], antes["fecha_lectura"],
                 despues["valor_acumulado"], despues["fecha_lectura"],
@@ -294,7 +303,11 @@ def _obtener_lecturas_vecino(cur, id_propietario: int, tipo: str,
             ORDER BY fecha_lectura ASC LIMIT 1
         """, (id_propietario, tipo, fecha_fin)).fetchone()
 
-        if antes_fin and despues_fin:
+        hay_reinicio_entre_fin = bool(antes_fin and despues_fin and _detectar_reinicio_contador(
+            cur, id_propietario, tipo, antes_fin["fecha_lectura"], despues_fin["fecha_lectura"]
+        ))
+
+        if antes_fin and despues_fin and not hay_reinicio_entre_fin:
             val_interp = _interpolar_lectura(
                 antes_fin["valor_acumulado"], antes_fin["fecha_lectura"],
                 despues_fin["valor_acumulado"], despues_fin["fecha_lectura"],

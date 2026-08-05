@@ -172,6 +172,7 @@ def importar_lecturas_pdf(ruta_pdf: str, ruta_bd: str,
     insertadas    = 0
     duplicadas    = 0
     no_encontrados = []
+    conflictos     = []
 
     for vecino in vecinos:
         vivienda_pdf = vecino["vivienda"]
@@ -193,32 +194,26 @@ def importar_lecturas_pdf(ruta_pdf: str, ruta_bd: str,
 
         # Insertar lectura ANTERIOR (val_ant en fecha_ant)
         if vecino.get("fecha_ant") and vecino.get("val_ant") is not None:
-            try:
-                con.execute("""
-                    INSERT INTO lecturas_vecino
-                        (id_propietario, id_periodo, tipo, fecha_lectura,
-                         valor_acumulado, estado, fuente)
-                    VALUES (?,?,?,?,?,?,?)
-                """, (id_prop, id_periodo, tipo_lec,
-                      vecino["fecha_ant"], vecino["val_ant"],
-                      "real", "metrigest_pdf"))
+            ok, conflicto = _insertar_o_detectar_conflicto(
+                con, id_prop, id_periodo, tipo_lec,
+                vecino["fecha_ant"], vecino["val_ant"], vivienda_pdf)
+            if ok:
                 insertadas += 1
-            except sqlite3.IntegrityError:
+            elif conflicto:
+                conflictos.append(conflicto)
+            else:
                 duplicadas += 1
 
         # Insertar lectura ACTUAL (val_act en fecha_act)
         if vecino.get("fecha_act") and vecino.get("val_act") is not None:
-            try:
-                con.execute("""
-                    INSERT INTO lecturas_vecino
-                        (id_propietario, id_periodo, tipo, fecha_lectura,
-                         valor_acumulado, estado, fuente)
-                    VALUES (?,?,?,?,?,?,?)
-                """, (id_prop, id_periodo, tipo_lec,
-                      vecino["fecha_act"], vecino["val_act"],
-                      "real", "metrigest_pdf"))
+            ok, conflicto = _insertar_o_detectar_conflicto(
+                con, id_prop, id_periodo, tipo_lec,
+                vecino["fecha_act"], vecino["val_act"], vivienda_pdf)
+            if ok:
                 insertadas += 1
-            except sqlite3.IntegrityError:
+            elif conflicto:
+                conflictos.append(conflicto)
+            else:
                 duplicadas += 1
 
     con.commit()
@@ -239,6 +234,12 @@ def importar_lecturas_pdf(ruta_pdf: str, ruta_bd: str,
         print(f"  ✅ Insertadas: {insertadas}  |  Duplicadas: {duplicadas}  |  No encontrados: {len(no_encontrados)}")
         if no_encontrados[:5]:
             print(f"  ⚠️  Sin match: {no_encontrados[:5]}")
+        if conflictos:
+            print(f"  🔶 CONFLICTOS: {len(conflictos)} lectura(s) donde este informe no coincide con "
+                  f"lo que ya había en la BD para la misma fecha — revisar a mano, no se sobrescribió nada:")
+            for c in conflictos[:10]:
+                print(f"       {c['vivienda']} {c['tipo']} {c['fecha']}: "
+                      f"BD={c['valor_en_bd']} vs este informe={c['valor_en_este_informe']}")
 
     return {
         "ok": True,
@@ -248,6 +249,7 @@ def importar_lecturas_pdf(ruta_pdf: str, ruta_bd: str,
         "lecturas_insertadas": insertadas,
         "lecturas_duplicadas": duplicadas,
         "vecinos_no_encontrados": no_encontrados,
+        "conflictos": conflictos,
     }
 
 
@@ -263,6 +265,42 @@ def _normalizar_vivienda(codigo: str) -> str:
     """
     # Quitar espacios, puntos, º
     return re.sub(r'[\s\.º°]', '', codigo.upper())
+
+
+def _insertar_o_detectar_conflicto(con, id_prop, id_periodo, tipo, fecha, valor, vivienda):
+    """
+    Inserta una lectura. Si ya existe una para (propietario, tipo, fecha) —
+    algo habitual porque el periodo final de un informe Metrigest coincide
+    con el periodo inicial del siguiente — comprueba que el valor coincida.
+    Si coincide (o casi: contadores no dan decimales exactos), es un
+    duplicado normal y se ignora. Si NO coincide, son dos informes oficiales
+    de Metrigest contradiciéndose sobre la misma lectura del mismo contador
+    el mismo día — no se puede saber automáticamente cuál es la buena, así
+    que se reporta como conflicto en vez de quedarse callado con el primero
+    que llegó (que es justo el bug que causó el -40.433 de la 644).
+
+    Devuelve (insertada: bool, conflicto: dict|None).
+    """
+    try:
+        con.execute("""
+            INSERT INTO lecturas_vecino
+                (id_propietario, id_periodo, tipo, fecha_lectura,
+                 valor_acumulado, estado, fuente)
+            VALUES (?,?,?,?,?,?,?)
+        """, (id_prop, id_periodo, tipo, fecha, valor, "real", "metrigest_pdf"))
+        return True, None
+    except sqlite3.IntegrityError:
+        existente = con.execute("""
+            SELECT valor_acumulado FROM lecturas_vecino
+            WHERE id_propietario=? AND tipo=? AND fecha_lectura=?
+        """, (id_prop, tipo, fecha)).fetchone()
+        valor_existente = existente["valor_acumulado"] if existente else None
+        if valor_existente is not None and abs(valor_existente - valor) > 0.01:
+            return False, {
+                "vivienda": vivienda, "tipo": tipo, "fecha": fecha,
+                "valor_en_bd": valor_existente, "valor_en_este_informe": valor,
+            }
+        return False, None
 
 
 def _inferir_nombre_periodo(fecha_inicio: str) -> str:

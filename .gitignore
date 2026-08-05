@@ -10,6 +10,7 @@ procesados/
 cuarentena/
 salidas/
 Excels_Maestros/
+Excels_Maestros_backup*/
 
 # Archivos temporales de Office
 ~$*.xlsx

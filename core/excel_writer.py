@@ -290,16 +290,20 @@ def _escribir_fila_gas(ws, fila: int, factura: dict, es_primera_del_bloque: bool
     if f.get("consumo_kwh") and f.get("termino_variable"):
         ws[f"Q{fila}"] = f"=K{fila}/I{fila}"
 
-    # Cols T/U: consumo invierno / verano (según el mes de la fecha inicial)
-    if f.get("consumo_m3"):
+    # Cols T/U: consumo invierno / verano (según el mes de la fecha inicial).
+    # Referencia la columna que realmente tenga dato: H (m3) si existe, si no
+    # I (kWh) — algunos proveedores/periodos solo informan uno de los dos
+    # (ej. Baser en kWh), y antes esto se quedaba en blanco si no había m3.
+    col_consumo = "H" if f.get("consumo_m3") else ("I" if f.get("consumo_kwh") else None)
+    if col_consumo:
         try:
             mes = int(str(f.get("fecha_inicio") or f.get("fecha_factura"))[5:7])
         except (TypeError, ValueError):
             mes = 0
         if mes in (6, 7, 8, 9):
-            ws[f"U{fila}"] = f"=H{fila}"       # verano
+            ws[f"U{fila}"] = f"={col_consumo}{fila}"       # verano
         elif mes:
-            ws[f"T{fila}"] = f"=H{fila}"       # invierno
+            ws[f"T{fila}"] = f"={col_consumo}{fila}"       # invierno
 
 
 def _escribir_fila_suma_gas(ws, fila_suma: int, fila_ini: int, fila_fin: int):
@@ -311,9 +315,10 @@ def _escribir_fila_suma_gas(ws, fila_suma: int, fila_ini: int, fila_fin: int):
     ws[f"J{fila_suma}"] = f"=SUM(J{fila_ini}:J{fila_fin})"
     ws[f"K{fila_suma}"] = f"=SUM(K{fila_ini}:K{fila_fin})"
     ws[f"L{fila_suma}"] = f"=SUM(L{fila_ini}:L{fila_fin})"
-    # Precio medio m3 y kWh
-    ws[f"P{fila_suma}"] = f"=K{fila_suma}/H{fila_suma}"
-    ws[f"R{fila_suma}"] = f"=K{fila_suma}/I{fila_suma}"
+    # Precio medio m3 y kWh (IFERROR: algunos periodos solo tienen datos de
+    # uno de los dos, dejando el otro en 0 y provocando #DIV/0!)
+    ws[f"P{fila_suma}"] = f"=IFERROR(K{fila_suma}/H{fila_suma},0)"
+    ws[f"R{fila_suma}"] = f"=IFERROR(K{fila_suma}/I{fila_suma},0)"
     ws[f"P{fila_suma}"].number_format = "#,##0.0000"
     ws[f"R{fila_suma}"].number_format = "#,##0.0000"
     for col in ["H", "I", "J", "K", "L"]:
@@ -360,6 +365,18 @@ def _escribir_fila_elec(ws, fila: int, factura: dict):
         ws[f"L{fila}"] = f"=G{fila}/E{fila}"
         ws[f"L{fila}"].number_format = "#,##0.0000"
 
+    # Cols N/O: consumo invierno / verano (según el mes de la fecha inicial),
+    # igual que T/U en GAS — lo usa el reparto estacional ACS/CALEFACCION.
+    if f.get("consumo_total"):
+        try:
+            mes = int(str(f.get("fecha_inicio") or f.get("fecha_factura"))[5:7])
+        except (TypeError, ValueError):
+            mes = 0
+        if mes in (6, 7, 8, 9):
+            ws[f"O{fila}"] = f"=E{fila}"       # verano
+        elif mes:
+            ws[f"N{fila}"] = f"=E{fila}"       # invierno
+
 
 def _escribir_fila_suma_elec(ws, fila_suma: int, fila_ini: int, fila_fin: int):
     ws[f"B{fila_suma}"] = "Suma …."
@@ -372,6 +389,136 @@ def _escribir_fila_suma_elec(ws, fila_suma: int, fila_ini: int, fila_fin: int):
     ws[f"M{fila_suma}"].number_format = "#,##0.0000"
     for col in ["E", "F", "G", "H"]:
         ws[f"{col}{fila_suma}"].number_format = "#,##0.00"
+
+
+# ---------------------------------------------------------------------------
+# REPARTO ESTACIONAL ACS/CALEFACCION (GAS y ELECTRICIDAD)
+# ---------------------------------------------------------------------------
+#
+# Cada factura ya se clasifica como consumo de invierno o de verano al
+# escribirla (ver _escribir_fila_gas/_escribir_fila_elec, columnas T/U en GAS
+# y N/O en ELECTRICIDAD). Lo que faltaba era, por cada bloque de año:
+#   1. Sumar esas columnas en la fila Suma.
+#   2. Calcular, en la fila JUSTO DEBAJO de la Suma, la fraccion invierno/
+#      verano de ESE MISMO bloque (T_ratio = T/H, U_ratio = U/H) — es la
+#      misma "fila ayudante" que usa el Excel de referencia.
+#   3. Con esa fraccion, repartir el gasto del bloque entre ACS y
+#      CALEFACCION: el verano se asume 100% ACS (no hay calefaccion
+#      encendida), y el invierno se pondera con esa misma fraccion de verano
+#      (formula tal cual la usa el Excel de referencia en GAS, replicada
+#      igual aqui: V=(U+T*U_ratio)/H, W=T*(1-U_ratio)/H).
+#   4. El %fijo/%variable del contrato (X/Y en GAS, R/S en ELECTRICIDAD) solo
+#      se calcula de verdad en el periodo MAS RECIENTE (el unico con
+#      facturas desglosadas); todos los periodos anteriores heredan ese
+#      mismo % en cascada hacia atras — igual que en el Excel de referencia.
+#      En ELECTRICIDAD, además, el propio Excel de referencia SOLO calcula
+#      el reparto ACS/CALEF (P/Q) en el periodo más reciente y lo hereda
+#      hacia atrás igual que el %fijo/variable (a diferencia de GAS, que sí
+#      calcula V/W por su cuenta en cada periodo).
+#
+# Como el periodo N+1 no existe todavia cuando se escribe el periodo N (los
+# periodos se vuelcan en orden cronologico), esto se recalcula ENTERO cada
+# vez que se anade un periodo nuevo (ver llamada al final de
+# actualizar_excel_maestro) — barato y siempre deja el libro consistente.
+
+def _listar_bloques_año(ws) -> list[tuple[str, int, int]]:
+    """
+    Devuelve [(nombre_año, fila_bloque, fila_suma), ...] ordenados
+    cronologicamente (los bloques ya se insertan en ese orden en col A).
+    """
+    bloques = []
+    for row in ws.iter_rows(min_col=1, max_col=1):
+        cell = row[0]
+        v = cell.value
+        if isinstance(v, str) and v.strip().count("-") == 1:
+            partes = v.strip().split("-")
+            if len(partes) == 2 and partes[0].isdigit() and partes[1].isdigit():
+                fila_suma = _encontrar_fila_suma(ws, cell.row)
+                if fila_suma:
+                    bloques.append((v.strip(), cell.row, fila_suma))
+    bloques.sort(key=lambda b: b[1])
+    return bloques
+
+
+def recalcular_reparto_estacional_gas(wb):
+    """Rellena T/U/V/W/X/Y de la fila Suma (y su fila ayudante) de cada bloque de GAS."""
+    if "GAS" not in wb.sheetnames:
+        return
+    ws = wb["GAS"]
+    bloques = _listar_bloques_año(ws)
+    if not bloques:
+        return
+
+    for (_, fila_bloque, fila_suma) in bloques:
+        ws[f"T{fila_suma}"] = f"=SUM(T{fila_bloque + 1}:T{fila_suma - 1})"
+        ws[f"U{fila_suma}"] = f"=SUM(U{fila_bloque + 1}:U{fila_suma - 1})"
+
+        # Denominador H (m3) o I (kWh): algunos bloques mezclan facturas de
+        # las dos unidades (cambio de proveedor a mitad de ejercicio: Baser
+        # solo informa kWh). Un bloque asi puede dejar H con un residuo
+        # pequeño de las pocas facturas en m3 e I con el grueso en kWh (o
+        # al reves) — usar "el que sea cero" como antes falla porque ninguno
+        # de los dos es realmente cero. Se usa el MAYOR de los dos: el mas
+        # pequeño es residuo de la unidad minoritaria de ese bloque.
+        d = f"IF(H{fila_suma}>I{fila_suma},H{fila_suma},I{fila_suma})"
+
+        # Fila ayudante (justo debajo de la Suma, en el hueco antes del
+        # siguiente bloque): fraccion invierno/verano de ESTE bloque.
+        fila_ayuda = fila_suma + 1
+        ws[f"T{fila_ayuda}"] = f"=IFERROR(T{fila_suma}/({d}),0)"
+        ws[f"U{fila_ayuda}"] = f"=IFERROR(U{fila_suma}/({d}),0)"
+
+        ws[f"V{fila_suma}"] = f"=IFERROR((U{fila_suma}+T{fila_suma}*U{fila_ayuda})/({d}),0)"
+        ws[f"W{fila_suma}"] = f"=IFERROR(T{fila_suma}*(1-U{fila_ayuda})/({d}),0)"
+
+    # %fijo/%variable: solo el periodo mas reciente lo calcula de verdad
+    # (unico con termino fijo/variable desglosado); el resto hereda en cascada.
+    _, _, fila_ultimo = bloques[-1]
+    ws[f"X{fila_ultimo}"] = f"=IFERROR(J{fila_ultimo}/L{fila_ultimo},0)"
+    ws[f"Y{fila_ultimo}"] = f"=1-X{fila_ultimo}"
+
+    for i in range(len(bloques) - 2, -1, -1):
+        _, _, fila = bloques[i]
+        _, _, fila_sig = bloques[i + 1]
+        ws[f"X{fila}"] = f"=X{fila_sig}"
+        ws[f"Y{fila}"] = f"=Y{fila_sig}"
+
+
+def recalcular_reparto_estacional_elec(wb):
+    """
+    Rellena N/O/P/Q/R/S de la fila Suma de cada bloque de ELECTRICIDAD.
+    A diferencia de GAS, el Excel de referencia solo calcula el reparto
+    ACS/CALEF (P/Q) y %fijo/variable (R/S) en el periodo MAS RECIENTE, y el
+    resto de periodos simplemente heredan ese mismo valor (no cada uno
+    calcula el suyo con su propia estacionalidad, como sí hace GAS).
+    """
+    if "ELECTRICIDAD" not in wb.sheetnames:
+        return
+    ws = wb["ELECTRICIDAD"]
+    bloques = _listar_bloques_año(ws)
+    if not bloques:
+        return
+
+    for (_, fila_bloque, fila_suma) in bloques:
+        ws[f"N{fila_suma}"] = f"=SUM(N{fila_bloque + 1}:N{fila_suma - 1})"
+        ws[f"O{fila_suma}"] = f"=SUM(O{fila_bloque + 1}:O{fila_suma - 1})"
+
+    _, _, fila_ultimo = bloques[-1]
+    fila_ayuda = fila_ultimo + 1
+    ws[f"N{fila_ayuda}"] = f"=IFERROR(N{fila_ultimo}/E{fila_ultimo},0)"
+    ws[f"O{fila_ayuda}"] = f"=IFERROR(O{fila_ultimo}/E{fila_ultimo},0)"
+
+    ws[f"R{fila_ultimo}"] = f"=IFERROR(F{fila_ultimo}/H{fila_ultimo},0)"
+    ws[f"S{fila_ultimo}"] = f"=IFERROR(G{fila_ultimo}/H{fila_ultimo},0)"
+    ws[f"P{fila_ultimo}"] = f"=IFERROR((O{fila_ultimo}+N{fila_ultimo}*O{fila_ayuda})/E{fila_ultimo},0)"
+    ws[f"Q{fila_ultimo}"] = f"=1-P{fila_ultimo}"
+
+    for i in range(len(bloques) - 2, -1, -1):
+        _, _, fila = bloques[i]
+        ws[f"P{fila}"] = f"=P{fila_ultimo}"
+        ws[f"Q{fila}"] = f"=Q{fila_ultimo}"
+        ws[f"R{fila}"] = f"=R{fila_ultimo}"
+        ws[f"S{fila}"] = f"=S{fila_ultimo}"
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +554,23 @@ def _escribir_fila_agua(ws, fila: int, factura: dict):
     if f.get("c_fija"):
         ws[f"W{fila}"] = f.get("c_fija")
         ws[f"W{fila}"].number_format = "#,##0.00"
+
+
+def _escribir_fila_suma_agua(ws, fila_suma: int, fila_ini: int, fila_fin: int):
+    """
+    Escribe la fila 'Suma ….' de un bloque AGUA.
+    Si alguna factura trae c_variable/c_fija desglosados, se suman esas
+    columnas directamente; para el resto (el caso normal hoy) se aplica el
+    mismo reparto 55% variable / 45% fijo que usa el Excel de referencia
+    (V=0.55*T, W=0.45*T), que es lo que referencian ANALISIS!28-29
+    ('CONSUMO AGUA FRIA' / 'FIJO AGUA FRIA').
+    """
+    ws[f"B{fila_suma}"] = "Suma …."
+    ws[f"T{fila_suma}"] = f"=SUM(T{fila_ini}:T{fila_fin})"
+    ws[f"V{fila_suma}"] = f"=0.55*T{fila_suma}"
+    ws[f"W{fila_suma}"] = f"=0.45*T{fila_suma}"
+    for col in ["T", "V", "W"]:
+        ws[f"{col}{fila_suma}"].number_format = "#,##0.00"
 
 
 # ---------------------------------------------------------------------------
@@ -1008,6 +1172,11 @@ def actualizar_excel_maestro(ruta_excel: str, ruta_bd: str,
                 _escribir_fila_agua(ws, fila_datos_inicio + i, f)
                 filas_escritas += 1
 
+            fila_suma_nueva = fila_datos_inicio + len(facturas_agua)
+            _escribir_fila_suma_agua(ws, fila_suma_nueva,
+                                      fila_datos_inicio,
+                                      fila_datos_inicio + len(facturas_agua) - 1)
+
             pestañas_actualizadas.append("AGUA")
         except Exception as e:
             errores.append(f"AGUA: {e}")
@@ -1032,8 +1201,12 @@ def actualizar_excel_maestro(ruta_excel: str, ruta_bd: str,
             fila_ini_blk = fila_datos
             for fecha in fechas_unicas:
                 lecs_fecha = [l for l in lecturas_acs if l["fecha_act"] == fecha]
+                # Si val_act < val_ant, el contador se sustituyó entre ambas
+                # lecturas (un acumulado nunca baja) — esa diferencia no es
+                # consumo real, así que se descarta en vez de sumar un
+                # negativo que arrastraría "m3 consumidos" a valores absurdos.
                 total_consumo = sum(l.get("consumo", 0) or
-                                    (l["val_act"] - l["val_ant"]) for l in lecs_fecha
+                                    max(0, l["val_act"] - l["val_ant"]) for l in lecs_fecha
                                     if l.get("val_ant") is not None)
                 cuota_var = round(total_consumo * precio_acs, 2)
                 fecha_ant = lecs_fecha[0].get("fecha_ant")
@@ -1069,16 +1242,6 @@ def actualizar_excel_maestro(ruta_excel: str, ruta_bd: str,
                 _pf = lambda x: _dt.fromisoformat(str(x)[:10])
                 _primera = min(_pf(l["fecha_ant"]) for l in lecturas_acs if l.get("fecha_ant"))
                 _ultima  = max(_pf(l["fecha_act"]) for l in lecturas_acs)
-                ws.cell(row=fila_bloque, column=3).value = (_ultima - _primera).days
-            except (ValueError, TypeError):
-                pass
-
-            # Días del bloque en la cabecera (lo referencia la hoja ANALISIS)
-            try:
-                from datetime import datetime as _dt
-                _pf = lambda x: _dt.fromisoformat(str(x)[:10])
-                _primera = min(_pf(l["fecha_ant"]) for l in lecturas_cal if l.get("fecha_ant"))
-                _ultima  = max(_pf(l["fecha_act"]) for l in lecturas_cal)
                 ws.cell(row=fila_bloque, column=3).value = (_ultima - _primera).days
             except (ValueError, TypeError):
                 pass
@@ -1145,6 +1308,16 @@ def actualizar_excel_maestro(ruta_excel: str, ruta_bd: str,
                 ws[f"J{fila_datos}"] = f"=SUM(H{fila_datos}:I{fila_datos})"
                 ws[f"M{fila_datos}"] = f"=I{fila_datos}/$C$4/{meses_lote}"
                 fila_datos += 1
+
+            # Días del bloque en la cabecera (lo referencia la hoja ANALISIS)
+            try:
+                from datetime import datetime as _dt
+                _pf = lambda x: _dt.fromisoformat(str(x)[:10])
+                _primera = min(_pf(l["fecha_ant"]) for l in lecturas_cal if l.get("fecha_ant"))
+                _ultima  = max(_pf(l["fecha_act"]) for l in lecturas_cal)
+                ws.cell(row=fila_bloque, column=3).value = (_ultima - _primera).days
+            except (ValueError, TypeError):
+                pass
 
             # Fila Suma del bloque
             ws[f"F{fila_datos}"] = "Suma …."
@@ -1225,6 +1398,14 @@ def actualizar_excel_maestro(ruta_excel: str, ruta_bd: str,
 
         except Exception as e:
             errores.append(f"ANALISIS/RESUMEN: {e}")
+
+    # Reparto estacional ACS/CALEFACCION: se recalcula entero cada vez (barato,
+    # y el periodo N+1 no existe todavía cuando se procesa el periodo N).
+    try:
+        recalcular_reparto_estacional_gas(wb)
+        recalcular_reparto_estacional_elec(wb)
+    except Exception as e:
+        errores.append(f"Reparto estacional GAS/ELECTRICIDAD: {e}")
 
     # Guardar
     wb.save(ruta_excel)
@@ -1400,6 +1581,19 @@ def crear_hoja_analisis(wb, nombre_año: str,
                 if nuevo_valor != cell.value:
                     cell.value = nuevo_valor
 
+    # Si este periodo no tiene bloque en alguna hoja (ej. electricidad venía
+    # incluida en las facturas de gas en 2020-21/2021-22), la sustitución de
+    # arriba no tiene nada que reemplazar y la fórmula se quedaría apuntando
+    # a la fila Suma antigua de la plantilla (de OTRO periodo). Mejor 0 que
+    # una referencia falsa a datos de otro año.
+    if not filas_suma.get("gas"):
+        nueva_hoja["H24"] = 0
+    if not filas_suma.get("elec"):
+        nueva_hoja["H25"] = 0
+    if not filas_suma.get("agua"):
+        nueva_hoja["H28"] = 0
+        nueva_hoja["H29"] = 0
+
     # Actualizar el título del periodo en la hoja (fila 4 col G apunta a DATOS!A6)
     # Añadir la línea del nuevo periodo en DATOS
     ws_datos = wb["DATOS"]
@@ -1506,6 +1700,13 @@ def actualizar_hoja_resumen(wb, nombre_año: str,
                 nueva_celda = ws.cell(row=cell.row, column=nueva_col)
                 if isinstance(cell.value, str) and cell.value.startswith("="):
                     nueva_celda.value = _reescribir_formula(str(cell.value))
+                elif (isinstance(cell.value, str)
+                      and _re.fullmatch(r"\d{4}-\d{4}", cell.value.strip())):
+                    # Etiqueta de año suelta (no fórmula) en secciones que no
+                    # son la cabecera principal (ej. "CALEF.", "CALEF. -
+                    # RELACION DE GASTO"): sin esto se copiaba el año anterior
+                    # sin cambiar, en vez de avanzar al nuevo periodo.
+                    nueva_celda.value = nombre_año
                 elif cell.value is not None:
                     nueva_celda.value = cell.value
 

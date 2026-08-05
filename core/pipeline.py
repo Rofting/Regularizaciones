@@ -153,7 +153,12 @@ class Registro:
 # ---------------------------------------------------------------------------
 # DETECCIÓN DE COMUNIDAD Y PERIODO
 # ---------------------------------------------------------------------------
-RE_CODIGO = re.compile(r'(?<![A-Za-z])(\d{3,6})(?![A-Za-z0-9])')
+# Anclado al principio del nombre: si no hay prefijo "644_"/"644 " explícito,
+# debe devolver None y dejar que procesar_archivo() confíe en el CIF del PDF.
+# Sin el ancla, capturaba cualquier fecha o número de factura del nombre
+# (ej. "Agua Caliente 030725 a 250725.pdf" -> "030725") como si fuera un
+# código de comunidad real, y el archivo se descartaba por no coincidir.
+RE_CODIGO = re.compile(r'^(\d{3,6})[_\-\s]')
 
 
 def detectar_codigo_en_nombre(nombre_archivo: str) -> str | None:
