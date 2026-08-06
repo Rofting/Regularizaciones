@@ -36,6 +36,18 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 
+# Si se lanza desde una consola normal de Windows (doble clic en un .bat,
+# o "python app.py" desde cmd), la consola usa cp1252 y cualquier emoji en
+# un print() de los módulos internos (lector_pdf, carta_writer...) revienta
+# con UnicodeEncodeError incluso con la ventana ya abierta. Ver el mismo
+# arreglo en pipeline.py para más detalle.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 # ---------------------------------------------------------------------------
 # CUSTOMTKINTER (instalación automática si falta)
 # ---------------------------------------------------------------------------

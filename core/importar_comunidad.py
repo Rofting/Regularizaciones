@@ -155,6 +155,15 @@ def importar_vecinos(con: sqlite3.Connection, ws, id_comunidad: int) -> dict[int
     actualizados = 0
 
     for fila_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True)):
+        # La tabla de vecinos termina en la fila "TOTALES" (col C). Debajo de
+        # ella el Excel CAL-ACS trae bloques de precios aplicados por periodo
+        # ("PRECIO ACS PER1", "PRECIO CAL PER1"...) que NO son vecinos — si no
+        # se corta aquí, esas filas se cuelan como "propietarios" fantasma
+        # (visto en producción: codigo_vivienda='0.2', nombre='14.76', y
+        # cuatro filas más con codigo_vivienda='PRECIO CAL PERx').
+        if str(row[2] or "").strip().upper() == "TOTALES":
+            break
+
         cod = row[0]  # columna A: código numérico
         if cod is None:
             continue

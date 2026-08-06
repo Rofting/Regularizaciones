@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 
+# Metadata de PyCharm (específica de cada máquina)
+.idea/
+
 # Datos reales de vecinos y facturas (BD, entrada/salida del pipeline)
 data/
 entrada/

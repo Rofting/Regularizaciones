@@ -36,6 +36,24 @@ import argparse
 from datetime import datetime, date
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# CONSOLA EN UTF-8
+# ---------------------------------------------------------------------------
+# Este script está pensado para lanzarse sin ventana (Programador de tareas
+# de Windows, Power Automate — ver docstring). En esos contextos la consola
+# usa la codepage del sistema (cp1252 en instalaciones en español), no
+# UTF-8, y cualquier print() con un emoji o carácter especial (✅, ⚠️, ━, →…
+# muy usados en los logs de este proyecto) revienta con UnicodeEncodeError
+# ANTES de hacer nada útil. Se reconfigura aquí, al principio de todo, para
+# que también proteja a los módulos que este script importa (carta_writer,
+# lector_pdf, importar_*...), ya que todos comparten el mismo sys.stdout.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # MOVIMIENTO SEGURO DE ARCHIVOS

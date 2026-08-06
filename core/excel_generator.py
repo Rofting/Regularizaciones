@@ -30,6 +30,16 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
+# En consola cp1252 (Windows en español, fuera de una terminal ya en UTF-8)
+# los emoji de _log_defecto (✅, ⚠️...) revientan con UnicodeEncodeError.
+# Ver el mismo arreglo, con más detalle, en pipeline.py.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 sys.path.insert(0, str(Path(__file__).parent))
 import excel_writer
 
