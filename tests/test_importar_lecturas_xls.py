@@ -122,6 +122,18 @@ class ReadingXlsImportTest(unittest.TestCase):
         count = self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0]
         self.assertEqual(0, count)
 
+    def test_isolated_lower_reading_requires_manual_review(self):
+        make_readings_xls(
+            self.xls_path,
+            [(101, "PA2-1A", 100, 112), (102, "PA2-1B", 200, 0)],
+        )
+        with self.assertRaisesRegex(ValueError, "PA2-1B"):
+            import_readings_xls(
+                self.connection, self.community_id, self.period_id, self.xls_path
+            )
+        count = self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0]
+        self.assertEqual(0, count)
+
 
 if __name__ == "__main__":
     unittest.main()

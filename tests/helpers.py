@@ -19,7 +19,7 @@ def cents(value: str | int | float | Decimal) -> int:
 @contextmanager
 def temporary_database() -> Iterator[tuple[sqlite3.Connection, Path]]:
     """Entrega una conexión SQLite temporal y elimina el archivo al salir."""
-    with tempfile.TemporaryDirectory() as directory:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
         path = Path(directory) / "gestion-test.db"
         connection = sqlite3.connect(path)
         connection.row_factory = sqlite3.Row

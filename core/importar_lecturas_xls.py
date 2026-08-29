@@ -113,6 +113,17 @@ def import_readings_xls(
         else 0
     )
     reset_detected = reset_ratio >= 0.8
+    if not reset_detected:
+        pending_review = [
+            property_code
+            for _, property_code, initial, final in candidates
+            if final < initial
+        ]
+        if pending_review:
+            raise ValueError(
+                "Lectura final inferior o ausente; revisión manual requerida: "
+                + ", ".join(pending_review)
+            )
 
     if connection.in_transaction:
         connection.commit()
