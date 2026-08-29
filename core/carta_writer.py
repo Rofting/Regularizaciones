@@ -402,19 +402,22 @@ def _caja_resultado(doc: Document, diferencia_total: float) -> None:
         fondo, color_v = C_FONDO_PAGAR, C_ROJO
         titulo  = "RESULTADO: IMPORTE A PAGAR"
         importe = f"+ {_fmt_euros(abs(diferencia_total))}"
-        explica = ("Su consumo real ha sido superior a lo cobrado a cuenta durante el año. "
+        explica = ("El importe que le corresponde por los gastos reales de la comunidad "
+                   "ha sido superior a lo cobrado a cuenta durante el año. "
                    "La diferencia se cargará en su próximo recibo de comunidad.")
     elif diferencia_total < -0.005:
         fondo, color_v = C_FONDO_DEVOLVER, C_VERDE
         titulo  = "RESULTADO: IMPORTE A SU FAVOR"
         importe = f"− {_fmt_euros(abs(diferencia_total))}"
-        explica = ("Ha pagado a cuenta más de lo que realmente ha consumido. "
+        explica = ("El importe que le corresponde por los gastos reales de la comunidad "
+                   "ha sido inferior a lo cobrado a cuenta durante el año. "
                    "La diferencia se abonará en su próximo recibo de comunidad.")
     else:
         fondo, color_v = C_FONDO_CERO, C_PRIMARIO
         titulo  = "RESULTADO: SIN DIFERENCIA"
         importe = _fmt_euros(0)
-        explica = "Lo cobrado a cuenta coincide con su consumo real. No hay regularización."
+        explica = ("El importe que le corresponde por los gastos reales de la comunidad "
+                   "coincide con lo cobrado a cuenta durante el año. No hay regularización.")
 
     tabla = doc.add_table(rows=2, cols=2)
     _sin_borde_tabla(tabla)
