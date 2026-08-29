@@ -24,6 +24,8 @@ import os
 import argparse
 from datetime import datetime
 
+import db_migrations
+
 RUTA_BD_DEFAULT = os.path.join(
     os.path.expanduser("~"),
     "GestionFincas", "data", "gestion.db"
@@ -265,8 +267,14 @@ def crear_bd(ruta_bd: str) -> None:
             con.execute(sql)
         for sql in INDICES:
             con.execute(sql)
+        aplicar_migraciones(con)
         con.commit()
     print(f"✅ BD lista en: {ruta_bd}")
+
+
+def aplicar_migraciones(con: sqlite3.Connection) -> int:
+    """Actualiza una conexión existente al esquema más reciente."""
+    return db_migrations.migrate(con)
 
 
 def conectar(ruta_bd: str) -> sqlite3.Connection:
