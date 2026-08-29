@@ -95,7 +95,7 @@ def _importar_modulos():
     modulos = {}
     for nombre in ["gestor_bd", "lector_pdf", "motor_reparto",
                    "excel_writer", "carta_writer", "importar_lecturas_metrigest",
-                   "importar_excel_maestro", "letter_settings"]:
+                   "importar_excel_maestro", "letter_settings", "regularization_flow"]:
         try:
             modulos[nombre] = __import__(nombre)
         except ImportError:
@@ -140,7 +140,7 @@ def mover_seguro(origen, destino, log=None, intentos: int = 3,
 class AppGestionFincas(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color=C["fondo"])
-        self.title("Gestión de Fincas — Meditrade")
+        self.title("Regularización de facturas")
         self.geometry("980x720")
         self.minsize(860, 620)
         self.resizable(True, True)
@@ -173,13 +173,13 @@ class AppGestionFincas(ctk.CTk):
         cabecera.pack(fill="x")
         cabecera.pack_propagate(False)
 
-        ctk.CTkLabel(cabecera, text="Gestión de Fincas",
+        ctk.CTkLabel(cabecera, text="Regularización de facturas",
                      font=UIM.fuente(20, "bold"),
                      text_color=C["texto"]).pack(side="left",
                                                  padx=(24, 8), pady=14)
         ctk.CTkLabel(cabecera, text="●", font=UIM.fuente(9),
                      text_color=C["primario"]).pack(side="left", pady=14)
-        ctk.CTkLabel(cabecera, text="Meditrade",
+        ctk.CTkLabel(cabecera, text="Flujo guiado · cualquier despacho",
                      font=UIM.fuente(12),
                      text_color=C["texto_sec"]).pack(side="left",
                                                      padx=8, pady=14)
@@ -238,6 +238,18 @@ class AppGestionFincas(ctk.CTk):
             font=UIM.fuente(12), text_color=C["primario"],
             anchor="w", justify="left")
         self.lbl_banner.pack(fill="x", padx=14, pady=7)
+        self.etapas = {}
+        etapas = (("fuentes", "Fuentes"), ("validacion", "Validación"),
+                  ("calculo", "Cálculo"), ("cartas", "Cartas"), ("fin", "Listo"))
+        tracker = ctk.CTkFrame(self.banner_periodo, fg_color="transparent")
+        tracker.pack(fill="x", padx=14, pady=(0, 9))
+        for key, label in etapas:
+            item = ctk.CTkFrame(tracker, fg_color="transparent")
+            item.pack(side="left", expand=True, fill="x")
+            dot = ctk.CTkLabel(item, text="○", font=UIM.fuente(16, "bold"), text_color=C["texto_sec"])
+            dot.pack(side="left")
+            ctk.CTkLabel(item, text=label, font=UIM.fuente(10), text_color=C["texto_sec"]).pack(side="left", padx=3)
+            self.etapas[key] = dot
 
         # ── CUERPO PRINCIPAL ────────────────────────────────────────────────
         cuerpo = ctk.CTkFrame(self, fg_color="transparent")
@@ -284,12 +296,13 @@ class AppGestionFincas(ctk.CTk):
                          anchor="w", padx=18, pady=(0, 6))
 
         pasos = [
+            ("🧾  Regularización guiada", self._accion_regularizacion_guiada),
             ("📥  Procesar facturas", self._accion_procesar_facturas),
             ("📊  Regenerar Excel",   self._accion_actualizar_excel),
             ("🔢  Calcular reparto",  self._accion_calcular_reparto),
             ("✉️  Generar cartas",    self._accion_generar_cartas),
         ]
-        claves = ["📥  Procesar Facturas", "📊  Actualizar Excel",
+        claves = ["🧾  Regularización guiada", "📥  Procesar Facturas", "📊  Actualizar Excel",
                   "🔢  Calcular Reparto", "✉️  Generar Cartas"]
         for (texto, cmd), clave in zip(pasos, claves):
             btn = ctk.CTkButton(
@@ -623,6 +636,82 @@ class AppGestionFincas(ctk.CTk):
 
     def _accion_procesar_facturas(self):
         self._en_hilo(self._procesar_facturas_impl)
+
+    def _accion_regularizacion_guiada(self):
+        if not self._validar_seleccion():
+            return
+        referencia = filedialog.askopenfilename(
+            title="Selecciona el Excel de referencia económica",
+            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")],
+        )
+        if not referencia:
+            return
+        propietarios = filedialog.askopenfilename(
+            title="Selecciona el listado de propietarios",
+            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+        )
+        if not propietarios:
+            return
+        lecturas = filedialog.askopenfilename(
+            title="Selecciona el Excel de lecturas de contadores",
+            filetypes=[("Excel", "*.xls *.xlsx"), ("Todos", "*.*")],
+        )
+        if not lecturas:
+            return
+        self._en_hilo(lambda: self._regularizacion_guiada_impl(referencia, propietarios, lecturas))
+
+    def _regularizacion_guiada_impl(self, referencia, propietarios, lecturas):
+        flujo = MOD.get("regularization_flow")
+        gbd = MOD.get("gestor_bd")
+        if not flujo or not gbd:
+            self.log("❌ No está disponible el flujo de regularización guiada", "error")
+            return
+        self._estado("Importando fuentes…", procesando=True)
+        self.log("━━━ REGULARIZACIÓN GUIADA ━━━", "titulo")
+        def progress(stage, details):
+            labels = {
+                "reading_owners": ("fuentes", "Leyendo propietarios…"),
+                "reading_reference": ("fuentes", "Leyendo Excel de referencia…"),
+                "validating_reference": ("validacion", "Validando importes y periodo…"),
+                "reading_individual_readings": ("fuentes", "Leyendo contadores…"),
+                "individual_readings_imported": ("validacion", "Lecturas validadas"),
+                "period_calculated": ("calculo", "Resultados calculados"),
+                "regularization_completed": ("fin", "Regularización lista"),
+            }
+            if stage in labels:
+                key, text = labels[stage]
+                self._actualizar_etapa(key)
+                self._estado(text, procesando=True)
+                self.log(f"  ▸ {text}", "info")
+                if stage == "individual_readings_imported" and details.get("carried_forward"):
+                    self.log(f"  ⚠️ {details['carried_forward']} contador(es) con lectura anterior arrastrada", "aviso")
+        con = gbd.conectar(str(RUTA_BD))
+        try:
+            resultado = flujo.run_regularization(
+                con, self.id_comunidad, referencia, propietarios, lecturas, progress=progress
+            )
+        finally:
+            con.close()
+        self.id_periodo = resultado["period_id"]
+        try:
+            self.after(0, self._cargar_periodos)
+        except Exception:
+            pass
+        self._actualizar_etapa("cartas")
+        self.log(f"  ✅ {resultado['results']} resultados calculados; conciliación cuadrada", "ok")
+        self.log("  ℹ️ Ahora puedes generar el Excel y las cartas desde los botones del flujo.", "info")
+        self.after(0, self._accion_generar_cartas)
+
+    def _actualizar_etapa(self, activa):
+        def _actualizar():
+            colores = {"fuentes": C["primario"], "validacion": C["primario"], "calculo": C["primario"], "cartas": C["primario"], "fin": C["exito"]}
+            orden = ["fuentes", "validacion", "calculo", "cartas", "fin"]
+            for key, dot in getattr(self, "etapas", {}).items():
+                if orden.index(key) <= orden.index(activa):
+                    dot.configure(text="●", text_color=colores.get(key, C["primario"]))
+                else:
+                    dot.configure(text="○", text_color=C["texto_sec"])
+        self.after(0, _actualizar)
 
     def _accion_actualizar_excel(self):
         self._en_hilo(self._actualizar_excel_impl)

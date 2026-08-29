@@ -100,8 +100,8 @@ def familia() -> str:
     global _familia_cache
     if _familia_cache is None:
         disponibles = set(tkfont.families())
-        for candidata in ("Segoe UI Variable Display", "Segoe UI Variable",
-                          "Inter", "Segoe UI"):
+        for candidata in ("Aptos Display", "Inter", "Trebuchet MS",
+                          "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI"):
             if candidata in disponibles:
                 _familia_cache = candidata
                 break
