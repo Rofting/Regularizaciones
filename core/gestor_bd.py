@@ -286,6 +286,8 @@ def conectar(ruta_bd: str) -> sqlite3.Connection:
     con = sqlite3.connect(ruta_bd)
     con.execute("PRAGMA foreign_keys = ON")
     con.row_factory = sqlite3.Row   # acceso por nombre de columna: fila['nombre']
+    # Las instalaciones existentes también deben recibir las migraciones nuevas.
+    aplicar_migraciones(con)
     return con
 
 
