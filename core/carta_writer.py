@@ -29,6 +29,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+try:
+    from consumption_charts import render_consumption_charts
+except ImportError:
+    render_consumption_charts = None
+
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -52,7 +57,7 @@ except ImportError as _e:
 # PALETA MODERNA (índigo corporativo + semáforo suave)
 # ---------------------------------------------------------------------------
 
-# Colores corporativos Meditrade: azul marino + rojo del logo
+# Paleta corporativa configurable: azul marino + rojo de acento
 C_PRIMARIO       = "#1B365D"   # azul marino corporativo (cabeceras)
 C_PRIMARIO_MED   = "#24507A"   # azul medio (banda secundaria)
 C_PRIMARIO_SUAVE = "#EAF1F8"   # azul muy claro (fondos de cabecera de columna)
@@ -71,7 +76,7 @@ C_BARRA_REAL     = "#1B365D"   # azul marino (real)
 C_ACENTO_2       = "#C8102E"   # rojo (ACS en el donut)
 C_BARRA_MEDIA    = "#CBD5E1"   # gris (media comunidad)
 C_FONDO_GRAF     = "#FFFFFF"
-FUENTE_CARTA     = "Segoe UI"
+FUENTE_CARTA     = "Trebuchet MS"
 
 MESES_ES = {
     1: "enero",    2: "febrero",  3: "marzo",    4: "abril",
@@ -111,6 +116,7 @@ def _obtener_repartos_vecino(con: sqlite3.Connection,
     """, (id_propietario, id_periodo)).fetchall()
 
     datos = {
+        "id_propietario": id_propietario,
         "vecino": {
             "nombre":      v["nombre_propietario"],
             "vivienda":    v["codigo_vivienda"],
@@ -324,7 +330,7 @@ def _bloque_cabecera(doc: Document, nombre_comunidad: str,
     c2 = tabla.rows[1].cells[0]
     _set_color_celda(c2, C_PRIMARIO_MED)
     _escribir_celda(c2,
-                    f"{nombre_comunidad.upper()}   ·   PERIODO {nombre_periodo}   ·   Meditrade Administración",
+                    f"{nombre_comunidad.upper()}   ·   PERIODO {nombre_periodo}   ·   Administración de Fincas",
                     negrita=False, tamaño=8, color_hex=C_TEXTO_HEADER,
                     alineacion=WD_ALIGN_PARAGRAPH.CENTER, despues=1)
 
@@ -707,7 +713,7 @@ def _insertar_imagen(doc: Document, ruta_png: str, ancho_cm: float = 16.0):
             p = doc.add_paragraph()
             _quitar_margen_parrafo(p, 3)
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.add_run().add_picture(ruta_png, width=Cm(ancho_cm))
+            p.add_run().add_picture(str(ruta_png), width=Cm(ancho_cm))
         finally:
             try:
                 os.remove(ruta_png)
@@ -929,8 +935,19 @@ def generar_carta(datos: dict, ruta_plantilla: str, ruta_salida: str) -> str:
                    dif_acs   = acs.get("diferencia", 0.0) if acs else 0.0,
                    total_general = total_general)
 
-    # 6. GRÁFICA ÚNICA (tres paneles en una tira)
-    png = _grafica_unica(calef, acs, medias)
+    # 6. COMPARATIVA DE CONSUMO (franjas de vecinos + histórico propio)
+    grafica = datos.get("consumo_grafica") or {}
+    png = None
+    if render_consumption_charts and grafica:
+        png = render_consumption_charts(
+            tempfile.mktemp(suffix=".png"),
+            owner_consumption=grafica.get("owner_consumption", 0),
+            neighbor_consumptions=grafica.get("neighbor_consumptions", []),
+            history=grafica.get("history", []),
+            unit=grafica.get("unit", "m³"),
+        )
+    if not png:
+        png = _grafica_unica(calef, acs, medias)
     if png:
         _insertar_imagen(doc, png, 16.2)
     else:
@@ -943,7 +960,7 @@ def generar_carta(datos: dict, ruta_plantilla: str, ruta_salida: str) -> str:
              "Puede verificar los datos con sus recibos y comunicarnos cualquier discrepancia "
              "en un plazo de 30 días. Quedamos a su disposición. Reciba un cordial saludo.",
              tam=8.5, despues=4)
-    _parrafo(doc, "La Administración  ·  Meditrade Administración de Fincas",
+    _parrafo(doc, "La Administración  ·  Administración de Fincas",
              tam=8.5, negrita=True, alin=WD_ALIGN_PARAGRAPH.RIGHT, despues=0)
 
     doc.save(ruta_salida)
@@ -1006,6 +1023,30 @@ def generar_todas_las_cartas(ruta_bd: str,
             }
 
     todos = obtener_todos_los_vecinos_con_repartos(con, id_comunidad, id_periodo)
+    consumo_vecinos = [
+        float((datos.get("acs") or {}).get("consumo_real") or 0.0)
+        for datos in todos
+    ]
+    # Conserva ejercicios anteriores cuando existen lecturas acumuladas.
+    historicos_por_vecino = {}
+    for datos in todos:
+        owner_id = datos.get("id_propietario")
+        historicos = con.execute(
+            """
+            SELECT per.nombre, ini.valor_acumulado, fin.valor_acumulado
+            FROM periodos per
+            JOIN lecturas_vecino ini ON ini.id_periodo=per.id_periodo
+                AND ini.id_propietario=? AND ini.tipo='ACS' AND ini.fecha_lectura=per.fecha_inicio
+            JOIN lecturas_vecino fin ON fin.id_periodo=per.id_periodo
+                AND fin.id_propietario=? AND fin.tipo='ACS' AND fin.fecha_lectura=per.fecha_fin
+            WHERE per.id_comunidad=? AND per.id_periodo<>?
+            ORDER BY per.fecha_inicio
+            """,
+            (owner_id, owner_id, id_comunidad, id_periodo),
+        ).fetchall()
+        historicos_por_vecino[owner_id] = [
+            (row[0], max(0.0, float(row[2]) - float(row[1]))) for row in historicos
+        ]
     con.close()
 
     if not todos:
@@ -1020,6 +1061,12 @@ def generar_todas_las_cartas(ruta_bd: str,
         datos["comunidad"]  = nombre_comunidad
         datos["medias"]     = medias
         datos["cuota_fija"] = cuota_fija
+        datos["consumo_grafica"] = {
+            "owner_consumption": float((datos.get("acs") or {}).get("consumo_real") or 0.0),
+            "neighbor_consumptions": consumo_vecinos,
+            "history": historicos_por_vecino.get(datos.get("id_propietario"), []),
+            "unit": "m³",
+        }
 
         vivienda = re.sub(r"[^\w\s-]", "", datos["vecino"]["vivienda"]).strip()
         vivienda = re.sub(r"\s+", "_", vivienda).upper()
