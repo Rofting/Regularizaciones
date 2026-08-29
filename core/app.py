@@ -158,6 +158,7 @@ class AppGestionFincas(ctk.CTk):
         self.log("", "bienvenida")
         self.log("  👋 Bienvenido. Selecciona comunidad y periodo,", "bienvenida")
         self.log("     deja los PDFs/Excels en entrada/ y pulsa PROCESAR TODO.", "bienvenida")
+        self.log("  ✦ Flujo guiado activo · selección de fuentes y conceptos disponible", "bienvenida")
         UIM.aparecer(self)
         # Mostrar selector de periodo al arrancar (tras un breve retraso
         # para que la ventana principal ya esté renderizada)
