@@ -95,7 +95,7 @@ def _importar_modulos():
     modulos = {}
     for nombre in ["gestor_bd", "lector_pdf", "motor_reparto",
                    "excel_writer", "carta_writer", "importar_lecturas_metrigest",
-                   "importar_excel_maestro"]:
+                   "importar_excel_maestro", "letter_settings"]:
         try:
             modulos[nombre] = __import__(nombre)
         except ImportError:
@@ -631,7 +631,12 @@ class AppGestionFincas(ctk.CTk):
         self._en_hilo(self._calcular_reparto_impl)
 
     def _accion_generar_cartas(self):
-        self._en_hilo(self._generar_cartas_impl)
+        if not self._validar_seleccion():
+            return
+        selected = self._dialogo_conceptos_cartas()
+        if selected is None:
+            return
+        self._en_hilo(lambda: self._generar_cartas_impl(selected))
 
     def _accion_todo_en_uno(self):
         self._en_hilo(self._todo_en_uno_impl)
@@ -974,7 +979,74 @@ class AppGestionFincas(ctk.CTk):
         else:
             self.log(f"  ❌ {resultado.get('error', 'Error desconocido')}", "error")
 
-    def _generar_cartas_impl(self):
+    def _dialogo_conceptos_cartas(self):
+        """Pide las partidas a incluir y las guarda para la comunidad activa."""
+        settings = MOD.get("letter_settings")
+        if not settings or not MOD.get("gestor_bd"):
+            return ()
+        try:
+            con = MOD["gestor_bd"].conectar(str(RUTA_BD))
+            concepts = settings.available_concepts(con)
+            selected = set(settings.load_selected_concepts(con, self.id_comunidad))
+            con.close()
+        except Exception as exc:
+            self.log(f"❌ No se pudo cargar la configuración de conceptos: {exc}", "error")
+            return None
+        if not concepts:
+            self.log("⚠️  No hay conceptos disponibles para esta comunidad", "aviso")
+            return None
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Conceptos de la carta")
+        dialog.geometry("480x520")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        ctk.CTkLabel(dialog, text="¿Qué conceptos quieres incluir?",
+                     font=UIM.fuente(17, "bold"), text_color=C["texto"]).pack(
+                         anchor="w", padx=24, pady=(22, 4))
+        ctk.CTkLabel(dialog, text="La selección se guarda para esta comunidad y se puede cambiar en cada generación.",
+                     font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=420,
+                     justify="left").pack(anchor="w", padx=24, pady=(0, 14))
+        variables = {}
+        panel = ctk.CTkFrame(dialog, fg_color=C["acento_suave"], corner_radius=12)
+        panel.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        for concept in concepts:
+            variable = tk.BooleanVar(value=concept.key in selected)
+            variables[concept.key] = variable
+            ctk.CTkCheckBox(panel, text=concept.label, variable=variable,
+                            font=UIM.fuente(12), text_color=C["texto"]).pack(
+                                anchor="w", padx=18, pady=8)
+        result = {"value": None}
+        def accept():
+            chosen = tuple(key for key, variable in variables.items() if variable.get())
+            if not chosen:
+                messagebox.showwarning("Selección incompleta", "Selecciona al menos un concepto.", parent=dialog)
+                return
+            try:
+                con = MOD["gestor_bd"].conectar(str(RUTA_BD))
+                result["value"] = settings.save_selected_concepts(con, self.id_comunidad, chosen)
+                con.close()
+            except Exception as exc:
+                messagebox.showerror("No se pudo guardar", str(exc), parent=dialog)
+                return
+            dialog.destroy()
+        def cancel():
+            dialog.destroy()
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(fill="x", padx=20, pady=(0, 18))
+        ctk.CTkButton(buttons, text="Cancelar", command=cancel, width=110,
+                      fg_color="transparent", border_width=1, border_color=C["borde"],
+                      text_color=C["texto_sec"]).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(buttons, text="Continuar", command=accept, width=130,
+                      fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        self.wait_window(dialog)
+        if result["value"]:
+            self.log("  ✓ Conceptos seleccionados: " + ", ".join(result["value"]), "info")
+        return result["value"]
+
+    def _generar_cartas_impl(self, selected_concepts=None):
         if not self._validar_seleccion():
             return
         if not MOD.get("carta_writer"):
@@ -986,6 +1058,8 @@ class AppGestionFincas(ctk.CTk):
 
         self._estado("Generando cartas…", procesando=True)
         self.log("━━━ GENERAR CARTAS ━━━", "titulo")
+        if selected_concepts:
+            self.log(f"  ▸ Conceptos incluidos: {', '.join(selected_concepts)}", "info")
 
         nombre_periodo = self.periodo_actual.get()
         carpeta_salida = RUTA_CARTAS / nombre_periodo
