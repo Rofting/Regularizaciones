@@ -122,17 +122,25 @@ class ReadingXlsImportTest(unittest.TestCase):
         count = self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0]
         self.assertEqual(0, count)
 
-    def test_isolated_lower_reading_requires_manual_review(self):
+    def test_isolated_lower_reading_carries_last_valid_value(self):
         make_readings_xls(
             self.xls_path,
             [(101, "PA2-1A", 100, 112), (102, "PA2-1B", 200, 0)],
         )
-        with self.assertRaisesRegex(ValueError, "PA2-1B"):
-            import_readings_xls(
-                self.connection, self.community_id, self.period_id, self.xls_path
-            )
-        count = self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0]
-        self.assertEqual(0, count)
+        summary = import_readings_xls(
+            self.connection, self.community_id, self.period_id, self.xls_path
+        )
+        carried = self.connection.execute(
+            """
+            SELECT valor_acumulado, estado, metodo_estimacion, notas
+            FROM lecturas_vecino
+            WHERE id_propietario=(SELECT id_propietario FROM propietarios WHERE codigo_vivienda='PA2-1B')
+              AND fecha_lectura='2025-07-31'
+            """
+        ).fetchone()
+        self.assertEqual((200.0, "estimado", "arrastre_lectura_anterior"), carried[:3])
+        self.assertIn("lectura informada=0.0", carried[3])
+        self.assertEqual(("PA2-1B",), summary.carried_forward_properties)
 
 
 if __name__ == "__main__":

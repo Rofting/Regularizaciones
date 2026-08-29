@@ -22,6 +22,7 @@ class ReadingImportSummary:
     unresolved_properties: tuple[str, ...]
     reset_detected: bool
     participating_properties: int
+    carried_forward_properties: tuple[str, ...] = ()
 
 
 def _key(value) -> str:
@@ -113,35 +114,42 @@ def import_readings_xls(
         else 0
     )
     reset_detected = reset_ratio >= 0.8
-    if not reset_detected:
-        pending_review = [
-            property_code
-            for _, property_code, initial, final in candidates
-            if final < initial
-        ]
-        if pending_review:
-            raise ValueError(
-                "Lectura final inferior o ausente; revisión manual requerida: "
-                + ", ".join(pending_review)
-            )
+    carried_forward = tuple(
+        property_code
+        for _, property_code, initial, final in candidates
+        if not reset_detected and final < initial
+    )
 
     if connection.in_transaction:
         connection.commit()
     connection.execute("BEGIN IMMEDIATE")
     inserted = duplicates = 0
     try:
-        for owner_id, _, initial, final in candidates:
+        for owner_id, property_code, initial, final in candidates:
             stored_initial = 0.0 if reset_detected else initial
             note = f"reinicio anual; lectura previa={initial}" if reset_detected else None
-            for reading_date, value in ((period[0], stored_initial), (period[1], final)):
+            final_is_carried = property_code in carried_forward
+            final_value = initial if final_is_carried else final
+            final_state = "estimado" if final_is_carried else "real"
+            final_method = "arrastre_lectura_anterior" if final_is_carried else None
+            final_note = (
+                f"lectura informada={final}; se mantiene lectura anterior={initial}; "
+                "pendiente de lectura posterior"
+                if final_is_carried
+                else note
+            )
+            for reading_date, value, state, method, reading_note in (
+                (period[0], stored_initial, "real", None, note),
+                (period[1], final_value, final_state, final_method, final_note),
+            ):
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO lecturas_vecino
                         (id_propietario, id_periodo, tipo, fecha_lectura,
-                         valor_acumulado, estado, fuente, notas)
-                    VALUES (?, ?, ?, ?, ?, 'real', 'excel_lecturas', ?)
+                        valor_acumulado, estado, metodo_estimacion, fuente, notas)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'excel_lecturas', ?)
                     """,
-                    (owner_id, id_periodo, service, reading_date, value, note),
+                    (owner_id, id_periodo, service, reading_date, value, state, method, reading_note),
                 )
                 if cursor.rowcount:
                     inserted += 1
@@ -159,6 +167,7 @@ def import_readings_xls(
                 "duplicates": duplicates,
                 "participants": len(candidates),
                 "reset_detected": reset_detected,
+                "carried_forward": len(carried_forward),
             },
         )
     return ReadingImportSummary(
@@ -167,4 +176,5 @@ def import_readings_xls(
         tuple(),
         reset_detected,
         len(candidates),
+        carried_forward,
     )
