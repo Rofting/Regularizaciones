@@ -27,21 +27,21 @@ import customtkinter as ctk
 # PALETA — cada clave: (modo claro, modo oscuro)
 # ---------------------------------------------------------------------------
 C = {
-    "fondo":              ("#EEF0F6", "#0F1117"),
+    "fondo":              ("#F3F6F8", "#0E1718"),
     "panel":              ("#FFFFFF", "#171A23"),
-    "panel_2":            ("#F7F8FC", "#1D2130"),
-    "borde":              ("#E4E7EE", "#262B38"),
-    "primario":           ("#2563EB", "#5B9BFF"),
-    "primario_hover":     ("#1D4ED8", "#7DB0FF"),
-    "acento_suave":       ("#EBF2FF", "#1C2A44"),
-    "acento_suave_hover": ("#DBE8FF", "#253758"),
+    "panel_2":            ("#F8FAFB", "#172224"),
+    "borde":              ("#D9E3E6", "#2A3A3C"),
+    "primario":           ("#0F766E", "#48B8AD"),
+    "primario_hover":     ("#0B615B", "#69D1C5"),
+    "acento_suave":       ("#E5F4F1", "#173B39"),
+    "acento_suave_hover": ("#D3ECE8", "#20514D"),
     "texto":              ("#0F172A", "#E7EAF3"),
     "texto_sec":          ("#64748B", "#8B93A7"),
     "exito":              ("#059669", "#34D399"),
     "alerta":             ("#DC2626", "#F87171"),
     "aviso":              ("#D97706", "#FBBF24"),
-    "banner_abierto":     ("#EBF2FF", "#1C2A44"),
-    "banner_cerrado":     ("#F3F4F6", "#1A1D27"),
+    "banner_abierto":     ("#E5F4F1", "#173B39"),
+    "banner_cerrado":     ("#EEF2F3", "#182426"),
     "log_fondo":          ("#0D1117", "#0D1117"),
 }
 
@@ -85,7 +85,7 @@ def guardar_preferencia(tema: str):
 def iniciar():
     """Configura CustomTkinter antes de crear la ventana principal."""
     ctk.set_appearance_mode(cargar_preferencia())
-    ctk.set_default_color_theme("blue")
+    ctk.set_default_color_theme("green")
     ctk.set_widget_scaling(1.0)
 
 
