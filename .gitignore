@@ -7,6 +7,7 @@ __pycache__/
 # Configuración local y prototipos temporales de asistentes
 .claude/
 .superpowers/
+.worktrees/
 
 # Metadata de PyCharm (específica de cada máquina)
 .idea/
