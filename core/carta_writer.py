@@ -91,7 +91,8 @@ MESES_ES = {
 
 def _obtener_repartos_vecino(con: sqlite3.Connection,
                               id_propietario: int,
-                              id_periodo: int) -> dict:
+                              id_periodo: int,
+                              selected_concepts: tuple[str, ...] | None = None) -> dict:
     """Devuelve todos los datos necesarios para la carta de un vecino."""
     cur = con.cursor()
 
@@ -114,6 +115,49 @@ def _obtener_repartos_vecino(con: sqlite3.Connection,
         WHERE id_propietario = ? AND id_periodo = ?
         ORDER BY tipo_suministro
     """, (id_propietario, id_periodo)).fetchall()
+
+    if not repartos:
+        # Formato nuevo de la fase 1: resultados trazables en céntimos.
+        nuevos = cur.execute(
+            """
+            SELECT r.concept_key, r.consumption, r.billed_cents,
+                   r.actual_cents, r.difference_cents
+            FROM owner_concept_results r
+            WHERE r.id_propietario=? AND r.id_periodo=?
+            ORDER BY r.concept_key
+            """,
+            (id_propietario, id_periodo),
+        ).fetchall()
+        agrupados = {}
+        for row in nuevos:
+            if selected_concepts and row[0] not in selected_concepts:
+                continue
+            tipo = "ACS" if str(row[0]).startswith("acs_") else "CALEFACCION"
+            item = agrupados.setdefault(tipo, {
+                "tipo_suministro": tipo, "lectura_inicial": None,
+                "lectura_final": None, "consumo_real": None,
+                "importe_cobrado": 0.0, "importe_real": 0.0,
+                "diferencia": 0.0, "notas": None,
+            })
+            item["importe_cobrado"] += (row[2] or 0) / 100
+            item["importe_real"] += (row[3] or 0) / 100
+            item["diferencia"] += (row[4] or 0) / 100
+            if row[1] is not None:
+                item["consumo_real"] = (item["consumo_real"] or 0.0) + float(row[1])
+        reading_rows = cur.execute(
+            """
+            SELECT fecha_lectura, valor_acumulado, estado, notas
+            FROM lecturas_vecino
+            WHERE id_propietario=? AND id_periodo=? AND tipo='ACS'
+            ORDER BY fecha_lectura
+            """, (id_propietario, id_periodo)
+        ).fetchall()
+        if reading_rows and "ACS" in agrupados:
+            agrupados["ACS"]["lectura_inicial"] = reading_rows[0][1]
+            agrupados["ACS"]["lectura_final"] = reading_rows[-1][1]
+            if any(row[2] == "estimado" for row in reading_rows):
+                agrupados["ACS"]["notas"] = next((row[3] for row in reading_rows if row[3]), None)
+        repartos = tuple(agrupados.values())
 
     datos = {
         "id_propietario": id_propietario,
@@ -151,7 +195,8 @@ def _obtener_repartos_vecino(con: sqlite3.Connection,
 
 def obtener_todos_los_vecinos_con_repartos(con: sqlite3.Connection,
                                             id_comunidad: int,
-                                            id_periodo: int) -> list:
+                                            id_periodo: int,
+                                            selected_concepts: tuple[str, ...] | None = None) -> list:
     """Devuelve la lista completa de vecinos con sus repartos calculados."""
     cur = con.cursor()
     vecinos = cur.execute("""
@@ -161,10 +206,20 @@ def obtener_todos_los_vecinos_con_repartos(con: sqlite3.Connection,
         WHERE p.id_comunidad = ? AND r.id_periodo = ?
         ORDER BY p.codigo_vivienda
     """, (id_comunidad, id_periodo)).fetchall()
+    if not vecinos:
+        vecinos = cur.execute(
+            """
+            SELECT DISTINCT p.id_propietario
+            FROM owner_concept_results r
+            JOIN propietarios p ON p.id_propietario=r.id_propietario
+            WHERE p.id_comunidad=? AND r.id_periodo=?
+            ORDER BY p.codigo_vivienda
+            """, (id_comunidad, id_periodo)
+        ).fetchall()
 
     resultado = []
     for (id_prop,) in vecinos:
-        datos = _obtener_repartos_vecino(con, id_prop, id_periodo)
+        datos = _obtener_repartos_vecino(con, id_prop, id_periodo, selected_concepts)
         if datos:
             resultado.append(datos)
     return resultado
@@ -975,7 +1030,8 @@ def generar_todas_las_cartas(ruta_bd: str,
                               id_comunidad: int,
                               nombre_periodo: str,
                               ruta_plantilla: str,
-                              carpeta_salida: str) -> dict:
+                              carpeta_salida: str,
+                              selected_concepts: tuple[str, ...] | None = None) -> dict:
     """Genera una carta por cada vecino con repartos calculados para el periodo."""
     os.makedirs(carpeta_salida, exist_ok=True)
 
@@ -1022,7 +1078,7 @@ def generar_todas_las_cartas(ruta_bd: str,
                 "diferencia": round(real - cobrado, 2),
             }
 
-    todos = obtener_todos_los_vecinos_con_repartos(con, id_comunidad, id_periodo)
+    todos = obtener_todos_los_vecinos_con_repartos(con, id_comunidad, id_periodo, selected_concepts)
     consumo_vecinos = [
         float((datos.get("acs") or {}).get("consumo_real") or 0.0)
         for datos in todos

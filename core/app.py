@@ -1070,7 +1070,8 @@ class AppGestionFincas(ctk.CTk):
             id_comunidad=self.id_comunidad,
             nombre_periodo=nombre_periodo,
             ruta_plantilla=str(RUTA_PLANTILLA),
-            carpeta_salida=str(carpeta_salida)
+            carpeta_salida=str(carpeta_salida),
+            selected_concepts=selected_concepts,
         )
 
         if resultado.get("ok"):
