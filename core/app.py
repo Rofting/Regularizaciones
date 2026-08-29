@@ -180,7 +180,7 @@ class AppGestionFincas(ctk.CTk):
                                                  padx=(24, 8), pady=14)
         ctk.CTkLabel(cabecera, text="●", font=UIM.fuente(9),
                      text_color=C["primario"]).pack(side="left", pady=14)
-        ctk.CTkLabel(cabecera, text="Flujo guiado · cualquier despacho",
+        ctk.CTkLabel(cabecera, text="Flujo guiado · edición 2 · cualquier despacho",
                      font=UIM.fuente(12),
                      text_color=C["texto_sec"]).pack(side="left",
                                                      padx=8, pady=14)
