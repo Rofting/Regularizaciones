@@ -1,7 +1,12 @@
 # Entorno Python
 .venv/
+.venv-fase1/
 __pycache__/
 *.pyc
+
+# Configuración local y prototipos temporales de asistentes
+.claude/
+.superpowers/
 
 # Metadata de PyCharm (específica de cada máquina)
 .idea/
