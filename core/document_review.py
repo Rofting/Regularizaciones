@@ -80,6 +80,33 @@ def record_candidates(connection: sqlite3.Connection, document_id: int,
             )
 
 
+def record_candidates_if_missing(
+    connection: sqlite3.Connection,
+    document_id: int,
+    candidates: Mapping[str, str | None],
+    *,
+    source: str,
+) -> None:
+    """Completa una ingestión parcial sin alterar valores ya revisados."""
+    normalized_source = source.strip()
+    if not normalized_source:
+        raise ValueError("La fuente del candidato es obligatoria")
+
+    with _transaction(connection):
+        for field_name, value in candidates.items():
+            normalized_value = _normalise_value(value)
+            connection.execute(
+                """INSERT INTO extraction_candidates
+                   (id_document, field_name, value, source, validation_status)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(id_document, field_name) DO NOTHING""",
+                (
+                    document_id, field_name, normalized_value, normalized_source,
+                    "validated" if normalized_value is not None else "candidate",
+                ),
+            )
+
+
 def create_missing_field_issues(connection: sqlite3.Connection, case_id: int,
                                 document_id: int, required_fields: Collection[str]) -> tuple[ReviewIssue, ...]:
     with _transaction(connection):
@@ -152,10 +179,13 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
                   reason: str, resolved_by: str = "usuario_local") -> ReviewIssue:
     normalized_value = _normalise_value(value)
     normalized_reason = reason.strip()
+    normalized_resolved_by = resolved_by.strip()
     if normalized_value is None:
         raise ValueError("El valor confirmado es obligatorio")
     if not normalized_reason:
         raise ValueError("El motivo de la corrección es obligatorio")
+    if not normalized_resolved_by:
+        raise ValueError("El responsable de la corrección es obligatorio")
 
     with _transaction(connection):
         issue = _issue_row(connection, issue_id)
@@ -171,7 +201,10 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
             """INSERT INTO manual_corrections
                (id_issue, original_value, corrected_value, reason, resolved_by)
                VALUES (?, ?, ?, ?, ?)""",
-            (issue_id, original_value, normalized_value, normalized_reason, resolved_by),
+            (
+                issue_id, original_value, normalized_value, normalized_reason,
+                normalized_resolved_by,
+            ),
         )
         connection.execute(
             """INSERT INTO extraction_candidates

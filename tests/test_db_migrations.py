@@ -112,6 +112,12 @@ class DatabaseMigrationTest(unittest.TestCase):
                 row[1]
                 for row in connection.execute("PRAGMA table_info(review_issues)")
             }
+            indexes = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
 
         self.assertEqual(version, 2)
         self.assertTrue({
@@ -119,6 +125,11 @@ class DatabaseMigrationTest(unittest.TestCase):
             "review_issues", "manual_corrections",
         }.issubset(tables))
         self.assertTrue({"id_case", "id_document", "field_name", "status"}.issubset(columns))
+        self.assertTrue({
+            "idx_cases_community",
+            "idx_documents_case",
+            "idx_issues_case_open",
+        }.issubset(indexes))
 
     def test_migration_two_is_idempotent(self):
         with closing(self._connect()) as connection:

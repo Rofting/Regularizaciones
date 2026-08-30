@@ -67,19 +67,24 @@ def add_document_to_case(
         archive_root=archive_root,
         document_kind=normalized_kind,
     )
-    if not created:
-        return IngestionResult(document, False, _open_issue_count(connection, case_id))
-
-    document_review.record_candidates(
-        connection,
-        document.id_document,
-        normalized_candidates,
-        source="ingestion",
-    )
+    if created:
+        document_review.record_candidates(
+            connection,
+            document.id_document,
+            normalized_candidates,
+            source="ingestion",
+        )
+    else:
+        document_review.record_candidates_if_missing(
+            connection,
+            document.id_document,
+            normalized_candidates,
+            source="ingestion",
+        )
     document_review.create_missing_field_issues(
         connection,
         case_id,
         document.id_document,
         normalized_required,
     )
-    return IngestionResult(document, True, _open_issue_count(connection, case_id))
+    return IngestionResult(document, created, _open_issue_count(connection, case_id))

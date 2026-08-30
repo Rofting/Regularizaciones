@@ -101,6 +101,46 @@ class DocumentReviewTest(unittest.TestCase):
         self.assertEqual("resolved", issue_row["status"])
         self.assertIsNotNone(issue_row["resolved_at"])
 
+    def test_resolving_issue_normalizes_responsible_person_before_auditing(self):
+        issue = self._create_missing_date_issue()
+
+        document_review.resolve_issue(
+            self.connection,
+            issue.id_issue,
+            value="2026-01-01",
+            reason="Confirmado en documento",
+            resolved_by="  gestora principal  ",
+        )
+
+        responsible = self.connection.execute(
+            "SELECT resolved_by FROM manual_corrections WHERE id_issue = ?",
+            (issue.id_issue,),
+        ).fetchone()[0]
+        self.assertEqual("gestora principal", responsible)
+
+    def test_resolving_issue_rejects_blank_responsible_before_auditing(self):
+        issue = self._create_missing_date_issue()
+
+        with self.assertRaisesRegex(ValueError, "responsable"):
+            document_review.resolve_issue(
+                self.connection,
+                issue.id_issue,
+                value="2026-01-01",
+                reason="Confirmado en documento",
+                resolved_by="   ",
+            )
+
+        correction_count = self.connection.execute(
+            "SELECT COUNT(*) FROM manual_corrections WHERE id_issue = ?",
+            (issue.id_issue,),
+        ).fetchone()[0]
+        issue_status = self.connection.execute(
+            "SELECT status FROM review_issues WHERE id_issue = ?",
+            (issue.id_issue,),
+        ).fetchone()[0]
+        self.assertEqual(0, correction_count)
+        self.assertEqual("open", issue_status)
+
     def test_readiness_requires_resolving_issues_then_validates_documents(self):
         issue = self._create_missing_date_issue()
 

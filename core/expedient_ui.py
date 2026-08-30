@@ -135,6 +135,7 @@ def open_create_case_dialog(app: "AppGestionFincas") -> None:
         app.id_expediente = case.id_case
         app.expediente_actual.set(case.name)
         dialog.destroy()
+        app._refrescar_lista_expedientes(select_case_id=case.id_case)
         app._refrescar_expediente()
         duration = (end_date - start_date).days + 1
         app.log(
@@ -225,9 +226,18 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
         def add_all():
             created_count = 0
             duplicate_count = 0
-            for path in paths:
-                connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+            errors = []
+            total = len(paths)
+            for index, path in enumerate(paths, start=1):
+                filename = Path(path).name
+                connection = None
+                app._estado(
+                    f"Incorporando {index} de {total}: {filename}",
+                    procesando=True,
+                )
+                app.log(f"Fuente {index} de {total}: {filename}", "info")
                 try:
+                    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
                     result = case_ingestion.add_document_to_case(
                         connection,
                         case_id,
@@ -244,20 +254,33 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                             else ()
                         ),
                     )
+                except Exception as exc:
+                    errors.append((filename, str(exc)))
+                    app.log(
+                        f"No se pudo incorporar {filename}: {exc}",
+                        "error",
+                    )
+                    continue
                 finally:
-                    connection.close()
+                    if connection is not None:
+                        connection.close()
                 if result.created:
                     created_count += 1
                 else:
                     duplicate_count += 1
             app.log(
                 f"Fuentes añadidas: {created_count} nueva(s), "
-                f"{duplicate_count} duplicada(s)",
-                "ok" if created_count else "aviso",
+                f"{duplicate_count} duplicada(s), {len(errors)} con error",
+                "ok" if created_count and not errors else "aviso",
             )
-            app.after(0, app._refrescar_expediente)
+            def refresh_case():
+                app._refrescar_lista_expedientes(select_case_id=case_id)
+                app._refrescar_expediente()
 
-        app._en_hilo(add_all)
+            app.after(0, refresh_case)
+
+        app._estado(f"Incorporando 0 de {len(paths)} fuentes", procesando=True)
+        app.after(0, lambda: app._en_hilo(add_all))
 
     ctk.CTkButton(
         panel,
@@ -275,6 +298,15 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
         font=UIM.fuente(10),
         text_color=C["texto_sec"],
     ).pack(anchor="w", padx=22)
+
+
+def open_archived_file(app: "AppGestionFincas", issue: ReviewIssue) -> None:
+    try:
+        if sys.platform != "win32":
+            raise OSError("Abrir el archivo solo está disponible en Windows.")
+        os.startfile(str(issue.archived_path))
+    except Exception as exc:
+        messagebox.showerror("No se pudo abrir el archivo", str(exc))
 
 
 def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
@@ -320,18 +352,10 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
             wraplength=390,
         ).grid(row=row, column=1, sticky="w", padx=(0, 12), pady=7)
 
-    def open_file():
-        try:
-            if sys.platform != "win32":
-                raise OSError("Abrir el archivo solo está disponible en Windows.")
-            os.startfile(str(issue.archived_path))
-        except Exception as exc:
-            messagebox.showerror("No se pudo abrir el archivo", str(exc))
-
     ctk.CTkButton(
         panel,
         text="Abrir archivo",
-        command=open_file,
+        command=lambda: open_archived_file(app, issue),
         height=34,
         corner_radius=8,
         fg_color="transparent",
@@ -384,6 +408,7 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         finally:
             connection.close()
         dialog.destroy()
+        app._refrescar_lista_expedientes(select_case_id=issue.id_case)
         app._refrescar_expediente()
         if ready is not None and ready.status == "ready_for_calculation":
             app.log("Listo para cálculo", "ok")

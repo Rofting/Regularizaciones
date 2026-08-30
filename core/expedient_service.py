@@ -226,6 +226,16 @@ def register_source_document(connection: sqlite3.Connection, case_id: int, *,
                 _update_case_status(
                     connection, case_id, case.status, "gathering_sources"
                 )
+            elif case.status in {
+                "ready_for_calculation",
+                "calculated",
+                "reconciled",
+                "deliveries_generated",
+                "closed",
+            }:
+                _update_case_status(
+                    connection, case_id, case.status, "under_review"
+                )
             document = document_from_row(_document_row(connection, cursor.lastrowid))
     except Exception:
         if staging_path is not None and staging_path.exists():

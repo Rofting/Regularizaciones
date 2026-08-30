@@ -6,6 +6,7 @@ from contextlib import redirect_stdout
 from datetime import date
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +85,35 @@ class ExpedientFlowTest(unittest.TestCase):
         )
         self.assertEqual("ready_for_calculation", ready_case.status)
 
+    def test_new_incomplete_source_returns_ready_case_to_review(self):
+        self._add_invoice_and_resolve_start_date()
+        document_review.validate_case_ready(self.connection, self.case.id_case)
+        second_source = Path(self.directory.name) / "factura-adicional.pdf"
+        second_source.write_bytes(b"%PDF-1.4 factura adicional")
+
+        result = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=second_source,
+            archive_root=self.archive_root,
+            document_kind="invoice",
+            candidates={"fecha_inicio": "2026-01-15"},
+            required_fields=("fecha_inicio", "importe_total"),
+        )
+
+        issues = document_review.list_open_issues(
+            self.connection, self.case.id_case
+        )
+        self.assertTrue(result.created)
+        self.assertEqual(
+            [("importe_total", "open")],
+            [(issue.field_name, issue.status) for issue in issues],
+        )
+        self.assertEqual(
+            "under_review",
+            expedient_service.get_case(self.connection, self.case.id_case).status,
+        )
+
     def test_readding_resolved_source_preserves_manual_value_and_correction(self):
         self._add_invoice_and_resolve_start_date()
 
@@ -115,6 +145,77 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertEqual("2026-01-01", manual_start_date)
         self.assertEqual(0, repeated.open_issue_count)
         self.assertEqual(1, correction_count)
+
+    def test_retry_after_archiving_failure_completes_review_without_duplicates(self):
+        candidates = {"fecha_inicio": "2026-01-01", "importe_total": None}
+        with patch(
+            "document_review.record_candidates",
+            side_effect=RuntimeError("fallo inyectado antes de candidatos"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fallo inyectado"):
+                case_ingestion.add_document_to_case(
+                    self.connection,
+                    self.case.id_case,
+                    source_path=self.source_path,
+                    archive_root=self.archive_root,
+                    document_kind="invoice",
+                    candidates=candidates,
+                    required_fields=("fecha_inicio", "importe_total"),
+                )
+
+        self.assertEqual(
+            1,
+            case_ingestion.count_case_documents(
+                self.connection, self.case.id_case
+            ),
+        )
+        self.assertEqual(
+            b"%PDF-1.4 factura sintetica",
+            next((self.archive_root / str(self.case.id_case) / "fuentes").iterdir()).read_bytes(),
+        )
+
+        recovered = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.source_path,
+            archive_root=self.archive_root,
+            document_kind="invoice",
+            candidates=candidates,
+            required_fields=("fecha_inicio", "importe_total"),
+        )
+
+        stored_candidates = self.connection.execute(
+            """SELECT field_name, value FROM extraction_candidates
+               WHERE id_document = ? ORDER BY field_name""",
+            (recovered.document.id_document,),
+        ).fetchall()
+        issues = document_review.list_open_issues(
+            self.connection, self.case.id_case
+        )
+        self.assertFalse(recovered.created)
+        self.assertEqual(
+            [("fecha_inicio", "2026-01-01"), ("importe_total", None)],
+            [tuple(row) for row in stored_candidates],
+        )
+        self.assertEqual(["importe_total"], [issue.field_name for issue in issues])
+        self.assertEqual(1, recovered.open_issue_count)
+        self.assertEqual(
+            1,
+            case_ingestion.count_case_documents(
+                self.connection, self.case.id_case
+            ),
+        )
+        self.assertEqual(
+            1,
+            self.connection.execute(
+                "SELECT COUNT(*) FROM review_issues WHERE id_case = ?",
+                (self.case.id_case,),
+            ).fetchone()[0],
+        )
+        self.assertEqual(
+            "under_review",
+            expedient_service.get_case(self.connection, self.case.id_case).status,
+        )
 
     def test_case_ownership_rejects_another_community_and_accepts_its_own(self):
         other_community_id = gestor_bd.obtener_o_crear_comunidad(

@@ -151,6 +151,7 @@ class AppGestionFincas(ctk.CTk):
         self.comunidad_actual  = tk.StringVar(value="")
         self.periodo_actual     = tk.StringVar(value="")
         self.expediente_actual  = tk.StringVar(value="")
+        self.expediente_seleccionado = tk.StringVar(value="")
         self.id_comunidad       = None
         self.id_periodo         = None
         self.id_expediente      = None
@@ -197,15 +198,23 @@ class AppGestionFincas(ctk.CTk):
         context.grid_columnconfigure(1, weight=2)
         context.grid_columnconfigure(2, weight=0)
         ctk.CTkLabel(context, text="COMUNIDAD", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=0, sticky="w", padx=20, pady=(15, 3))
-        ctk.CTkLabel(context, text="PERÍODO / EXPEDIENTE", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=1, sticky="w", padx=12, pady=(15, 3))
+        ctk.CTkLabel(context, text="PERÍODO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=1, sticky="w", padx=12, pady=(15, 3))
         self.cb_comunidad = UIM.ComboModerno(context, variable=self.comunidad_actual, values=[], width=460, height=40, command=lambda _v: self._on_comunidad_seleccionada())
         self.cb_comunidad.grid(row=1, column=0, sticky="ew", padx=(20, 12), pady=(0, 16))
         self.cb_periodo = UIM.ComboModerno(context, variable=self.periodo_actual, values=[], width=280, height=40, command=lambda _v: self._on_periodo_seleccionado())
         self.cb_periodo.grid(row=1, column=1, sticky="ew", padx=12, pady=(0, 16))
-        self.lbl_expediente_actual = ctk.CTkLabel(context, textvariable=self.expediente_actual, font=UIM.fuente(10, "bold"), text_color=C["primario"], anchor="w")
-        self.lbl_expediente_actual.grid(row=2, column=1, sticky="w", padx=12, pady=(0, 10))
+        ctk.CTkLabel(context, text="ELEGIR EXPEDIENTE", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=2, column=1, sticky="w", padx=12, pady=(0, 3))
+        self.cb_expediente = UIM.ComboModerno(
+            context,
+            variable=self.expediente_seleccionado,
+            values=[],
+            width=280,
+            height=40,
+            command=lambda _v: self._on_expediente_seleccionado(),
+        )
+        self.cb_expediente.grid(row=3, column=1, sticky="ew", padx=12, pady=(0, 16))
         add = ctk.CTkFrame(context, fg_color="transparent")
-        add.grid(row=0, column=2, rowspan=3, padx=(12, 18), pady=16)
+        add.grid(row=0, column=2, rowspan=4, padx=(12, 18), pady=16)
         ctk.CTkButton(add, text="+ Comunidad", command=self._nueva_comunidad, height=32, corner_radius=9, fg_color="transparent", border_width=1, border_color=C["borde"], text_color=C["primario"], hover_color=C["acento_suave"]).pack(fill="x")
         ctk.CTkButton(add, text="Gestionar periodos", command=self._nuevo_periodo, height=32, corner_radius=9, fg_color=C["acento_suave"], text_color=C["primario"], hover_color=C["acento_suave_hover"]).pack(fill="x", pady=(7, 0))
         ctk.CTkButton(add, text="+ Expediente", command=self._accion_crear_expediente, height=32, corner_radius=9, fg_color=C["primario"], hover_color=C["primario_hover"]).pack(fill="x", pady=(7, 0))
@@ -256,16 +265,32 @@ class AppGestionFincas(ctk.CTk):
         start = ctk.CTkButton(hero, text="Crear expediente", command=self._accion_crear_expediente, height=48, corner_radius=12, font=UIM.fuente(14, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"])
         start.pack(anchor="w", padx=24, pady=(20, 18))
         self.botones["Crear expediente · principal"] = start
-        steps = ctk.CTkFrame(hero, fg_color=C["panel_2"], corner_radius=12)
-        steps.pack(fill="x", padx=24, pady=(0, 24))
-        for label in ("Selecciona fuentes", "Validamos datos", "Genera las cartas"):
-            ctk.CTkLabel(steps, text=label, font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(side="left", fill="x", expand=True, padx=8, pady=13)
+        issue_panel = ctk.CTkFrame(hero, fg_color=C["panel_2"], corner_radius=12)
+        issue_panel.pack(fill="both", expand=True, padx=24, pady=(0, 24))
+        issue_header = ctk.CTkFrame(issue_panel, fg_color="transparent")
+        issue_header.pack(fill="x", padx=12, pady=(11, 3))
+        ctk.CTkLabel(issue_header, text="INCIDENCIAS ABIERTAS", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(side="left")
+        self.lbl_incidencias_bandeja = ctk.CTkLabel(issue_header, text="0", font=UIM.fuente(10, "bold"), text_color=C["primario"])
+        self.lbl_incidencias_bandeja.pack(side="right")
+        self.bandeja_incidencias = ctk.CTkScrollableFrame(
+            issue_panel,
+            fg_color="transparent",
+            height=132,
+        )
+        self.bandeja_incidencias.pack(fill="both", expand=True, padx=7, pady=(0, 7))
 
         state = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
         state.grid(row=0, column=2, sticky="nsew")
         ctk.CTkLabel(state, text="ESTADO DEL EXPEDIENTE", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(20, 10))
-        self.lbl_estado_resumen = ctk.CTkLabel(state, text="Aún no hay un expediente en curso.", font=UIM.fuente(13, "bold"), text_color=C["texto"], justify="left", wraplength=245)
-        self.lbl_estado_resumen.pack(anchor="w", padx=18, pady=(0, 13))
+        state_summary = ctk.CTkFrame(state, fg_color="transparent")
+        state_summary.pack(fill="x", padx=18, pady=(0, 13))
+        self.carril_estado_expediente = ctk.CTkFrame(
+            state_summary, width=4, corner_radius=2, fg_color=C["borde"]
+        )
+        self.carril_estado_expediente.pack(side="left", fill="y", padx=(0, 9))
+        self.carril_estado_expediente.pack_propagate(False)
+        self.lbl_estado_resumen = ctk.CTkLabel(state_summary, text="Elige un expediente para continuar.", font=UIM.fuente(13, "bold"), text_color=C["texto"], justify="left", wraplength=225)
+        self.lbl_estado_resumen.pack(side="left", anchor="w")
         self.expediente_metricas = {}
         for key, label, value in (("rango", "Fechas", "—"), ("fuentes", "Fuentes", "0"), ("estado", "Estado", "—"), ("incidencias", "Incidencias", "0 abiertas")):
             line = ctk.CTkFrame(state, fg_color=C["panel_2"], corner_radius=9)
@@ -688,6 +713,78 @@ class AppGestionFincas(ctk.CTk):
         except Exception:
             pass
 
+        self._refrescar_lista_expedientes()
+        if self.id_expediente:
+            self._refrescar_expediente()
+
+    def _refrescar_lista_expedientes(self, select_case_id=None):
+        service = MOD.get("expedient_service")
+        database = MOD.get("gestor_bd")
+        if not self.id_comunidad or not service or not database:
+            self._limpiar_contexto_expediente()
+            return
+
+        connection = database.conectar(str(self.ruta_bd_expedientes))
+        try:
+            cases = service.list_cases(connection, self.id_comunidad)
+        finally:
+            connection.close()
+
+        options = []
+        ids_by_option = {}
+        options_by_id = {}
+        names_by_id = {}
+        for case in cases:
+            option = (
+                f"{case.name} · {case.start_date.strftime('%d/%m/%Y')} – "
+                f"{case.end_date.strftime('%d/%m/%Y')}"
+            )
+            options.append(option)
+            ids_by_option[option] = case.id_case
+            options_by_id[case.id_case] = option
+            names_by_id[case.id_case] = case.name
+
+        self._ids_expediente = ids_by_option
+        self.cb_expediente.configure(values=options)
+        requested_id = select_case_id or self.id_expediente
+        if requested_id not in options_by_id:
+            requested_id = cases[0].id_case if cases else None
+        if requested_id is None:
+            self._limpiar_contexto_expediente()
+            return
+
+        self.id_expediente = requested_id
+        self.expediente_seleccionado.set(options_by_id[requested_id])
+        self.expediente_actual.set(names_by_id[requested_id])
+
+    def _on_expediente_seleccionado(self, event=None):
+        selected_id = getattr(self, "_ids_expediente", {}).get(
+            self.expediente_seleccionado.get()
+        )
+        if selected_id is None:
+            self._limpiar_contexto_expediente()
+            return
+
+        ingestion = MOD.get("case_ingestion")
+        database = MOD.get("gestor_bd")
+        if not ingestion or not database:
+            return
+        connection = database.conectar(str(self.ruta_bd_expedientes))
+        try:
+            ingestion.assert_case_belongs_to_community(
+                connection, selected_id, self.id_comunidad
+            )
+        except LookupError as exc:
+            self._limpiar_contexto_expediente()
+            self._refrescar_lista_expedientes()
+            self.log(str(exc), "aviso")
+            return
+        finally:
+            connection.close()
+
+        self.id_expediente = selected_id
+        self._refrescar_expediente()
+
     def _on_periodo_seleccionado(self, event=None):
         nombre = self.periodo_actual.get()
         self.id_periodo = self._ids_periodo.get(nombre) if hasattr(self, "_ids_periodo") else None
@@ -813,11 +910,10 @@ class AppGestionFincas(ctk.CTk):
         expedient_ui.open_add_sources_dialog(self, self.id_expediente)
 
     def _accion_resolver_incidencias(self):
-        expedient_ui = MOD.get("expedient_ui")
         review = MOD.get("document_review")
         ingestion = MOD.get("case_ingestion")
         database = MOD.get("gestor_bd")
-        if not expedient_ui or not review or not ingestion or not database:
+        if not review or not ingestion or not database:
             self.log("No está disponible la revisión de incidencias.", "error")
             return
         if not self.id_expediente:
@@ -839,7 +935,11 @@ class AppGestionFincas(ctk.CTk):
         if not issues:
             self.log("No hay incidencias pendientes en este expediente.", "ok")
             return
-        expedient_ui.open_issue_dialog(self, issues[0])
+        self._refrescar_bandeja_incidencias(issues)
+        self.log(
+            "Elige Resolver en la incidencia concreta de la bandeja.",
+            "info",
+        )
 
     def _refrescar_expediente(self):
         service = MOD.get("expedient_service")
@@ -855,11 +955,19 @@ class AppGestionFincas(ctk.CTk):
 
         connection = database.conectar(str(self.ruta_bd_expedientes))
         try:
-            case = service.get_case(connection, self.id_expediente)
+            case = ingestion.assert_case_belongs_to_community(
+                connection, self.id_expediente, self.id_comunidad
+            )
             document_count = ingestion.count_case_documents(
                 connection, self.id_expediente
             )
-            open_count = len(review.list_open_issues(connection, self.id_expediente))
+            issues = review.list_open_issues(connection, self.id_expediente)
+            open_count = len(issues)
+        except LookupError as exc:
+            self._limpiar_contexto_expediente()
+            self._refrescar_lista_expedientes()
+            self.log(str(exc), "aviso")
+            return
         finally:
             connection.close()
 
@@ -868,23 +976,43 @@ class AppGestionFincas(ctk.CTk):
             f"{case.start_date.strftime('%d/%m/%Y')} – "
             f"{case.end_date.strftime('%d/%m/%Y')}"
         )
+        status_labels = {
+            "draft": "Borrador",
+            "gathering_sources": "Recopilando fuentes",
+            "under_review": "En revisión",
+            "ready_for_calculation": "Listo para cálculo",
+            "calculated": "Calculado",
+            "reconciled": "Conciliado",
+            "deliveries_generated": "Entregas generadas",
+            "closed": "Cerrado",
+        }
+        status_label = status_labels.get(case.status, case.status)
         summary = (
             f"{case.name}\n{date_range}\n{document_count} fuente(s) · "
-            f"{open_count} incidencia(s) abierta(s)\nEstado: {case.status}"
+            f"{open_count} incidencia(s) abierta(s)\nEstado: {status_label}"
         )
         self._resumen_ejercicio(summary)
+        self._refrescar_bandeja_incidencias(issues)
 
         def update_metrics():
             metrics = getattr(self, "expediente_metricas", {})
             values = {
                 "rango": date_range,
                 "fuentes": str(document_count),
-                "estado": case.status,
+                "estado": status_label,
                 "incidencias": f"{open_count} abiertas",
             }
             for key, value in values.items():
                 if key in metrics:
                     metrics[key].configure(text=value)
+            rail_color = (
+                C["texto_sec"]
+                if case.status == "draft"
+                else C["primario"]
+                if case.status in {"gathering_sources", "under_review"}
+                else C["exito"]
+            )
+            self.carril_estado_expediente.configure(fg_color=rail_color)
 
         self.after(0, update_metrics)
         self.log(
@@ -905,10 +1033,111 @@ class AppGestionFincas(ctk.CTk):
                 "info",
             )
 
+    def _refrescar_bandeja_incidencias(self, issues=()):
+        issues = tuple(issues)
+
+        def update_tray():
+            tray = getattr(self, "bandeja_incidencias", None)
+            if tray is None:
+                return
+            for child in tray.winfo_children():
+                child.destroy()
+            self.lbl_incidencias_bandeja.configure(text=str(len(issues)))
+
+            if not self.id_expediente:
+                ctk.CTkLabel(
+                    tray,
+                    text="Elige un expediente para revisar sus datos pendientes.",
+                    font=UIM.fuente(11),
+                    text_color=C["texto_sec"],
+                    wraplength=420,
+                ).pack(anchor="w", padx=9, pady=12)
+                return
+            if not issues:
+                ctk.CTkLabel(
+                    tray,
+                    text="Sin incidencias pendientes\nAñade fuentes o continúa con el cálculo.",
+                    font=UIM.fuente(11, "bold"),
+                    text_color=C["texto_sec"],
+                    justify="left",
+                    wraplength=420,
+                ).pack(anchor="w", padx=9, pady=12)
+                return
+
+            expedient_ui = MOD.get("expedient_ui")
+            for issue in issues:
+                row = ctk.CTkFrame(
+                    tray,
+                    fg_color=C["panel"],
+                    corner_radius=9,
+                    border_width=1,
+                    border_color=C["borde"],
+                )
+                row.pack(fill="x", padx=2, pady=4)
+                marker = ctk.CTkFrame(
+                    row, width=4, corner_radius=2, fg_color=C["primario"]
+                )
+                marker.pack(side="left", fill="y", padx=(7, 9), pady=7)
+                marker.pack_propagate(False)
+                detail = ctk.CTkFrame(row, fg_color="transparent")
+                detail.pack(side="left", fill="both", expand=True, pady=7)
+                ctk.CTkLabel(
+                    detail,
+                    text=issue.field_name,
+                    font=UIM.fuente(11, "bold"),
+                    text_color=C["texto"],
+                    anchor="w",
+                ).pack(fill="x")
+                ctk.CTkLabel(
+                    detail,
+                    text=f"{issue.archived_path.name} · {issue.message}",
+                    font=UIM.fuente(10),
+                    text_color=C["texto_sec"],
+                    anchor="w",
+                    justify="left",
+                    wraplength=260,
+                ).pack(fill="x", pady=(2, 0))
+                actions = ctk.CTkFrame(row, fg_color="transparent")
+                actions.pack(side="right", padx=8, pady=7)
+                ctk.CTkButton(
+                    actions,
+                    text="Abrir archivo",
+                    width=86,
+                    height=28,
+                    corner_radius=7,
+                    fg_color="transparent",
+                    border_width=1,
+                    border_color=C["borde"],
+                    text_color=C["primario"],
+                    hover_color=C["acento_suave"],
+                    command=lambda current=issue: expedient_ui.open_archived_file(
+                        self, current
+                    ),
+                ).pack(pady=(0, 4))
+                ctk.CTkButton(
+                    actions,
+                    text="Resolver",
+                    width=86,
+                    height=28,
+                    corner_radius=7,
+                    fg_color=C["primario"],
+                    hover_color=C["primario_hover"],
+                    command=lambda current=issue: expedient_ui.open_issue_dialog(
+                        self, current
+                    ),
+                ).pack()
+
+        self.after(0, update_tray)
+
     def _limpiar_contexto_expediente(self):
         self.id_expediente = None
         self.expediente_actual.set("")
-        self._resumen_ejercicio("Aún no hay un expediente en curso.")
+        self.expediente_seleccionado.set("")
+        self._ids_expediente = {}
+        if hasattr(self, "cb_expediente"):
+            self.cb_expediente.configure(values=[])
+        self._resumen_ejercicio("Elige un expediente para continuar.")
+        self._refrescar_bandeja_incidencias()
 
         def reset_case_state():
             metrics = getattr(self, "expediente_metricas", {})
@@ -922,6 +1151,8 @@ class AppGestionFincas(ctk.CTk):
                     metrics[key].configure(text=value)
             for dot in getattr(self, "etapas", {}).values():
                 dot.configure(text="○", text_color=C["texto_sec"])
+            if hasattr(self, "carril_estado_expediente"):
+                self.carril_estado_expediente.configure(fg_color=C["borde"])
 
         self.after(0, reset_case_state)
 
