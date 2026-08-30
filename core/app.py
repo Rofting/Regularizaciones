@@ -230,7 +230,7 @@ class AppGestionFincas(ctk.CTk):
         self.botones = {}
         acciones = (("1", "Importar fuentes", "Excel, propietarios y lecturas", self._accion_regularizacion_guiada), ("2", "Revisar resultados", "Validación y conciliación", self._accion_calcular_reparto), ("3", "Generar cartas", "Elige los conceptos a incluir", self._accion_generar_cartas))
         for number, name, description, command in acciones:
-            row = ctk.CTkButton(nav, text=f"{number}   {name}\n     {description}", command=command, anchor="w", justify="left", height=64, corner_radius=11, font=UIM.fuente(12, "bold"), fg_color=C["acento_suave"], hover_color=C["acento_suave_hover"], text_color=C["primario"])
+            row = ctk.CTkButton(nav, text=f"{number}   {name}\n     {description}", command=command, anchor="w", height=64, corner_radius=11, font=UIM.fuente(12, "bold"), fg_color=C["acento_suave"], hover_color=C["acento_suave_hover"], text_color=C["primario"])
             row.pack(fill="x", padx=12, pady=4)
             self.botones[name] = row
         ctk.CTkFrame(nav, fg_color=C["borde"], height=1).pack(fill="x", padx=16, pady=16)
