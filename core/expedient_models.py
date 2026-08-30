@@ -9,6 +9,7 @@ CaseStatus = Literal[
     "calculated", "reconciled", "deliveries_generated", "closed",
 ]
 DocumentStatus = Literal["registered", "under_review", "validated", "not_applicable"]
+IssueStatus = Literal["open", "resolved", "dismissed"]
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,19 @@ class SourceDocument:
     sha256: str
     document_kind: str
     status: DocumentStatus
+
+
+@dataclass(frozen=True)
+class ReviewIssue:
+    id_issue: int
+    id_case: int
+    id_document: int
+    archived_path: Path
+    code: str
+    field_name: str
+    detected_value: str | None
+    message: str
+    status: IssueStatus
 
 
 def case_from_row(row) -> RegularizationCase:
@@ -54,4 +68,19 @@ def document_from_row(row) -> SourceDocument:
         sha256=row["sha256"],
         document_kind=row["document_kind"],
         status=cast(DocumentStatus, row["status"]),
+    )
+
+
+def review_issue_from_row(row) -> ReviewIssue:
+    """Convierte una fila de incidencia, incluida su fuente archivada."""
+    return ReviewIssue(
+        id_issue=row["id_issue"],
+        id_case=row["id_case"],
+        id_document=row["id_document"],
+        archived_path=Path(row["archived_path"]),
+        code=row["code"],
+        field_name=row["field_name"],
+        detected_value=row["detected_value"],
+        message=row["message"],
+        status=cast(IssueStatus, row["status"]),
     )
