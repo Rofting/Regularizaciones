@@ -74,6 +74,8 @@ La base instalada no contiene aún las facturas de la 658, mientras que el Excel
 
 Esta importación es de transición. En el flujo final, los PDFs y las lecturas alimentarán las mismas tablas normalizadas y el generador no dependerá del Excel original.
 
+El estudio de la 658 contiene costes y parámetros agregados, pero no las lecturas y la identificación de cada propietario. Para poder completar el reparto y las cartas de esta primera ejecución, el mismo arranque registrará también el listado de propietarios y los ficheros de lecturas asociados al periodo. Todos quedan vinculados como fuentes del expediente. Si falta una lectura de inicio o cierre, o no coincide con el rango del expediente, se abrirá una incidencia y no habrá reparto ni cartas.
+
 ### 5. Generación y controles previos
 
 La acción de interfaz será Generar Excel oficial. Sólo estará disponible para un expediente de la comunidad que esté ready_for_calculation y con todos sus datos necesarios validados.
