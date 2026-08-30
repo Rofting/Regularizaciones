@@ -665,6 +665,7 @@ class AppGestionFincas(ctk.CTk):
             pass
 
     def _on_comunidad_seleccionada(self, event=None):
+        self._limpiar_contexto_expediente()
         sel = self.comunidad_actual.get()
         self.id_comunidad = self._ids_comunidad.get(sel)
         if not self.id_comunidad or not MOD.get("gestor_bd"):
@@ -791,16 +792,32 @@ class AppGestionFincas(ctk.CTk):
 
     def _accion_anadir_fuentes(self):
         expedient_ui = MOD.get("expedient_ui")
-        if not expedient_ui:
+        ingestion = MOD.get("case_ingestion")
+        database = MOD.get("gestor_bd")
+        if not expedient_ui or not ingestion or not database:
             self.log("No está disponible la interfaz para añadir fuentes.", "error")
             return
+        if self.id_expediente:
+            connection = database.conectar(str(self.ruta_bd_expedientes))
+            try:
+                ingestion.assert_case_belongs_to_community(
+                    connection, self.id_expediente, self.id_comunidad
+                )
+            except LookupError as exc:
+                self._limpiar_contexto_expediente()
+                self._refrescar_expediente()
+                self.log(str(exc), "aviso")
+                return
+            finally:
+                connection.close()
         expedient_ui.open_add_sources_dialog(self, self.id_expediente)
 
     def _accion_resolver_incidencias(self):
         expedient_ui = MOD.get("expedient_ui")
         review = MOD.get("document_review")
+        ingestion = MOD.get("case_ingestion")
         database = MOD.get("gestor_bd")
-        if not expedient_ui or not review or not database:
+        if not expedient_ui or not review or not ingestion or not database:
             self.log("No está disponible la revisión de incidencias.", "error")
             return
         if not self.id_expediente:
@@ -808,7 +825,15 @@ class AppGestionFincas(ctk.CTk):
             return
         connection = database.conectar(str(self.ruta_bd_expedientes))
         try:
+            ingestion.assert_case_belongs_to_community(
+                connection, self.id_expediente, self.id_comunidad
+            )
             issues = review.list_open_issues(connection, self.id_expediente)
+        except LookupError as exc:
+            self._limpiar_contexto_expediente()
+            self._refrescar_expediente()
+            self.log(str(exc), "aviso")
+            return
         finally:
             connection.close()
         if not issues:
@@ -825,7 +850,7 @@ class AppGestionFincas(ctk.CTk):
             self.log("No se pudo actualizar el estado del expediente: faltan módulos.", "error")
             return
         if not self.id_expediente:
-            self._resumen_ejercicio("Aún no hay un expediente en curso.")
+            self._limpiar_contexto_expediente()
             return
 
         connection = database.conectar(str(self.ruta_bd_expedientes))
@@ -879,6 +904,26 @@ class AppGestionFincas(ctk.CTk):
                 f"Expediente actualizado · {document_count} fuente(s) · estado {case.status}",
                 "info",
             )
+
+    def _limpiar_contexto_expediente(self):
+        self.id_expediente = None
+        self.expediente_actual.set("")
+        self._resumen_ejercicio("Aún no hay un expediente en curso.")
+
+        def reset_case_state():
+            metrics = getattr(self, "expediente_metricas", {})
+            for key, value in {
+                "rango": "—",
+                "fuentes": "0",
+                "estado": "—",
+                "incidencias": "0 abiertas",
+            }.items():
+                if key in metrics:
+                    metrics[key].configure(text=value)
+            for dot in getattr(self, "etapas", {}).values():
+                dot.configure(text="○", text_color=C["texto_sec"])
+
+        self.after(0, reset_case_state)
 
     def _accion_regularizacion_guiada(self):
         if not self._validar_seleccion():

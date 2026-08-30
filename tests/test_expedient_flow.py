@@ -116,6 +116,26 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertEqual(0, repeated.open_issue_count)
         self.assertEqual(1, correction_count)
 
+    def test_case_ownership_rejects_another_community_and_accepts_its_own(self):
+        other_community_id = gestor_bd.obtener_o_crear_comunidad(
+            self.connection, "OTRA", "Otra comunidad sintética"
+        )
+
+        with self.assertRaisesRegex(LookupError, "pertenece a otra comunidad"):
+            case_ingestion.assert_case_belongs_to_community(
+                self.connection,
+                self.case.id_case,
+                other_community_id,
+            )
+
+        selected_case = case_ingestion.assert_case_belongs_to_community(
+            self.connection,
+            self.case.id_case,
+            self.community_id,
+        )
+        self.assertEqual(self.case.id_case, selected_case.id_case)
+        self.assertEqual(self.community_id, selected_case.community_id)
+
 
 if __name__ == "__main__":
     unittest.main()

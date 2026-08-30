@@ -5,7 +5,7 @@ from typing import Collection, Mapping
 
 import document_review
 import expedient_service
-from expedient_models import SourceDocument
+from expedient_models import RegularizationCase, SourceDocument
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,17 @@ def count_case_documents(connection: sqlite3.Connection, case_id: int) -> int:
         "SELECT COUNT(*) FROM source_documents WHERE id_case = ?",
         (case_id,),
     ).fetchone()[0]
+
+
+def assert_case_belongs_to_community(
+    connection: sqlite3.Connection,
+    case_id: int,
+    community_id: int,
+) -> RegularizationCase:
+    case = expedient_service.get_case(connection, case_id)
+    if case.community_id != community_id:
+        raise LookupError("El expediente seleccionado pertenece a otra comunidad")
+    return case
 
 
 def add_document_to_case(
