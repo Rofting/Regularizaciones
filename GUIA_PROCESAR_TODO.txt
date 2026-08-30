@@ -1,4 +1,22 @@
 ════════════════════════════════════════════════════════════════
+  NUEVO: EXPEDIENTE Y REVISIÓN MANUAL
+════════════════════════════════════════════════════════════════
+
+Flujo actual de apertura y revisión manual de fuentes:
+
+  1. Abrir la app y seleccionar comunidad.
+  2. Pulsar Crear expediente y elegir fecha inicial/final.
+  3. Pulsar Añadir fuentes; los originales permanecen intactos.
+  4. Elegir el tipo de fuente y seleccionar archivos.
+  5. Pulsar Resolver incidencias; cada incidencia abre su copia archivada.
+  6. Confirmar valor y motivo; el sistema conserva la auditoría.
+  7. Esperar el estado Listo para cálculo antes de usar las salidas posteriores.
+
+La fuente se archiva y se revisa manualmente por ahora. Una incidencia abierta
+bloquea el estado Listo para cálculo. Las acciones históricas de PDF, Excel y
+tarjeta permanecen en OTRAS ACCIONES.
+
+════════════════════════════════════════════════════════════════
   PROCESAR TODO — Guía rápida del nuevo flujo automático
   (actualizado 04/07/2026)
 ════════════════════════════════════════════════════════════════
