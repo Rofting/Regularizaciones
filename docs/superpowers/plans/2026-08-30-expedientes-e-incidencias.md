@@ -327,6 +327,7 @@ def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> Regular
 ### Task 3: Convertir candidatos faltantes en incidencias y registrar correcciones
 
 **Files:**
+- Modify: `core/expedient_models.py`
 - Create: `core/document_review.py`
 - Create: `tests/test_document_review.py`
 
