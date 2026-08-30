@@ -141,8 +141,8 @@ class AppGestionFincas(ctk.CTk):
     def __init__(self):
         super().__init__(fg_color=C["fondo"])
         self.title("Regularización de facturas")
-        self.geometry("980x720")
-        self.minsize(860, 620)
+        self.geometry("1180x760")
+        self.minsize(1020, 680)
         self.resizable(True, True)
 
         # Estado
@@ -152,7 +152,7 @@ class AppGestionFincas(ctk.CTk):
         self.id_periodo         = None
         self._procesando        = False
 
-        self._crear_ui()
+        self._crear_ui_v3()
         self._cargar_comunidades()
         self._verificar_estructura()
         self.log("", "bienvenida")
@@ -160,13 +160,138 @@ class AppGestionFincas(ctk.CTk):
         self.log("     deja los PDFs/Excels en entrada/ y pulsa PROCESAR TODO.", "bienvenida")
         self.log("  ✦ Flujo guiado activo · selección de fuentes y conceptos disponible", "bienvenida")
         UIM.aparecer(self)
-        # Mostrar selector de periodo al arrancar (tras un breve retraso
-        # para que la ventana principal ya esté renderizada)
-        self.after(400, self._dialogo_seleccionar_periodo_inicio)
+        # El periodo se elige desde la tarjeta de contexto; no interrumpimos
+        # el arranque con un diálogo heredado.
 
     # -----------------------------------------------------------------------
     # CONSTRUCCIÓN DE LA UI
     # -----------------------------------------------------------------------
+    def _crear_ui_v3(self):
+        """Panel principal del flujo de regularización, diseñado para operar por pasos."""
+        header = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=78)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        marca = ctk.CTkFrame(header, width=36, height=36, corner_radius=10, fg_color=C["primario"])
+        marca.pack(side="left", padx=(28, 10), pady=20)
+        marca.pack_propagate(False)
+        ctk.CTkLabel(marca, text="R", font=UIM.fuente(18, "bold"), text_color="#FFFFFF").pack(expand=True)
+        title = ctk.CTkFrame(header, fg_color="transparent")
+        title.pack(side="left", pady=15)
+        ctk.CTkLabel(title, text="Regularización", font=UIM.fuente(22, "bold"), text_color=C["texto"]).pack(anchor="w")
+        ctk.CTkLabel(title, text="Facturas, consumos y cartas en un único flujo", font=UIM.fuente(11), text_color=C["texto_sec"]).pack(anchor="w", pady=(1, 0))
+        self.interruptor = UIM.InterruptorTema(header)
+        self.interruptor.pack(side="right", padx=26)
+        self.linea = UIM.LineaGradiente(self, altura=2)
+        self.linea.pack(fill="x")
+        self.interruptor.al_cambiar(self.linea.refrescar)
+
+        context = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
+        context.pack(fill="x", padx=24, pady=(18, 12))
+        context.grid_columnconfigure(0, weight=3)
+        context.grid_columnconfigure(1, weight=2)
+        context.grid_columnconfigure(2, weight=0)
+        ctk.CTkLabel(context, text="COMUNIDAD", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=0, sticky="w", padx=20, pady=(15, 3))
+        ctk.CTkLabel(context, text="EJERCICIO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=1, sticky="w", padx=12, pady=(15, 3))
+        self.cb_comunidad = UIM.ComboModerno(context, variable=self.comunidad_actual, values=[], width=460, height=40, command=lambda _v: self._on_comunidad_seleccionada())
+        self.cb_comunidad.grid(row=1, column=0, sticky="ew", padx=(20, 12), pady=(0, 16))
+        self.cb_periodo = UIM.ComboModerno(context, variable=self.periodo_actual, values=[], width=280, height=40, command=lambda _v: self._on_periodo_seleccionado())
+        self.cb_periodo.grid(row=1, column=1, sticky="ew", padx=12, pady=(0, 16))
+        add = ctk.CTkFrame(context, fg_color="transparent")
+        add.grid(row=0, column=2, rowspan=2, padx=(12, 18), pady=16)
+        ctk.CTkButton(add, text="+ Comunidad", command=self._nueva_comunidad, height=32, corner_radius=9, fg_color="transparent", border_width=1, border_color=C["borde"], text_color=C["primario"], hover_color=C["acento_suave"]).pack(fill="x")
+        ctk.CTkButton(add, text="Gestionar periodos", command=self._nuevo_periodo, height=32, corner_radius=9, fg_color=C["acento_suave"], text_color=C["primario"], hover_color=C["acento_suave_hover"]).pack(fill="x", pady=(7, 0))
+
+        self.banner_periodo = ctk.CTkFrame(self, fg_color=C["banner_abierto"], corner_radius=14, border_width=1, border_color=C["borde"])
+        self.banner_periodo.pack(fill="x", padx=24, pady=(0, 12))
+        self.lbl_banner = ctk.CTkLabel(self.banner_periodo, text="Selecciona una comunidad y un ejercicio para preparar la regularización.", font=UIM.fuente(12), text_color=C["primario"], anchor="w")
+        self.lbl_banner.pack(fill="x", padx=18, pady=(11, 5))
+        self.etapas = {}
+        tracker = ctk.CTkFrame(self.banner_periodo, fg_color="transparent")
+        tracker.pack(fill="x", padx=18, pady=(1, 11))
+        for index, (key, label) in enumerate((("fuentes", "01  Fuentes"), ("validacion", "02  Validar"), ("calculo", "03  Calcular"), ("cartas", "04  Cartas"), ("fin", "05  Terminado"))):
+            cell = ctk.CTkFrame(tracker, fg_color="transparent")
+            cell.pack(side="left", fill="x", expand=True)
+            dot = ctk.CTkLabel(cell, text="○", font=UIM.fuente(16, "bold"), text_color=C["texto_sec"])
+            dot.pack(side="left")
+            ctk.CTkLabel(cell, text=label, font=UIM.fuente(10, "bold" if index == 0 else "normal"), text_color=C["texto_sec"]).pack(side="left", padx=4)
+            self.etapas[key] = dot
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=24, pady=(0, 14))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=3)
+        body.grid_columnconfigure(2, weight=2)
+        body.grid_rowconfigure(0, weight=3)
+        body.grid_rowconfigure(1, weight=2)
+
+        nav = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
+        nav.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 12))
+        ctk.CTkLabel(nav, text="EL FLUJO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(19, 10))
+        self.botones = {}
+        acciones = (("1", "Importar fuentes", "Excel, propietarios y lecturas", self._accion_regularizacion_guiada), ("2", "Revisar resultados", "Validación y conciliación", self._accion_calcular_reparto), ("3", "Generar cartas", "Elige los conceptos a incluir", self._accion_generar_cartas))
+        for number, name, description, command in acciones:
+            row = ctk.CTkButton(nav, text=f"{number}   {name}\n     {description}", command=command, anchor="w", justify="left", height=64, corner_radius=11, font=UIM.fuente(12, "bold"), fg_color=C["acento_suave"], hover_color=C["acento_suave_hover"], text_color=C["primario"])
+            row.pack(fill="x", padx=12, pady=4)
+            self.botones[name] = row
+        ctk.CTkFrame(nav, fg_color=C["borde"], height=1).pack(fill="x", padx=16, pady=16)
+        ctk.CTkLabel(nav, text="OTRAS ACCIONES", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(0, 7))
+        for name, command in (("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Regenerar Excel", self._accion_actualizar_excel), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
+            button = ctk.CTkButton(nav, text=name, command=command, height=32, corner_radius=8, anchor="w", font=UIM.fuente(11), fg_color="transparent", hover_color=C["acento_suave"], text_color=C["texto_sec"])
+            button.pack(fill="x", padx=12, pady=1)
+            self.botones[name] = button
+
+        hero = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
+        hero.grid(row=0, column=1, sticky="nsew", padx=(0, 12))
+        ctk.CTkLabel(hero, text="Prepara una regularización", font=UIM.fuente(20, "bold"), text_color=C["texto"]).pack(anchor="w", padx=24, pady=(24, 4))
+        ctk.CTkLabel(hero, text="Selecciona los tres archivos de trabajo. El sistema registra el origen, valida importes y deja listas las cartas.", font=UIM.fuente(12), text_color=C["texto_sec"], justify="left", wraplength=460).pack(anchor="w", padx=24)
+        start = ctk.CTkButton(hero, text="Comenzar regularización guiada", command=self._accion_regularizacion_guiada, height=48, corner_radius=12, font=UIM.fuente(14, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"])
+        start.pack(anchor="w", padx=24, pady=(20, 18))
+        self.botones["Comenzar regularización guiada"] = start
+        steps = ctk.CTkFrame(hero, fg_color=C["panel_2"], corner_radius=12)
+        steps.pack(fill="x", padx=24, pady=(0, 24))
+        for label in ("Selecciona fuentes", "Validamos datos", "Genera las cartas"):
+            ctk.CTkLabel(steps, text=label, font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(side="left", fill="x", expand=True, padx=8, pady=13)
+
+        state = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
+        state.grid(row=0, column=2, sticky="nsew")
+        ctk.CTkLabel(state, text="ESTADO DEL EJERCICIO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(20, 10))
+        self.lbl_estado_resumen = ctk.CTkLabel(state, text="Aún no hay una regularización en curso.", font=UIM.fuente(13, "bold"), text_color=C["texto"], justify="left", wraplength=245)
+        self.lbl_estado_resumen.pack(anchor="w", padx=18, pady=(0, 13))
+        for label, value in (("Fuentes", "Pendiente"), ("Conciliación", "Pendiente"), ("Cartas", "Pendiente")):
+            line = ctk.CTkFrame(state, fg_color=C["panel_2"], corner_radius=9)
+            line.pack(fill="x", padx=16, pady=4)
+            ctk.CTkLabel(line, text=label, font=UIM.fuente(11), text_color=C["texto_sec"]).pack(side="left", padx=10, pady=9)
+            ctk.CTkLabel(line, text=value, font=UIM.fuente(11, "bold"), text_color=C["primario"]).pack(side="right", padx=10)
+
+        activity = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
+        activity.grid(row=1, column=1, columnspan=2, sticky="nsew")
+        top = ctk.CTkFrame(activity, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(12, 6))
+        ctk.CTkLabel(top, text="ACTIVIDAD", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(side="left")
+        ctk.CTkButton(top, text="Limpiar", command=self._limpiar_log, width=68, height=25, corner_radius=7, fg_color="transparent", hover_color=C["acento_suave"], text_color=C["texto_sec"]).pack(side="right")
+        log_wrap = ctk.CTkFrame(activity, fg_color="#102021", corner_radius=11)
+        log_wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        mono = UIM.fuente_mono(10)
+        self.log_area = tk.Text(log_wrap, font=mono, bg="#102021", fg="#D6E4E2", insertbackground="white", relief="flat", state="disabled", wrap="word", padx=12, pady=10, borderwidth=0, highlightthickness=0, cursor="arrow")
+        scroll_log = ctk.CTkScrollbar(log_wrap, command=self.log_area.yview, fg_color="#102021", button_color="#2C4848", button_hover_color="#3F6665")
+        self.log_area.configure(yscrollcommand=scroll_log.set)
+        scroll_log.pack(side="right", fill="y", padx=(0, 3), pady=4)
+        self.log_area.pack(side="left", fill="both", expand=True)
+        for tag, color in (("hora", "#6D8988"), ("ok", "#7AD3B6"), ("error", "#FF9A9A"), ("aviso", "#F1C86A"), ("info", "#8BCAC6"), ("titulo", "#FFFFFF"), ("sep", "#29403F"), ("neutro", "#A2BCBA"), ("detalle", "#6D8988"), ("bienvenida", "#A2BCBA")):
+            self.log_area.tag_config(tag, foreground=color)
+
+        self.barra_estado = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=38, border_width=1, border_color=C["borde"])
+        self.barra_estado.pack(fill="x", side="bottom")
+        self.barra_estado.pack_propagate(False)
+        self.punto_estado = UIM.PuntoEstado(self.barra_estado)
+        self.punto_estado.pack(side="left", padx=(22, 6), pady=8)
+        self.interruptor.al_cambiar(self.punto_estado.refrescar)
+        self.lbl_estado = ctk.CTkLabel(self.barra_estado, text="Listo para empezar", font=UIM.fuente(11), text_color=C["texto"])
+        self.lbl_estado.pack(side="left")
+        self.lbl_bd = ctk.CTkLabel(self.barra_estado, text="Datos locales protegidos", font=UIM.fuente(10), text_color=C["texto_sec"])
+        self.lbl_bd.pack(side="right", padx=20)
+        self.progreso = ctk.CTkProgressBar(self.barra_estado, mode="indeterminate", width=140, height=6, corner_radius=3, progress_color=C["primario"], fg_color=C["acento_suave"])
+
     def _crear_ui(self):
         # ── CABECERA ────────────────────────────────────────────────────────
         cabecera = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0,
@@ -467,6 +592,8 @@ class AppGestionFincas(ctk.CTk):
     def _estado(self, texto: str, procesando: bool = False):
         def _act():
             self.lbl_estado.configure(text=texto)
+            if hasattr(self, "lbl_estado_resumen"):
+                self.lbl_estado_resumen.configure(text=texto if procesando else "Listo para el siguiente paso.")
             self.punto_estado.procesando(procesando)
             if procesando:
                 self.progreso.pack(side="left", padx=8, pady=13)
@@ -475,6 +602,10 @@ class AppGestionFincas(ctk.CTk):
                 self.progreso.stop()
                 self.progreso.pack_forget()
         self.after(0, _act)
+
+    def _resumen_ejercicio(self, texto: str):
+        if hasattr(self, "lbl_estado_resumen"):
+            self.after(0, lambda: self.lbl_estado_resumen.configure(text=texto))
 
     # -----------------------------------------------------------------------
     # CARGA DE DATOS
@@ -683,6 +814,7 @@ class AppGestionFincas(ctk.CTk):
                 key, text = labels[stage]
                 self._actualizar_etapa(key)
                 self._estado(text, procesando=True)
+                self._resumen_ejercicio(text)
                 self.log(f"  ▸ {text}", "info")
                 if stage == "individual_readings_imported" and details.get("carried_forward"):
                     self.log(f"  ⚠️ {details['carried_forward']} contador(es) con lectura anterior arrastrada", "aviso")
@@ -699,6 +831,9 @@ class AppGestionFincas(ctk.CTk):
         except Exception:
             pass
         self._actualizar_etapa("cartas")
+        self._resumen_ejercicio(
+            f"Cálculo cuadrado para {resultado['reading_summary'].participating_properties} propiedades. Elige los conceptos para crear las cartas."
+        )
         self.log(f"  ✅ {resultado['results']} resultados calculados; conciliación cuadrada", "ok")
         self.log("  ℹ️ Ahora puedes generar el Excel y las cartas desde los botones del flujo.", "info")
         self.after(0, self._accion_generar_cartas)
