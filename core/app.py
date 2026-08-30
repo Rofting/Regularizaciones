@@ -285,7 +285,7 @@ class AppGestionFincas(ctk.CTk):
         state_summary = ctk.CTkFrame(state, fg_color="transparent")
         state_summary.pack(fill="x", padx=18, pady=(0, 13))
         self.carril_estado_expediente = ctk.CTkFrame(
-            state_summary, width=4, corner_radius=2, fg_color=C["borde"]
+            state_summary, width=4, height=1, corner_radius=2, fg_color=C["borde"]
         )
         self.carril_estado_expediente.pack(side="left", fill="y", padx=(0, 9))
         self.carril_estado_expediente.pack_propagate(False)
@@ -1075,7 +1075,7 @@ class AppGestionFincas(ctk.CTk):
                 )
                 row.pack(fill="x", padx=2, pady=4)
                 marker = ctk.CTkFrame(
-                    row, width=4, corner_radius=2, fg_color=C["primario"]
+                    row, width=4, height=1, corner_radius=2, fg_color=C["primario"]
                 )
                 marker.pack(side="left", fill="y", padx=(7, 9), pady=7)
                 marker.pack_propagate(False)
