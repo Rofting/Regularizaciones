@@ -161,6 +161,66 @@ def create_missing_field_issues(connection: sqlite3.Connection, case_id: int,
     return tuple(review_issue_from_row(row) for row in rows)
 
 
+def create_review_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    code: str,
+    field_name: str,
+    message: str,
+    detected_value: str | None = None,
+) -> ReviewIssue:
+    """Registra de forma idempotente una incidencia genérica que sigue abierta."""
+    normalized_code = code.strip()
+    normalized_field = field_name.strip()
+    normalized_message = message.strip()
+    if not normalized_code or not normalized_field or not normalized_message:
+        raise ValueError("Código, campo y mensaje de la incidencia son obligatorios")
+
+    with _transaction(connection):
+        document = connection.execute(
+            "SELECT id_case FROM source_documents WHERE id_document = ?", (document_id,)
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        connection.execute(
+            """INSERT INTO review_issues
+               (id_case,id_document,code,field_name,detected_value,message,status)
+               VALUES (?,?,?,?,?,?,'open')
+               ON CONFLICT(id_document,code,field_name,status) DO NOTHING""",
+            (
+                case_id,
+                document_id,
+                normalized_code,
+                normalized_field,
+                _normalise_value(detected_value),
+                normalized_message,
+            ),
+        )
+        connection.execute(
+            "UPDATE source_documents SET status='under_review' WHERE id_document=?",
+            (document_id,),
+        )
+        case = get_case(connection, case_id)
+        if case.status == "draft":
+            case = set_case_status(connection, case_id, "gathering_sources")
+        if case.status == "gathering_sources":
+            set_case_status(connection, case_id, "under_review")
+        row = connection.execute(
+            """SELECT issues.id_issue,issues.id_case,issues.id_document,
+                      documents.archived_path,issues.code,issues.field_name,
+                      issues.detected_value,issues.message,issues.status
+               FROM review_issues AS issues
+               JOIN source_documents AS documents
+                 ON documents.id_document=issues.id_document
+               WHERE issues.id_document=? AND issues.code=?
+                 AND issues.field_name=? AND issues.status='open'""",
+            (document_id, normalized_code, normalized_field),
+        ).fetchone()
+    return review_issue_from_row(row)
+
+
 def list_open_issues(connection: sqlite3.Connection, case_id: int) -> tuple[ReviewIssue, ...]:
     rows = connection.execute(
         """SELECT issues.id_issue, issues.id_case, issues.id_document,
