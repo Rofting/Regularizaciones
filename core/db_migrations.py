@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 MIGRATION_1_SQL = (
@@ -123,7 +123,93 @@ def _migration_1(connection: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _migration_1}
+def _migration_2(connection: sqlite3.Connection) -> None:
+    statements = (
+        """
+        CREATE TABLE regularization_cases (
+            id_case INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_comunidad INTEGER NOT NULL REFERENCES comunidades(id_comunidad),
+            nombre TEXT NOT NULL,
+            fecha_inicio TEXT NOT NULL,
+            fecha_fin TEXT NOT NULL,
+            estado TEXT NOT NULL CHECK(estado IN (
+                'draft','gathering_sources','under_review','ready_for_calculation',
+                'calculated','reconciled','deliveries_generated','closed'
+            )),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            CHECK(fecha_fin >= fecha_inicio),
+            UNIQUE(id_comunidad, nombre)
+        )
+        """,
+        """
+        CREATE TABLE source_documents (
+            id_document INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_case INTEGER NOT NULL REFERENCES regularization_cases(id_case) ON DELETE CASCADE,
+            original_name TEXT NOT NULL,
+            archived_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            document_kind TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('registered','under_review','validated','not_applicable')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(id_case, sha256)
+        )
+        """,
+        """
+        CREATE TABLE extraction_candidates (
+            id_candidate INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_document INTEGER NOT NULL REFERENCES source_documents(id_document) ON DELETE CASCADE,
+            field_name TEXT NOT NULL,
+            value TEXT,
+            source TEXT NOT NULL,
+            validation_status TEXT NOT NULL CHECK(validation_status IN ('candidate','validated','rejected')),
+            UNIQUE(id_document, field_name)
+        )
+        """,
+        """
+        CREATE TABLE review_issues (
+            id_issue INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_case INTEGER NOT NULL REFERENCES regularization_cases(id_case) ON DELETE CASCADE,
+            id_document INTEGER NOT NULL REFERENCES source_documents(id_document) ON DELETE CASCADE,
+            code TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            detected_value TEXT,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('open','resolved','dismissed')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at TEXT,
+            UNIQUE(id_document, code, field_name, status)
+        )
+        """,
+        """
+        CREATE TABLE manual_corrections (
+            id_correction INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_issue INTEGER NOT NULL REFERENCES review_issues(id_issue) ON DELETE CASCADE,
+            original_value TEXT,
+            corrected_value TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            resolved_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """,
+        """
+        CREATE INDEX idx_cases_community ON regularization_cases(id_comunidad, fecha_inicio, fecha_fin)
+        """,
+        """
+        CREATE INDEX idx_documents_case ON source_documents(id_case, status)
+        """,
+        """
+        CREATE INDEX idx_issues_case_open ON review_issues(id_case, status)
+        """,
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    1: _migration_1,
+    2: _migration_2,
+}
 
 
 def migrate(connection: sqlite3.Connection) -> int:

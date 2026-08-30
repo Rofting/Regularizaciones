@@ -65,7 +65,7 @@ class DatabaseMigrationTest(unittest.TestCase):
 
         self.assertTrue(EXPECTED_TABLES.issubset(tables))
         self.assertIn("email", columns)
-        self.assertEqual([1], [row[0] for row in versions])
+        self.assertEqual([1, 2], [row[0] for row in versions])
         self.assertEqual(
             [
                 "acs_fixed",
@@ -86,15 +86,52 @@ class DatabaseMigrationTest(unittest.TestCase):
             gestor_bd.crear_bd(str(self.database_path))
 
         with closing(self._connect()) as connection:
-            version_count = connection.execute(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version=1"
-            ).fetchone()[0]
+            versions = connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
             concept_count = connection.execute(
                 "SELECT COUNT(*) FROM regularization_concepts"
             ).fetchone()[0]
 
-        self.assertEqual(1, version_count)
+        self.assertEqual([1, 2], [row[0] for row in versions])
         self.assertEqual(8, concept_count)
+
+    def test_migration_two_creates_case_and_review_tables(self):
+        with closing(self._connect()) as connection:
+            for statement in gestor_bd.TABLAS:
+                connection.execute(statement)
+            connection.commit()
+            version = gestor_bd.aplicar_migraciones(connection)
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(review_issues)")
+            }
+
+        self.assertEqual(version, 2)
+        self.assertTrue({
+            "regularization_cases", "source_documents", "extraction_candidates",
+            "review_issues", "manual_corrections",
+        }.issubset(tables))
+        self.assertTrue({"id_case", "id_document", "field_name", "status"}.issubset(columns))
+
+    def test_migration_two_is_idempotent(self):
+        with closing(self._connect()) as connection:
+            for statement in gestor_bd.TABLAS:
+                connection.execute(statement)
+            connection.commit()
+            self.assertEqual(2, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(2, gestor_bd.aplicar_migraciones(connection))
+            versions = connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
+
+        self.assertEqual([1, 2], [row[0] for row in versions])
 
     def test_failed_migration_rolls_back_every_statement(self):
         with closing(self._connect()) as connection:
