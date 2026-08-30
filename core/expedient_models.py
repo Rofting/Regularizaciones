@@ -20,6 +20,7 @@ class RegularizationCase:
     start_date: date
     end_date: date
     status: CaseStatus
+    period_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ def case_from_row(row) -> RegularizationCase:
         start_date=date.fromisoformat(row["fecha_inicio"]),
         end_date=date.fromisoformat(row["fecha_fin"]),
         status=cast(CaseStatus, row["estado"]),
+        period_id=row["id_periodo"],
     )
 
 

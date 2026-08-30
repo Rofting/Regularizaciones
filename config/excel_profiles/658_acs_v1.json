@@ -1,0 +1,62 @@
+{
+  "key": "658_acs_v1",
+  "version": "1",
+  "community_code": "658",
+  "template_relative_path": "plantillas/comunidades/658/658_acs_v1.xlsx",
+  "active_modules": [
+    "GAS",
+    "ELECTRICIDAD",
+    "AGUA",
+    "OTROS_GASTOS",
+    "ACS"
+  ],
+  "required_sheets": [
+    "DATOS",
+    "GAS",
+    "ELECTRICIDAD",
+    "AGUA",
+    "OTROS GASTOS",
+    "LECTURAS ACS M3",
+    "ANALISIS"
+  ],
+  "required_formula_cells": [
+    ["ANALISIS", "H23"]
+  ],
+  "concepts": [
+    {
+      "key": "acs_fixed",
+      "allocation_method": "equal",
+      "actual_source": "period_parameters.acs_fixed_actual",
+      "billed_source": "period_parameters.acs_fixed_billed",
+      "required": true
+    },
+    {
+      "key": "acs_variable",
+      "allocation_method": "consumption",
+      "actual_source": "period_parameters.acs_variable_actual",
+      "billed_source": "period_parameters.acs_variable_billed",
+      "required": true
+    },
+    {
+      "key": "extraordinary_expense",
+      "allocation_method": "coefficient",
+      "actual_source": "period_parameters.extraordinary_expense_actual",
+      "billed_source": null,
+      "required": false
+    },
+    {
+      "key": "adjustment",
+      "allocation_method": "coefficient",
+      "actual_source": "period_parameters.adjustment_actual",
+      "billed_source": null,
+      "required": false
+    },
+    {
+      "key": "credit",
+      "allocation_method": "coefficient",
+      "actual_source": "period_parameters.credit_actual",
+      "billed_source": null,
+      "required": false
+    }
+  ]
+}

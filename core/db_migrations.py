@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 MIGRATION_1_SQL = (
@@ -206,9 +206,133 @@ def _migration_2(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _migration_3(connection: sqlite3.Connection) -> None:
+    """Vincula expedientes y periodos y añade la auditoría de salidas."""
+    statements = (
+        """
+        ALTER TABLE regularization_cases
+            ADD COLUMN id_periodo INTEGER REFERENCES periodos(id_periodo)
+        """,
+        """
+        CREATE UNIQUE INDEX idx_case_period
+            ON regularization_cases(id_comunidad, id_periodo)
+            WHERE id_periodo IS NOT NULL
+        """,
+        """
+        CREATE TABLE invoice_components (
+            id_component INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_factura INTEGER NOT NULL REFERENCES facturas(id_factura) ON DELETE CASCADE,
+            component_key TEXT NOT NULL,
+            amount REAL NOT NULL,
+            unit TEXT,
+            source_sheet TEXT,
+            source_cell TEXT,
+            UNIQUE(id_factura, component_key)
+        )
+        """,
+        """
+        CREATE TABLE period_parameters (
+            id_parameter INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_comunidad INTEGER NOT NULL REFERENCES comunidades(id_comunidad),
+            id_periodo INTEGER NOT NULL REFERENCES periodos(id_periodo),
+            parameter_key TEXT NOT NULL,
+            numeric_value REAL,
+            text_value TEXT,
+            unit TEXT,
+            source_sheet TEXT,
+            source_cell TEXT,
+            UNIQUE(id_comunidad, id_periodo, parameter_key)
+        )
+        """,
+        """
+        CREATE TABLE excel_template_profiles (
+            id_template_profile INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_comunidad INTEGER NOT NULL REFERENCES comunidades(id_comunidad),
+            profile_key TEXT NOT NULL,
+            profile_version TEXT NOT NULL,
+            template_relative_path TEXT NOT NULL,
+            template_sha256 TEXT NOT NULL,
+            profile_sha256 TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active','inactive','retired')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            retired_at TEXT,
+            UNIQUE(id_comunidad, profile_key, profile_version, template_sha256)
+        )
+        """,
+        """
+        CREATE TABLE excel_export_runs (
+            id_export_run INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_case INTEGER NOT NULL REFERENCES regularization_cases(id_case),
+            id_periodo INTEGER NOT NULL REFERENCES periodos(id_periodo),
+            id_template_profile INTEGER NOT NULL
+                REFERENCES excel_template_profiles(id_template_profile),
+            input_sha256 TEXT NOT NULL,
+            template_sha256 TEXT NOT NULL,
+            output_path TEXT,
+            diagnostic_path TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+                'pending','validating','generating','recalculating',
+                'validated','published','failed'
+            )),
+            error_message TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            published_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE letter_generation_runs (
+            id_letter_run INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_case INTEGER NOT NULL REFERENCES regularization_cases(id_case),
+            id_periodo INTEGER NOT NULL REFERENCES periodos(id_periodo),
+            id_export_run INTEGER NOT NULL REFERENCES excel_export_runs(id_export_run),
+            input_sha256 TEXT NOT NULL,
+            template_sha256 TEXT NOT NULL,
+            output_path TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+                'pending','running','generating','completed','incomplete','failed'
+            )),
+            error_message TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE generated_letters (
+            id_generated_letter INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_letter_run INTEGER NOT NULL
+                REFERENCES letter_generation_runs(id_letter_run) ON DELETE CASCADE,
+            id_propietario INTEGER NOT NULL REFERENCES propietarios(id_propietario),
+            input_sha256 TEXT NOT NULL,
+            template_sha256 TEXT NOT NULL,
+            output_path TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','generated','failed')),
+            error_message TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(id_letter_run, id_propietario)
+        )
+        """,
+        """
+        CREATE INDEX idx_export_runs_case_status
+            ON excel_export_runs(id_case, status, created_at)
+        """,
+        """
+        CREATE INDEX idx_letter_runs_case_status
+            ON letter_generation_runs(id_case, status, created_at)
+        """,
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
+    3: _migration_3,
 }
 
 

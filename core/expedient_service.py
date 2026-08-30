@@ -70,7 +70,8 @@ def _registration_transaction(connection: sqlite3.Connection) -> Iterator[None]:
 
 def _case_row(connection: sqlite3.Connection, case_id: int):
     return connection.execute(
-        """SELECT id_case, id_comunidad, nombre, fecha_inicio, fecha_fin, estado
+        """SELECT id_case, id_comunidad, nombre, fecha_inicio, fecha_fin, estado,
+                  id_periodo
            FROM regularization_cases WHERE id_case = ?""",
         (case_id,),
     ).fetchone()
@@ -136,13 +137,86 @@ def get_case(connection: sqlite3.Connection, case_id: int) -> RegularizationCase
 
 def list_cases(connection: sqlite3.Connection, community_id: int) -> tuple[RegularizationCase, ...]:
     rows = connection.execute(
-        """SELECT id_case, id_comunidad, nombre, fecha_inicio, fecha_fin, estado
+        """SELECT id_case, id_comunidad, nombre, fecha_inicio, fecha_fin, estado,
+                  id_periodo
            FROM regularization_cases
            WHERE id_comunidad = ?
            ORDER BY fecha_inicio DESC, id_case DESC""",
         (community_id,),
     ).fetchall()
     return tuple(case_from_row(row) for row in rows)
+
+
+def link_case_to_period(connection: sqlite3.Connection, id_case: int) -> int:
+    """Enlaza un expediente a un periodo con la misma comunidad y fechas."""
+    with _transaction(connection):
+        case = get_case(connection, id_case)
+        start = case.start_date.isoformat()
+        end = case.end_date.isoformat()
+
+        if case.period_id is not None:
+            linked = connection.execute(
+                """SELECT id_comunidad, fecha_inicio, fecha_fin
+                   FROM periodos WHERE id_periodo = ?""",
+                (case.period_id,),
+            ).fetchone()
+            if linked is None:
+                raise ValueError("El periodo enlazado ya no existe")
+            if (
+                linked["id_comunidad"] != case.community_id
+                or linked["fecha_inicio"] != start
+                or linked["fecha_fin"] != end
+            ):
+                raise ValueError(
+                    "El periodo enlazado pertenece a otra comunidad o tiene fechas incompatibles"
+                )
+            return case.period_id
+
+        same_name = connection.execute(
+            """SELECT id_periodo, fecha_inicio, fecha_fin
+               FROM periodos WHERE id_comunidad = ? AND nombre = ?""",
+            (case.community_id, case.name),
+        ).fetchone()
+        if same_name is not None and (
+            same_name["fecha_inicio"] != start or same_name["fecha_fin"] != end
+        ):
+            raise ValueError(
+                f"El periodo {case.name!r} ya existe con fechas incompatibles"
+            )
+
+        period = same_name or connection.execute(
+            """SELECT id_periodo, fecha_inicio, fecha_fin
+               FROM periodos
+               WHERE id_comunidad = ? AND fecha_inicio = ? AND fecha_fin = ?
+               ORDER BY id_periodo LIMIT 1""",
+            (case.community_id, start, end),
+        ).fetchone()
+        if period is None:
+            cursor = connection.execute(
+                """INSERT INTO periodos
+                   (id_comunidad, nombre, fecha_inicio, fecha_fin, estado)
+                   VALUES (?, ?, ?, ?, 'abierto')""",
+                (case.community_id, case.name, start, end),
+            )
+            period_id = int(cursor.lastrowid)
+        else:
+            period_id = int(period["id_periodo"])
+
+        occupied = connection.execute(
+            """SELECT id_case FROM regularization_cases
+               WHERE id_comunidad = ? AND id_periodo = ? AND id_case <> ?""",
+            (case.community_id, period_id, id_case),
+        ).fetchone()
+        if occupied is not None:
+            raise ValueError("El periodo ya está vinculado a otro expediente")
+
+        connection.execute(
+            """UPDATE regularization_cases
+               SET id_periodo = ?, updated_at = datetime('now')
+               WHERE id_case = ?""",
+            (period_id, id_case),
+        )
+    return period_id
 
 
 def set_case_status(connection: sqlite3.Connection, case_id: int,
