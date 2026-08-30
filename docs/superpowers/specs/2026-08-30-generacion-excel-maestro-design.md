@@ -1,4 +1,4 @@
-# Diseño: generación reproducible del Excel maestro
+# Diseño: Excel maestro, reparto final y cartas
 
 **Fecha:** 2026-08-30  
 **Estado:** aprobado para especificación; pendiente de revisión del documento  
@@ -6,9 +6,9 @@
 
 ## Objetivo
 
-Generar el Excel oficial de una comunidad únicamente a partir de datos validados en la base de datos, conservando la estructura, fórmulas, estilo, impresión y hojas del modelo que el despacho ya considera correcto.
+Generar el Excel oficial de una comunidad únicamente a partir de datos validados en la base de datos, conservando la estructura, fórmulas, estilo, impresión y hojas del modelo que el despacho ya considera correcto. A continuación, calcular el reparto final por propietario y generar una carta Word individual para cada propietario.
 
-El primer resultado debe reproducir el libro de referencia de la comunidad 658. El diseño debe permitir que una segunda comunidad con el mismo patrón, como la 644, active módulos adicionales sin duplicar el motor.
+El primer resultado debe reproducir el libro de referencia de la comunidad 658, conciliar los importes repartidos y producir sus cartas. El diseño debe permitir que una segunda comunidad con el mismo patrón, como la 644, active módulos adicionales sin duplicar el motor.
 
 ## Material de referencia
 
@@ -91,13 +91,43 @@ La interfaz mostrará progreso por etapa: validar expediente, preparar plantilla
 
 El resultado oficial se ubicará en Excels_Maestros/Comunidad_<codigo>.xlsx; cada ejecución también quedará registrada y tendrá el backup correspondiente.
 
-### 6. Fórmulas y recalculado
+### 6. Reparto final por propietario
+
+Una vez publicado el Excel y conciliados sus datos de entrada, el sistema calculará el resultado final de cada propietario. El reparto se hará por conceptos declarados por el perfil, no por una lista fija de columnas:
+
+- cuota fija de ACS y calefacción: partes iguales o el método configurado;
+- consumo variable de ACS y calefacción: lecturas validadas o la estimación auditada aprobada;
+- agua, mantenimiento y gastos extraordinarios: el método configurado para el concepto;
+- abonos y ajustes: importes negativos trazables;
+- conceptos adicionales: la regla declarada para esa comunidad.
+
+Cada importe se distribuye en céntimos con un método determinista de mayor resto. La suma de propietarios por concepto debe coincidir exactamente con el total conciliado del concepto. Los resultados canónicos se guardarán por propietario, periodo y concepto en la tabla de resultados trazables; la tabla histórica de repartos sólo se mantendrá como proyección compatible mientras siga siendo usada por funciones existentes.
+
+No se calcularán repartos ni cartas si falta una lectura obligatoria, si un contador está reiniciado sin una estimación revisada, si no hay pesos válidos de reparto o si cualquier conciliación queda descuadrada. Los errores se convierten en incidencias accionables, no en repartos a cero.
+
+### 7. Cartas individuales
+
+Cuando todos los conceptos y el total general concilien, la aplicación generará una carta Word por propietario. La carta toma exclusivamente los resultados finales de la base de datos y el perfil de carta de la comunidad.
+
+La carta:
+
+- muestra sólo los conceptos activos y relevantes del propietario;
+- diferencia importes cobrados, coste real, ajuste y total;
+- incorpora cuota fija y variable cuando corresponda;
+- muestra consumo propio frente a vecinos y el histórico disponible;
+- conserva el diseño corporativo, sombras, separadores y una sola página aprobados para el despacho;
+- no muestra una marca fija de un despacho: nombre, logotipo y firma proceden de la configuración;
+- se guarda en una carpeta por comunidad y periodo, sin enviar correos automáticamente.
+
+La generación de cartas registra una ejecución y sus errores por propietario. Si una carta falla, el resto puede generarse, pero la ejecución queda marcada como incompleta y no se presenta como lista para envío.
+
+### 8. Fórmulas y recalculado
 
 El generador conservará las fórmulas que formen parte del modelo. Después de escribir los datos se recalculará el libro con un motor compatible de escritorio antes de la conciliación final. La aplicación detectará si dicho motor no está disponible y explicará cómo instalarlo; no marcará un libro como validado basándose sólo en valores de fórmula obsoletos.
 
 Los datos de entrada se escribirán como fechas y números reales, nunca como textos formateados. Las fórmulas y sus referencias se comprobarán antes de publicar para evitar referencias rotas, divisiones por cero o errores de cálculo.
 
-### 7. Diseño de interfaz
+### 9. Diseño de interfaz
 
 No se rediseña la aplicación. En la tarjeta de expediente actual se añadirá:
 
@@ -106,11 +136,13 @@ No se rediseña la aplicación. En la tarjeta de expediente actual se añadirá:
 - acción principal Generar Excel oficial;
 - progreso por etapa y enlace para abrir el resultado o su registro de validación.
 
+Tras la conciliación aparecerán las acciones Calcular reparto final y Generar cartas. Cada una mostrará su propio resumen: conceptos calculados, propietarios incluidos, diferencias conciliadas y cartas correctas o con error.
+
 El lenguaje será directo: “Faltan 2 datos para generar el Excel”, “Conciliación correcta” o “Excel oficial publicado”. El sistema no llamará “perfecto” a una salida que no haya pasado los controles.
 
 ## Flujo completo
 
-PDFs / lecturas / gastos → expediente e incidencias manuales → base de datos normalizada → perfil y copia de plantilla maestra → hojas y fórmulas rellenadas/recalculadas → conciliación y registro de exportación → Excel oficial + backup.
+PDFs / lecturas / gastos → expediente e incidencias manuales → base de datos normalizada → perfil y copia de plantilla maestra → hojas y fórmulas rellenadas/recalculadas → conciliación y registro de exportación → Excel oficial + backup → reparto final por propietario → conciliación al céntimo → cartas Word individuales.
 
 Para la primera ejecución de la 658, la entrada será el Excel real como fuente de arranque. En las siguientes, los PDFs y lecturas usarán el mismo contrato de datos.
 
@@ -124,14 +156,17 @@ La implementación incluirá:
 - pruebas de generación atómica y backup;
 - pruebas de conservación de hojas, fórmulas, estilos críticos y áreas de impresión;
 - conciliación al céntimo de las sumas relevantes;
+- pruebas de reparto de cuota fija, consumo variable, abonos y conceptos configurables;
+- pruebas de redondeo que conservan exactamente el total por concepto;
+- pruebas de bloqueo por contador reiniciado sin estimación aprobada;
+- pruebas de generación de cartas con conceptos opcionales, datos sin identificar y errores aislados;
 - una prueba de comparación privada contra el libro real de la 658, sin incorporar datos personales al repositorio;
-- comprobación visual manual en Windows del Excel generado y de su recalculado.
+- comprobación visual manual en Windows del Excel generado, de su recalculado y de una carta de cada perfil activo.
 
 ## Fuera de alcance de esta entrega
 
 - extracción automática de los PDFs de la 658;
-- reparto final por propietario y cartas;
 - envío de correo;
 - conversión automática de todas las comunidades existentes.
 
-La entrega deja listo el contrato que esas fases usarán y demuestra el generador con la 658.
+La entrega deja operativo el flujo completo de la 658: importación inicial del modelo real, Excel oficial, reparto conciliado y cartas individuales.
