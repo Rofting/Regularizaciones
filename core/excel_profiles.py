@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
-from pathlib import Path, PurePath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -71,12 +72,30 @@ def _require_fields(data: dict[str, Any], required: set[str], context: str) -> N
         raise ValueError(f"Faltan campos en {context}: {', '.join(missing)}")
 
 
-def _validate_relative_template_path(raw_path: Any) -> str:
+def _validate_relative_template_path(raw_path: Any, project_root: Path) -> str:
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ValueError("template_relative_path debe ser una ruta relativa no vacía")
-    path = PurePath(raw_path)
-    if path.is_absolute() or ".." in path.parts:
-        raise ValueError("template_relative_path debe permanecer dentro del proyecto")
+    windows_path = PureWindowsPath(raw_path)
+    posix_path = PurePosixPath(raw_path)
+    if (
+        windows_path.drive
+        or windows_path.root
+        or windows_path.anchor
+        or posix_path.drive
+        or posix_path.root
+        or posix_path.anchor
+        or ".." in windows_path.parts
+        or ".." in posix_path.parts
+    ):
+        raise ValueError("template_relative_path debe ser una ruta relativa del proyecto")
+    root = Path(project_root).resolve()
+    resolved = (root / raw_path).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise ValueError(
+            "template_relative_path debe ser una ruta relativa del proyecto"
+        ) from None
     return raw_path
 
 
@@ -90,6 +109,20 @@ def _string_tuple(value: Any, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+_A1_CELL_REFERENCE = re.compile(r"\$?([A-Za-z]{1,3})\$?([1-9][0-9]*)\Z")
+
+
+def _is_a1_cell_reference(value: str) -> bool:
+    match = _A1_CELL_REFERENCE.fullmatch(value)
+    if match is None:
+        return False
+    column_letters, row_text = match.groups()
+    column = 0
+    for letter in column_letters.upper():
+        column = column * 26 + ord(letter) - ord("A") + 1
+    return column <= 16_384 and int(row_text) <= 1_048_576
+
+
 def _formula_cells(value: Any) -> tuple[tuple[str, str], ...]:
     if not isinstance(value, list):
         raise ValueError("required_formula_cells debe ser una lista")
@@ -98,9 +131,14 @@ def _formula_cells(value: Any) -> tuple[tuple[str, str], ...]:
         if (
             not isinstance(item, list)
             or len(item) != 2
-            or not all(isinstance(part, str) and part for part in item)
+            or not isinstance(item[0], str)
+            or not item[0]
+            or not isinstance(item[1], str)
+            or not _is_a1_cell_reference(item[1])
         ):
-            raise ValueError("Cada fórmula obligatoria debe indicar hoja y celda")
+            raise ValueError(
+                "Cada fórmula obligatoria debe indicar una hoja y una única celda A1"
+            )
         result.append((item[0], item[1]))
     if len(set(result)) != len(result):
         raise ValueError("required_formula_cells contiene valores duplicados")
@@ -193,7 +231,7 @@ def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
         version=data["version"],
         community_code=data["community_code"],
         template_relative_path=_validate_relative_template_path(
-            data["template_relative_path"]
+            data["template_relative_path"], project_root
         ),
         active_modules=active_modules,
         required_sheets=required_sheets,

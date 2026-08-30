@@ -98,6 +98,70 @@ class ExcelProfileTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "LECTURAS ACS M3"):
                 excel_profiles.load_profile("incomplete", root)
 
+    def test_profile_rejects_posix_windows_root_and_drive_template_paths(self):
+        valid = {
+            "key": "unsafe",
+            "version": "1",
+            "community_code": "TEST",
+            "template_relative_path": "plantillas/test.xlsx",
+            "active_modules": [],
+            "required_sheets": [],
+            "required_formula_cells": [],
+            "concepts": [],
+        }
+        unsafe_paths = (
+            "/plantillas/test.xlsx",
+            "\\plantillas\\test.xlsx",
+            "C:\\plantillas\\test.xlsx",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_dir = root / "config" / "excel_profiles"
+            profile_dir.mkdir(parents=True)
+            for index, unsafe_path in enumerate(unsafe_paths):
+                key = f"unsafe_{index}"
+                payload = dict(
+                    valid,
+                    key=key,
+                    template_relative_path=unsafe_path,
+                )
+                (profile_dir / f"{key}.json").write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+                with self.subTest(path=unsafe_path):
+                    with self.assertRaisesRegex(ValueError, "ruta relativa"):
+                        excel_profiles.load_profile(key, root)
+
+    def test_profile_rejects_formula_text_spaces_and_ranges(self):
+        valid = {
+            "key": "formula",
+            "version": "1",
+            "community_code": "TEST",
+            "template_relative_path": "plantillas/test.xlsx",
+            "active_modules": [],
+            "required_sheets": ["ANALISIS"],
+            "required_formula_cells": [["ANALISIS", "H23"]],
+            "concepts": [],
+        }
+        invalid_references = ("TOTAL", "H 23", "H23:H24")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_dir = root / "config" / "excel_profiles"
+            profile_dir.mkdir(parents=True)
+            for index, reference in enumerate(invalid_references):
+                key = f"formula_{index}"
+                payload = dict(
+                    valid,
+                    key=key,
+                    required_formula_cells=[["ANALISIS", reference]],
+                )
+                (profile_dir / f"{key}.json").write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+                with self.subTest(reference=reference):
+                    with self.assertRaisesRegex(ValueError, "A1"):
+                        excel_profiles.load_profile(key, root)
+
 
 class CasePeriodLinkTest(unittest.TestCase):
     def setUp(self):
