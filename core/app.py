@@ -95,7 +95,9 @@ def _importar_modulos():
     modulos = {}
     for nombre in ["gestor_bd", "lector_pdf", "motor_reparto",
                    "excel_writer", "carta_writer", "importar_lecturas_metrigest",
-                   "importar_excel_maestro", "letter_settings", "regularization_flow"]:
+                   "importar_excel_maestro", "letter_settings", "regularization_flow",
+                   "expedient_service", "document_review", "case_ingestion",
+                   "expedient_ui"]:
         try:
             modulos[nombre] = __import__(nombre)
         except ImportError:
@@ -148,8 +150,12 @@ class AppGestionFincas(ctk.CTk):
         # Estado
         self.comunidad_actual  = tk.StringVar(value="")
         self.periodo_actual     = tk.StringVar(value="")
+        self.expediente_actual  = tk.StringVar(value="")
         self.id_comunidad       = None
         self.id_periodo         = None
+        self.id_expediente      = None
+        self.ruta_bd_expedientes = RUTA_BD
+        self.ruta_archivo_expedientes = BASE_DIR / "data" / "expedientes"
         self._procesando        = False
 
         self._crear_ui_v3()
@@ -191,15 +197,18 @@ class AppGestionFincas(ctk.CTk):
         context.grid_columnconfigure(1, weight=2)
         context.grid_columnconfigure(2, weight=0)
         ctk.CTkLabel(context, text="COMUNIDAD", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=0, sticky="w", padx=20, pady=(15, 3))
-        ctk.CTkLabel(context, text="EJERCICIO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=1, sticky="w", padx=12, pady=(15, 3))
+        ctk.CTkLabel(context, text="PERÍODO / EXPEDIENTE", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=1, sticky="w", padx=12, pady=(15, 3))
         self.cb_comunidad = UIM.ComboModerno(context, variable=self.comunidad_actual, values=[], width=460, height=40, command=lambda _v: self._on_comunidad_seleccionada())
         self.cb_comunidad.grid(row=1, column=0, sticky="ew", padx=(20, 12), pady=(0, 16))
         self.cb_periodo = UIM.ComboModerno(context, variable=self.periodo_actual, values=[], width=280, height=40, command=lambda _v: self._on_periodo_seleccionado())
         self.cb_periodo.grid(row=1, column=1, sticky="ew", padx=12, pady=(0, 16))
+        self.lbl_expediente_actual = ctk.CTkLabel(context, textvariable=self.expediente_actual, font=UIM.fuente(10, "bold"), text_color=C["primario"], anchor="w")
+        self.lbl_expediente_actual.grid(row=2, column=1, sticky="w", padx=12, pady=(0, 10))
         add = ctk.CTkFrame(context, fg_color="transparent")
-        add.grid(row=0, column=2, rowspan=2, padx=(12, 18), pady=16)
+        add.grid(row=0, column=2, rowspan=3, padx=(12, 18), pady=16)
         ctk.CTkButton(add, text="+ Comunidad", command=self._nueva_comunidad, height=32, corner_radius=9, fg_color="transparent", border_width=1, border_color=C["borde"], text_color=C["primario"], hover_color=C["acento_suave"]).pack(fill="x")
         ctk.CTkButton(add, text="Gestionar periodos", command=self._nuevo_periodo, height=32, corner_radius=9, fg_color=C["acento_suave"], text_color=C["primario"], hover_color=C["acento_suave_hover"]).pack(fill="x", pady=(7, 0))
+        ctk.CTkButton(add, text="+ Expediente", command=self._accion_crear_expediente, height=32, corner_radius=9, fg_color=C["primario"], hover_color=C["primario_hover"]).pack(fill="x", pady=(7, 0))
 
         self.banner_periodo = ctk.CTkFrame(self, fg_color=C["banner_abierto"], corner_radius=14, border_width=1, border_color=C["borde"])
         self.banner_periodo.pack(fill="x", padx=24, pady=(0, 12))
@@ -228,14 +237,14 @@ class AppGestionFincas(ctk.CTk):
         nav.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 12))
         ctk.CTkLabel(nav, text="EL FLUJO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(19, 10))
         self.botones = {}
-        acciones = (("1", "Importar fuentes", "Excel, propietarios y lecturas", self._accion_regularizacion_guiada), ("2", "Revisar resultados", "Validación y conciliación", self._accion_calcular_reparto), ("3", "Generar cartas", "Elige los conceptos a incluir", self._accion_generar_cartas))
+        acciones = (("1", "Crear expediente", "Define el intervalo a revisar", self._accion_crear_expediente), ("2", "Añadir fuentes", "Archiva documentos sin alterarlos", self._accion_anadir_fuentes), ("3", "Resolver incidencias", "Confirma solo los datos pendientes", self._accion_resolver_incidencias))
         for number, name, description, command in acciones:
             row = ctk.CTkButton(nav, text=f"{number}   {name}\n     {description}", command=command, anchor="w", height=64, corner_radius=11, font=UIM.fuente(12, "bold"), fg_color=C["acento_suave"], hover_color=C["acento_suave_hover"], text_color=C["primario"])
             row.pack(fill="x", padx=12, pady=4)
             self.botones[name] = row
         ctk.CTkFrame(nav, fg_color=C["borde"], height=1).pack(fill="x", padx=16, pady=16)
         ctk.CTkLabel(nav, text="OTRAS ACCIONES", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(0, 7))
-        for name, command in (("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Regenerar Excel", self._accion_actualizar_excel), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
+        for name, command in (("Regularización guiada", self._accion_regularizacion_guiada), ("Calcular reparto", self._accion_calcular_reparto), ("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Regenerar Excel", self._accion_actualizar_excel), ("Generar cartas", self._accion_generar_cartas), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
             button = ctk.CTkButton(nav, text=name, command=command, height=32, corner_radius=8, anchor="w", font=UIM.fuente(11), fg_color="transparent", hover_color=C["acento_suave"], text_color=C["texto_sec"])
             button.pack(fill="x", padx=12, pady=1)
             self.botones[name] = button
@@ -243,10 +252,10 @@ class AppGestionFincas(ctk.CTk):
         hero = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
         hero.grid(row=0, column=1, sticky="nsew", padx=(0, 12))
         ctk.CTkLabel(hero, text="Prepara una regularización", font=UIM.fuente(20, "bold"), text_color=C["texto"]).pack(anchor="w", padx=24, pady=(24, 4))
-        ctk.CTkLabel(hero, text="Selecciona los tres archivos de trabajo. El sistema registra el origen, valida importes y deja listas las cartas.", font=UIM.fuente(12), text_color=C["texto_sec"], justify="left", wraplength=460).pack(anchor="w", padx=24)
-        start = ctk.CTkButton(hero, text="Comenzar regularización guiada", command=self._accion_regularizacion_guiada, height=48, corner_radius=12, font=UIM.fuente(14, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"])
+        ctk.CTkLabel(hero, text="Elige fechas, añade fuentes y resuelve solo los datos que falten.", font=UIM.fuente(12), text_color=C["texto_sec"], justify="left", wraplength=460).pack(anchor="w", padx=24)
+        start = ctk.CTkButton(hero, text="Crear expediente", command=self._accion_crear_expediente, height=48, corner_radius=12, font=UIM.fuente(14, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"])
         start.pack(anchor="w", padx=24, pady=(20, 18))
-        self.botones["Comenzar regularización guiada"] = start
+        self.botones["Crear expediente · principal"] = start
         steps = ctk.CTkFrame(hero, fg_color=C["panel_2"], corner_radius=12)
         steps.pack(fill="x", padx=24, pady=(0, 24))
         for label in ("Selecciona fuentes", "Validamos datos", "Genera las cartas"):
@@ -254,14 +263,17 @@ class AppGestionFincas(ctk.CTk):
 
         state = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
         state.grid(row=0, column=2, sticky="nsew")
-        ctk.CTkLabel(state, text="ESTADO DEL EJERCICIO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(20, 10))
-        self.lbl_estado_resumen = ctk.CTkLabel(state, text="Aún no hay una regularización en curso.", font=UIM.fuente(13, "bold"), text_color=C["texto"], justify="left", wraplength=245)
+        ctk.CTkLabel(state, text="ESTADO DEL EXPEDIENTE", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(20, 10))
+        self.lbl_estado_resumen = ctk.CTkLabel(state, text="Aún no hay un expediente en curso.", font=UIM.fuente(13, "bold"), text_color=C["texto"], justify="left", wraplength=245)
         self.lbl_estado_resumen.pack(anchor="w", padx=18, pady=(0, 13))
-        for label, value in (("Fuentes", "Pendiente"), ("Conciliación", "Pendiente"), ("Cartas", "Pendiente")):
+        self.expediente_metricas = {}
+        for key, label, value in (("rango", "Fechas", "—"), ("fuentes", "Fuentes", "0"), ("estado", "Estado", "—"), ("incidencias", "Incidencias", "0 abiertas")):
             line = ctk.CTkFrame(state, fg_color=C["panel_2"], corner_radius=9)
             line.pack(fill="x", padx=16, pady=4)
             ctk.CTkLabel(line, text=label, font=UIM.fuente(11), text_color=C["texto_sec"]).pack(side="left", padx=10, pady=9)
-            ctk.CTkLabel(line, text=value, font=UIM.fuente(11, "bold"), text_color=C["primario"]).pack(side="right", padx=10)
+            metric = ctk.CTkLabel(line, text=value, font=UIM.fuente(11, "bold"), text_color=C["primario"])
+            metric.pack(side="right", padx=10)
+            self.expediente_metricas[key] = metric
 
         activity = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
         activity.grid(row=1, column=1, columnspan=2, sticky="nsew")
@@ -614,6 +626,7 @@ class AppGestionFincas(ctk.CTk):
         """Crea las carpetas necesarias si no existen."""
         for carpeta in [RUTA_ENTRADA, RUTA_PROCESADOS,
                         RUTA_EXCELS, RUTA_CARTAS,
+                        self.ruta_archivo_expedientes,
                         BASE_DIR / "data",
                         BASE_DIR / "config"]:
             carpeta.mkdir(parents=True, exist_ok=True)
@@ -768,6 +781,104 @@ class AppGestionFincas(ctk.CTk):
 
     def _accion_procesar_facturas(self):
         self._en_hilo(self._procesar_facturas_impl)
+
+    def _accion_crear_expediente(self):
+        expedient_ui = MOD.get("expedient_ui")
+        if not expedient_ui:
+            self.log("No está disponible la interfaz de expedientes.", "error")
+            return
+        expedient_ui.open_create_case_dialog(self)
+
+    def _accion_anadir_fuentes(self):
+        expedient_ui = MOD.get("expedient_ui")
+        if not expedient_ui:
+            self.log("No está disponible la interfaz para añadir fuentes.", "error")
+            return
+        expedient_ui.open_add_sources_dialog(self, self.id_expediente)
+
+    def _accion_resolver_incidencias(self):
+        expedient_ui = MOD.get("expedient_ui")
+        review = MOD.get("document_review")
+        database = MOD.get("gestor_bd")
+        if not expedient_ui or not review or not database:
+            self.log("No está disponible la revisión de incidencias.", "error")
+            return
+        if not self.id_expediente:
+            self.log("Crea o selecciona un expediente antes de revisar incidencias.", "aviso")
+            return
+        connection = database.conectar(str(self.ruta_bd_expedientes))
+        try:
+            issues = review.list_open_issues(connection, self.id_expediente)
+        finally:
+            connection.close()
+        if not issues:
+            self.log("No hay incidencias pendientes en este expediente.", "ok")
+            return
+        expedient_ui.open_issue_dialog(self, issues[0])
+
+    def _refrescar_expediente(self):
+        service = MOD.get("expedient_service")
+        review = MOD.get("document_review")
+        ingestion = MOD.get("case_ingestion")
+        database = MOD.get("gestor_bd")
+        if not all((service, review, ingestion, database)):
+            self.log("No se pudo actualizar el estado del expediente: faltan módulos.", "error")
+            return
+        if not self.id_expediente:
+            self._resumen_ejercicio("Aún no hay un expediente en curso.")
+            return
+
+        connection = database.conectar(str(self.ruta_bd_expedientes))
+        try:
+            case = service.get_case(connection, self.id_expediente)
+            document_count = ingestion.count_case_documents(
+                connection, self.id_expediente
+            )
+            open_count = len(review.list_open_issues(connection, self.id_expediente))
+        finally:
+            connection.close()
+
+        self.expediente_actual.set(case.name)
+        date_range = (
+            f"{case.start_date.strftime('%d/%m/%Y')} – "
+            f"{case.end_date.strftime('%d/%m/%Y')}"
+        )
+        summary = (
+            f"{case.name}\n{date_range}\n{document_count} fuente(s) · "
+            f"{open_count} incidencia(s) abierta(s)\nEstado: {case.status}"
+        )
+        self._resumen_ejercicio(summary)
+
+        def update_metrics():
+            metrics = getattr(self, "expediente_metricas", {})
+            values = {
+                "rango": date_range,
+                "fuentes": str(document_count),
+                "estado": case.status,
+                "incidencias": f"{open_count} abiertas",
+            }
+            for key, value in values.items():
+                if key in metrics:
+                    metrics[key].configure(text=value)
+
+        self.after(0, update_metrics)
+        self.log(
+            f"{case.name} · {date_range} · {document_count} fuente(s) · "
+            f"estado {case.status} · {open_count} incidencia(s) abierta(s)",
+            "info",
+        )
+        if open_count:
+            self._actualizar_etapa("validacion")
+            self.log(f"{open_count} incidencia(s) por resolver", "aviso")
+        elif case.status == "ready_for_calculation":
+            self._actualizar_etapa("calculo")
+            self.log("Listo para cálculo", "ok")
+        elif document_count:
+            self._actualizar_etapa("fuentes")
+            self.log(
+                f"Expediente actualizado · {document_count} fuente(s) · estado {case.status}",
+                "info",
+            )
 
     def _accion_regularizacion_guiada(self):
         if not self._validar_seleccion():
