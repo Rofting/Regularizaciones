@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 MIGRATION_1_SQL = (
@@ -329,10 +329,37 @@ def _migration_3(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _migration_4(connection: sqlite3.Connection) -> None:
+    """Enlaza el lote físico con cada expediente y uso lógico de la fuente."""
+    statements = (
+        """
+        CREATE TABLE case_import_batches (
+            id_case INTEGER NOT NULL
+                REFERENCES regularization_cases(id_case) ON DELETE CASCADE,
+            id_batch INTEGER NOT NULL
+                REFERENCES import_batches(id_batch) ON DELETE CASCADE,
+            id_periodo INTEGER NOT NULL REFERENCES periodos(id_periodo),
+            source_kind TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY(id_case, id_batch, id_periodo, source_kind),
+            UNIQUE(id_case, id_periodo, source_kind, source_sha256)
+        )
+        """,
+        """
+        CREATE INDEX idx_case_import_batches_period
+            ON case_import_batches(id_case, id_periodo, source_kind)
+        """,
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
     3: _migration_3,
+    4: _migration_4,
 }
 
 

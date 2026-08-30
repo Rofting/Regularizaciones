@@ -14,6 +14,7 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -200,13 +201,23 @@ def _register_source(
     )[0]
 
 
+def _verified_archived_path(document) -> Path:
+    archived_path = Path(document.archived_path).resolve()
+    if not archived_path.is_file() or _sha256(archived_path) != document.sha256:
+        raise RuntimeError("La copia archivada no supera la verificación de hash")
+    return archived_path
+
+
 def _existing_batch(
-    connection: sqlite3.Connection, community_id: int, source_hash: str
+    connection: sqlite3.Connection,
+    community_id: int,
+    source_hash: str,
+    source_kind: str,
 ) -> sqlite3.Row | None:
     return connection.execute(
         """SELECT id_batch,id_periodo FROM import_batches
-           WHERE id_comunidad=? AND source_sha256=?""",
-        (community_id, source_hash),
+           WHERE id_comunidad=? AND source_sha256=? AND source_kind=?""",
+        (community_id, source_hash, source_kind),
     ).fetchone()
 
 
@@ -226,6 +237,23 @@ def _start_batch(
         (community_id, period_id, source_kind, str(archived_path), source_hash),
     )
     return int(cursor.lastrowid)
+
+
+def _link_batch_to_case(
+    connection: sqlite3.Connection,
+    *,
+    id_case: int,
+    id_batch: int,
+    id_periodo: int,
+    source_kind: str,
+    source_hash: str,
+) -> None:
+    connection.execute(
+        """INSERT OR IGNORE INTO case_import_batches
+           (id_case,id_batch,id_periodo,source_kind,source_sha256)
+           VALUES (?,?,?,?,?)""",
+        (id_case, id_batch, id_periodo, source_kind, source_hash),
+    )
 
 
 def _store_sources(
@@ -412,16 +440,23 @@ def _parse_invoice_sheets(
             consumption = _number(consumption_cell.value) if consumption_cell else None
             fixed = _number(fixed_cell.value) if fixed_cell else None
             variable = _number(variable_cell.value) if variable_cell else None
-            if sheet_name == "AGUA":
-                for key, cell, amount in (("fixed", fixed_cell, fixed), ("variable", variable_cell, variable)):
-                    if cell is None or amount is None:
-                        address = cell.coordinate if cell is not None else "?"
-                        _issue(
-                            connection, id_case=id_case, id_document=id_document,
-                            code="MISSING_REQUIRED_FIELD",
-                            field_name=f"AGUA.{address}.{key}",
-                            message=f"Falta el componente obligatorio {key} de agua",
-                        )
+            missing_required = []
+            for key, cell, amount in (
+                ("consumption", consumption_cell, consumption),
+                ("fixed", fixed_cell, fixed),
+                ("variable", variable_cell, variable),
+            ):
+                if cell is None or amount is None:
+                    address = cell.coordinate if cell is not None else "?"
+                    missing_required.append(key)
+                    _issue(
+                        connection, id_case=id_case, id_document=id_document,
+                        code="MISSING_REQUIRED_FIELD",
+                        field_name=f"{sheet_name}.{address}.{key}",
+                        message=f"Falta el valor obligatorio {key} de la factura",
+                    )
+            if missing_required:
+                continue
             if fixed is not None and variable is not None and abs((fixed + variable) - total) > 0.02:
                 _issue(
                     connection, id_case=id_case, id_document=id_document,
@@ -662,21 +697,37 @@ def import_master_excel(
         connection, id_case=id_case, source_path=path,
         document_kind="excel_master_bootstrap",
     )
-    existing = _existing_batch(connection, case.community_id, document.sha256)
+    archived_path = _verified_archived_path(document)
+    source_kind = "excel_master_bootstrap"
+    existing = _existing_batch(
+        connection, case.community_id, document.sha256, source_kind
+    )
     if existing is not None:
+        with connection:
+            _link_batch_to_case(
+                connection, id_case=id_case, id_batch=int(existing["id_batch"]),
+                id_periodo=period_id, source_kind=source_kind,
+                source_hash=document.sha256,
+            )
         return BootstrapImportResult(
             int(existing["id_batch"]), int(existing["id_periodo"]), 0, 0, 0,
             _open_issue_count(connection, id_case),
         )
 
-    formula_book = load_workbook(path, data_only=False)
-    values_book = load_workbook(path, data_only=True)
+    archived_bytes = archived_path.read_bytes()
+    formula_book = load_workbook(BytesIO(archived_bytes), data_only=False)
+    values_book = load_workbook(BytesIO(archived_bytes), data_only=True)
     connection.execute("BEGIN IMMEDIATE")
     try:
         batch_id = _start_batch(
             connection, community_id=case.community_id, period_id=period_id,
-            source_kind="excel_master_bootstrap",
+            source_kind=source_kind,
             archived_path=document.archived_path, source_hash=document.sha256,
+        )
+        _link_batch_to_case(
+            connection, id_case=id_case, id_batch=batch_id,
+            id_periodo=period_id, source_kind=source_kind,
+            source_hash=document.sha256,
         )
         for sheet_name in profile.required_sheets:
             if sheet_name not in formula_book.sheetnames:
@@ -692,7 +743,7 @@ def import_master_excel(
             archived_path=document.archived_path,
         )
         _parse_reference_parameters(
-            connection, path=path, id_case=id_case,
+            connection, path=archived_path, id_case=id_case,
             id_document=document.id_document, id_batch=batch_id,
             community_id=case.community_id, period_id=period_id, case=case,
         )
@@ -735,16 +786,33 @@ def _import_owner_source(
         connection, id_case=id_case, source_path=path,
         document_kind="owner_list",
     )
-    existing = _existing_batch(connection, case.community_id, document.sha256)
+    archived_path = _verified_archived_path(document)
+    source_kind = "owner_list"
+    existing = _existing_batch(
+        connection, case.community_id, document.sha256, source_kind
+    )
     if existing is not None:
+        with connection:
+            _link_batch_to_case(
+                connection, id_case=id_case, id_batch=int(existing["id_batch"]),
+                id_periodo=period_id, source_kind=source_kind,
+                source_hash=document.sha256,
+            )
         return int(existing["id_batch"]), 0
-    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+    with archived_path.open(
+        "r", encoding="utf-8-sig", errors="replace", newline=""
+    ) as handle:
         rows = list(csv.reader(handle, delimiter=";"))
     connection.execute("BEGIN IMMEDIATE")
     try:
         batch_id = _start_batch(
             connection, community_id=case.community_id, period_id=period_id,
-            source_kind="owner_list", archived_path=document.archived_path,
+            source_kind=source_kind, archived_path=document.archived_path,
+            source_hash=document.sha256,
+        )
+        _link_batch_to_case(
+            connection, id_case=id_case, id_batch=batch_id,
+            id_periodo=period_id, source_kind=source_kind,
             source_hash=document.sha256,
         )
         inserted = 0
@@ -776,7 +844,15 @@ def _import_owner_source(
                         message="Falta código de vivienda o nombre de propietario",
                     )
                     continue
-                coefficient = _number(field(coefficient_column)) or 0.0
+                coefficient = _number(field(coefficient_column))
+                if coefficient_column is None or coefficient is None:
+                    _issue(
+                        connection, id_case=id_case, id_document=document.id_document,
+                        code="MISSING_REQUIRED_FIELD",
+                        field_name=f"owner_list.row_{row_number}.coefficient",
+                        message="Falta el coeficiente requerido del propietario",
+                    )
+                    continue
                 email = _clean(field(email_column)) or None
                 cursor = connection.execute(
                     """INSERT OR IGNORE INTO propietarios
@@ -828,12 +904,46 @@ def _reading_grid(path: Path) -> tuple[str, list[list[Any]]]:
         workbook.close()
 
 
-def _period_header(value: Any) -> bool:
+_MONTH_NUMBERS = {
+    "ene": 1, "enero": 1,
+    "feb": 2, "febrero": 2,
+    "mar": 3, "marzo": 3,
+    "abr": 4, "abril": 4,
+    "may": 5, "mayo": 5,
+    "jun": 6, "junio": 6,
+    "jul": 7, "julio": 7,
+    "ago": 8, "agosto": 8,
+    "sep": 9, "sept": 9, "septiembre": 9,
+    "oct": 10, "octubre": 10,
+    "nov": 11, "noviembre": 11,
+    "dic": 12, "diciembre": 12,
+}
+
+
+def _period_header_date(value: Any) -> tuple[int, int] | None:
     text = _clean(value).lower()
-    return bool(
-        re.fullmatch(r"\d{1,2}/\d{2,4}", text)
-        or re.fullmatch(r"[a-záéíóú]{3,10}-\d{2,4}", text)
-    )
+    numeric = re.fullmatch(r"(\d{1,2})/(\d{2,4})", text)
+    if numeric:
+        month, year = int(numeric[1]), int(numeric[2])
+        if year < 100:
+            year += 2000
+        return (year, month) if 1 <= month <= 12 else None
+    named = re.fullmatch(r"([a-záéíóú]{3,10})-(\d{2,4})", text)
+    if named:
+        month_name = unicodedata.normalize("NFKD", named[1])
+        month_name = "".join(
+            character for character in month_name if not unicodedata.combining(character)
+        )
+        month = _MONTH_NUMBERS.get(month_name)
+        year = int(named[2])
+        if year < 100:
+            year += 2000
+        return (year, month) if month is not None else None
+    return None
+
+
+def _period_header(value: Any) -> bool:
+    return _period_header_date(value) is not None
 
 
 def _owner_key(value: Any) -> str:
@@ -853,15 +963,30 @@ def _import_reading_source(
         connection, id_case=id_case, source_path=path,
         document_kind="meter_readings",
     )
-    existing = _existing_batch(connection, case.community_id, document.sha256)
+    archived_path = _verified_archived_path(document)
+    source_kind = "meter_readings"
+    existing = _existing_batch(
+        connection, case.community_id, document.sha256, source_kind
+    )
     if existing is not None:
+        with connection:
+            _link_batch_to_case(
+                connection, id_case=id_case, id_batch=int(existing["id_batch"]),
+                id_periodo=period_id, source_kind=source_kind,
+                source_hash=document.sha256,
+            )
         return int(existing["id_batch"]), 0
-    sheet_name, rows = _reading_grid(path)
+    sheet_name, rows = _reading_grid(archived_path)
     connection.execute("BEGIN IMMEDIATE")
     try:
         batch_id = _start_batch(
             connection, community_id=case.community_id, period_id=period_id,
-            source_kind="meter_readings", archived_path=document.archived_path,
+            source_kind=source_kind, archived_path=document.archived_path,
+            source_hash=document.sha256,
+        )
+        _link_batch_to_case(
+            connection, id_case=id_case, id_batch=batch_id,
+            id_periodo=period_id, source_kind=source_kind,
             source_hash=document.sha256,
         )
         header_row = None
@@ -872,7 +997,12 @@ def _import_reading_source(
             if "PROPIEDAD" in labels and any(label in {"COD", "CODIGO"} for label in labels):
                 header_row = index
                 property_column = labels.index("PROPIEDAD")
-                period_columns = [i for i, value in enumerate(row) if _period_header(value)]
+                dated_columns = [
+                    (i, _period_header_date(value))
+                    for i, value in enumerate(row)
+                    if _period_header(value)
+                ]
+                period_columns = [i for i, _ in dated_columns]
                 break
         if header_row is None or property_column is None or len(period_columns) < 2:
             _issue(
@@ -891,7 +1021,33 @@ def _import_reading_source(
         }
         inserted = 0
         if period_columns:
-            initial_column, final_column = period_columns[0], period_columns[-1]
+            initial_column = next(
+                (
+                    column for column, header_date in dated_columns
+                    if header_date == (case.start_date.year, case.start_date.month)
+                ),
+                None,
+            )
+            final_column = next(
+                (
+                    column for column, header_date in dated_columns
+                    if header_date == (case.end_date.year, case.end_date.month)
+                ),
+                None,
+            )
+            if initial_column is None or final_column is None:
+                code = (
+                    "INCOMPATIBLE_DATE"
+                    if initial_column is None and final_column is None
+                    else "MISSING_READING_RANGE"
+                )
+                _issue(
+                    connection, id_case=id_case, id_document=document.id_document,
+                    code=code, field_name="readings.period_columns",
+                    message="Las columnas de lectura no corresponden al rango del expediente",
+                    detected_value=", ".join(str(row[column]) for column in period_columns),
+                )
+        if period_columns and initial_column is not None and final_column is not None:
             for row_number, row in enumerate(rows[header_row + 1:], start=header_row + 2):
                 property_code = _clean(row[property_column] if property_column < len(row) else None)
                 if not property_code:

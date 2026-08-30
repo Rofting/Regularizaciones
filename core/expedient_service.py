@@ -236,7 +236,7 @@ def _sha256(path: Path) -> str:
 
 
 def _safe_filename(name: str) -> str:
-    safe_name = re.sub(r"[^\\w.-]", "_", name, flags=re.UNICODE).strip(".")
+    safe_name = re.sub(r"[^\w.-]", "_", name, flags=re.UNICODE).strip(".")
     return safe_name or "documento"
 
 

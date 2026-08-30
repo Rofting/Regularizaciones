@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from datetime import date
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
 
@@ -20,6 +21,7 @@ import expedient_service
 import excel_profiles
 import gestor_bd
 import document_review
+import excel_bootstrap_importer
 from excel_bootstrap_importer import import_companion_sources, import_master_excel
 
 
@@ -154,7 +156,12 @@ def _append_gas_invoice(source: Path, target: Path) -> Path:
     return target
 
 
-def _make_owners(path: Path) -> Path:
+def _make_owners(
+    path: Path,
+    *,
+    first_coefficient: str = "50,00",
+    second_coefficient: str = "50,00",
+) -> Path:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
@@ -165,23 +172,29 @@ def _make_owners(path: Path) -> Path:
         writer.writerows([
             {
                 "Codigo": "1", "Nombre": "Persona Inventada Uno",
-                "Fdenominacion": "P1-A", "Coeficiente": "50,00",
+                "Fdenominacion": "P1-A", "Coeficiente": first_coefficient,
                 "Email": "uno@example.invalid",
             },
             {
                 "Codigo": "2", "Nombre": "Persona Inventada Dos",
-                "Fdenominacion": "P1-B", "Coeficiente": "50,00",
+                "Fdenominacion": "P1-B", "Coeficiente": second_coefficient,
                 "Email": "dos@example.invalid",
             },
         ])
     return path
 
 
-def _make_readings(path: Path, *, include_second: bool = True) -> Path:
+def _make_readings(
+    path: Path,
+    *,
+    include_second: bool = True,
+    initial_header: str = "09/2025",
+    final_header: str = "08/2026",
+) -> Path:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "LECTURAS"
-    headers = ["Cod.", "Propiedad", "09/2025", "08/2026"]
+    headers = ["Cod.", "Propiedad", initial_header, final_header]
     sheet.append(headers)
     sheet.append(["1", "P1-A", 100, 150])
     if include_second:
@@ -446,6 +459,170 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(issue)
         self.assertIn("P1-B", issue["field_name"])
+
+    def test_reading_headers_from_another_period_are_not_persisted(self):
+        owners = _make_owners(self.root / "propietarios_periodo.csv")
+        readings = _make_readings(
+            self.root / "lecturas_2020.xlsx",
+            initial_header="09/2020",
+            final_header="08/2021",
+        )
+
+        result = import_companion_sources(
+            self.connection, id_case=self.case.id_case,
+            owner_list_path=owners, readings_path=readings,
+            profile=self.profile, actor="Prueba",
+        )
+
+        self.assertEqual(0, result.imported_reading_count)
+        self.assertEqual(0, self.connection.execute(
+            "SELECT COUNT(*) FROM lecturas_vecino"
+        ).fetchone()[0])
+        self.assertEqual(1, self.connection.execute(
+            """SELECT COUNT(*) FROM review_issues
+               WHERE code='INCOMPATIBLE_DATE' AND status='open'"""
+        ).fetchone()[0])
+
+    def test_missing_invoice_values_are_not_replaced_with_zero(self):
+        workbook_path = _make_master(self.root / "factura_incompleta.xlsx")
+        workbook = load_workbook(workbook_path)
+        workbook["GAS"]["J10"] = None
+        workbook["AGUA"]["W14"] = 0
+        workbook.save(workbook_path)
+
+        result = import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=workbook_path, profile=self.profile, actor="Prueba",
+        )
+
+        self.assertEqual(2, result.imported_invoice_count)
+        self.assertIsNone(self.connection.execute(
+            "SELECT id_factura FROM facturas WHERE tipo_suministro='GAS'"
+        ).fetchone())
+        water_fixed = self.connection.execute(
+            """SELECT amount FROM invoice_components c
+               JOIN facturas f ON f.id_factura=c.id_factura
+               WHERE f.tipo_suministro='AGUA' AND c.component_key='fixed'"""
+        ).fetchone()
+        self.assertEqual(0, water_fixed["amount"])
+        self.assertGreater(self.connection.execute(
+            """SELECT COUNT(*) FROM review_issues
+               WHERE code='MISSING_REQUIRED_FIELD' AND field_name LIKE 'GAS.%fixed'"""
+        ).fetchone()[0], 0)
+
+    def test_missing_coefficient_does_not_create_owner_but_explicit_zero_does(self):
+        owners = _make_owners(
+            self.root / "coeficientes.csv",
+            first_coefficient="",
+            second_coefficient="0",
+        )
+        readings = _make_readings(self.root / "lecturas_coeficientes.xlsx")
+
+        import_companion_sources(
+            self.connection, id_case=self.case.id_case,
+            owner_list_path=owners, readings_path=readings,
+            profile=self.profile, actor="Prueba",
+        )
+
+        self.assertIsNone(self.connection.execute(
+            """SELECT id_propietario FROM propietarios
+               WHERE id_comunidad=? AND codigo_vivienda='P1-A'""",
+            (self.community_id,),
+        ).fetchone())
+        explicit_zero = self.connection.execute(
+            """SELECT coeficiente FROM propietarios
+               WHERE id_comunidad=? AND codigo_vivienda='P1-B'""",
+            (self.community_id,),
+        ).fetchone()
+        self.assertEqual(0, explicit_zero["coeficiente"])
+
+    def test_same_owner_batch_is_linked_to_each_case_and_period(self):
+        owners = _make_owners(self.root / "propietarios_compartidos.csv")
+        readings_first = _make_readings(self.root / "lecturas_2025.xlsx")
+        first = import_companion_sources(
+            self.connection, id_case=self.case.id_case,
+            owner_list_path=owners, readings_path=readings_first,
+            profile=self.profile, actor="Prueba",
+        )
+        second_case = expedient_service.create_case(
+            self.connection,
+            self.community_id,
+            name="2026-2027",
+            start_date=date(2026, 9, 1),
+            end_date=date(2027, 8, 31),
+        )
+        readings_second = _make_readings(
+            self.root / "lecturas_2026.xlsx",
+            initial_header="09/2026",
+            final_header="08/2027",
+        )
+
+        second = import_companion_sources(
+            self.connection, id_case=second_case.id_case,
+            owner_list_path=owners, readings_path=readings_second,
+            profile=self.profile, actor="Prueba",
+        )
+
+        self.assertEqual(first.id_batches[0], second.id_batches[0])
+        links = self.connection.execute(
+            """SELECT id_case,id_periodo FROM case_import_batches
+               WHERE source_kind='owner_list' ORDER BY id_case"""
+        ).fetchall()
+        self.assertEqual(
+            [(self.case.id_case, first.id_periodo), (second_case.id_case, second.id_periodo)],
+            [(row["id_case"], row["id_periodo"]) for row in links],
+        )
+
+    def test_master_is_parsed_from_archived_copy_after_original_mutates(self):
+        workbook_path = _make_master(self.root / "original_mutable.xlsx")
+        real_register = excel_bootstrap_importer.register_source_document
+
+        def archive_then_mutate(*args, **kwargs):
+            result = real_register(*args, **kwargs)
+            changed = load_workbook(workbook_path)
+            changed["GAS"]["L10"] = 999
+            changed.save(workbook_path)
+            return result
+
+        with patch.object(
+            excel_bootstrap_importer,
+            "register_source_document",
+            side_effect=archive_then_mutate,
+        ):
+            import_master_excel(
+                self.connection, id_case=self.case.id_case,
+                workbook_path=workbook_path, profile=self.profile, actor="Prueba",
+            )
+
+        gas_total = self.connection.execute(
+            "SELECT importe_total FROM facturas WHERE tipo_suministro='GAS'"
+        ).fetchone()[0]
+        self.assertEqual(100, gas_total)
+
+    def test_tampered_archived_copy_is_rejected_before_parsing(self):
+        workbook_path = _make_master(self.root / "origen_verificable.xlsx")
+        real_register = excel_bootstrap_importer.register_source_document
+
+        def archive_then_tamper(*args, **kwargs):
+            result = real_register(*args, **kwargs)
+            with Path(result[0].archived_path).open("ab") as archived:
+                archived.write(b"alterado")
+            return result
+
+        with patch.object(
+            excel_bootstrap_importer,
+            "register_source_document",
+            side_effect=archive_then_tamper,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "hash"):
+                import_master_excel(
+                    self.connection, id_case=self.case.id_case,
+                    workbook_path=workbook_path, profile=self.profile, actor="Prueba",
+                )
+
+        self.assertEqual(0, self.connection.execute(
+            "SELECT COUNT(*) FROM facturas"
+        ).fetchone()[0])
 
 
 if __name__ == "__main__":

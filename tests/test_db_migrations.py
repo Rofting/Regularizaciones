@@ -19,6 +19,7 @@ import gestor_bd
 EXPECTED_TABLES = {
     "schema_migrations",
     "import_batches",
+    "case_import_batches",
     "source_values",
     "regularization_concepts",
     "owner_concept_results",
@@ -71,7 +72,7 @@ class DatabaseMigrationTest(unittest.TestCase):
 
         self.assertTrue(EXPECTED_TABLES.issubset(tables))
         self.assertIn("email", columns)
-        self.assertEqual([1, 2, 3], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4], [row[0] for row in versions])
         self.assertEqual(
             [
                 "acs_fixed",
@@ -99,7 +100,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM regularization_concepts"
             ).fetchone()[0]
 
-        self.assertEqual([1, 2, 3], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4], [row[0] for row in versions])
         self.assertEqual(8, concept_count)
 
     def test_migration_two_creates_case_and_review_tables(self):
@@ -125,7 +126,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 3)
+        self.assertEqual(version, 4)
         self.assertTrue({
             "regularization_cases", "source_documents", "extraction_candidates",
             "review_issues", "manual_corrections",
@@ -142,13 +143,13 @@ class DatabaseMigrationTest(unittest.TestCase):
             for statement in gestor_bd.TABLAS:
                 connection.execute(statement)
             connection.commit()
-            self.assertEqual(3, gestor_bd.aplicar_migraciones(connection))
-            self.assertEqual(3, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(4, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(4, gestor_bd.aplicar_migraciones(connection))
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
 
-        self.assertEqual([1, 2, 3], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4], [row[0] for row in versions])
 
     def test_migration_three_links_cases_and_creates_export_audit_tables(self):
         with closing(self._connect()) as connection:
@@ -176,7 +177,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(3, version)
+        self.assertEqual(4, version)
         self.assertTrue({
             "invoice_components",
             "period_parameters",
