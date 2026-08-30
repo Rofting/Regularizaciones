@@ -6,6 +6,7 @@ from contextlib import redirect_stdout
 from datetime import date
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -146,6 +147,28 @@ class ExpedientServiceTest(unittest.TestCase):
         self.assertEqual(first.id_document, duplicate.id_document)
         self.assertEqual(archived_bytes, first.archived_path.read_bytes())
         self.assertEqual(1, len(list(first.archived_path.parent.iterdir())))
+
+    def test_register_source_document_does_not_require_hard_links(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Sin enlaces duros",
+            start_date=date(2026, 5, 1), end_date=date(2026, 5, 31),
+        )
+        source_path = Path(self.directory.name) / "portable.pdf"
+        source_path.write_bytes(b"%PDF-1.4 portable")
+        archive_root = Path(self.directory.name) / "expedientes"
+
+        with patch("expedient_service.os.link", side_effect=OSError("sin soporte")) as link:
+            document, created = expedient_service.register_source_document(
+                self.connection, case.id_case, source_path=source_path,
+                archive_root=archive_root, document_kind="invoice",
+            )
+
+        link.assert_not_called()
+        self.assertTrue(created)
+        self.assertEqual(source_path.read_bytes(), document.archived_path.read_bytes())
+        self.assertEqual(1, self.connection.execute(
+            "SELECT COUNT(*) FROM source_documents WHERE id_case = ?", (case.id_case,)
+        ).fetchone()[0])
 
     def test_set_case_status_rejects_skipping_gathering_sources(self):
         case = expedient_service.create_case(

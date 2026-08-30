@@ -207,8 +207,13 @@ def register_source_document(connection: sqlite3.Connection, case_id: int, *,
             shutil.copy2(source, staging_path)
             if destination.exists():
                 raise FileExistsError(f"Ya existe un archivo archivado en {destination}")
-            os.link(staging_path, destination)
+            destination_descriptor = os.open(
+                destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            )
             final_created = True
+            with os.fdopen(destination_descriptor, "wb") as destination_file:
+                with staging_path.open("rb") as staging_file:
+                    shutil.copyfileobj(staging_file, destination_file)
             staging_path.unlink()
             staging_path = None
             cursor = connection.execute(
