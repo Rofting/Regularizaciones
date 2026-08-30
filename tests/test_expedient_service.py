@@ -34,6 +34,12 @@ class ExpedientServiceTest(unittest.TestCase):
         self.connection.close()
         self.directory.cleanup()
 
+    def _new_connection(self, timeout=5.0):
+        connection = sqlite3.connect(self.database_path, timeout=timeout)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
     def test_create_case_preserves_any_exact_date_range(self):
         created = expedient_service.create_case(
             self.connection, self.community_id, name="Invierno parcial",
@@ -77,6 +83,69 @@ class ExpedientServiceTest(unittest.TestCase):
         self.assertEqual("gathering_sources", expedient_service.get_case(
             self.connection, case.id_case
         ).status)
+
+    def test_register_source_document_rejects_outer_transaction_without_side_effects(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Transacción externa",
+            start_date=date(2026, 3, 1), end_date=date(2026, 3, 31),
+        )
+        source_path = Path(self.directory.name) / "externa.pdf"
+        source_path.write_bytes(b"%PDF-1.4 externa")
+        archive_root = Path(self.directory.name) / "expedientes"
+
+        self.connection.execute("BEGIN")
+        try:
+            with self.assertRaisesRegex(RuntimeError, "transacción externa"):
+                expedient_service.register_source_document(
+                    self.connection, case.id_case, source_path=source_path,
+                    archive_root=archive_root, document_kind="invoice",
+                )
+        finally:
+            self.connection.rollback()
+
+        self.assertFalse((archive_root / str(case.id_case) / "fuentes").exists())
+        self.assertEqual(0, self.connection.execute(
+            "SELECT COUNT(*) FROM source_documents WHERE id_case = ?", (case.id_case,)
+        ).fetchone()[0])
+
+    def test_register_source_document_serializes_before_deduplication(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Concurrencia",
+            start_date=date(2026, 4, 1), end_date=date(2026, 4, 30),
+        )
+        source_path = Path(self.directory.name) / "compartida.pdf"
+        source_path.write_bytes(b"%PDF-1.4 compartida")
+        archive_root = Path(self.directory.name) / "expedientes"
+        first, first_created = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        archived_bytes = first.archived_path.read_bytes()
+        blocker = self._new_connection()
+        second = self._new_connection(timeout=0.0)
+        blocker.execute("BEGIN IMMEDIATE")
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                expedient_service.register_source_document(
+                    second, case.id_case, source_path=source_path,
+                    archive_root=archive_root, document_kind="invoice",
+                )
+        finally:
+            blocker.commit()
+        try:
+            duplicate, duplicate_created = expedient_service.register_source_document(
+                second, case.id_case, source_path=source_path,
+                archive_root=archive_root, document_kind="invoice",
+            )
+        finally:
+            blocker.close()
+            second.close()
+
+        self.assertTrue(first_created)
+        self.assertFalse(duplicate_created)
+        self.assertEqual(first.id_document, duplicate.id_document)
+        self.assertEqual(archived_bytes, first.archived_path.read_bytes())
+        self.assertEqual(1, len(list(first.archived_path.parent.iterdir())))
 
     def test_set_case_status_rejects_skipping_gathering_sources(self):
         case = expedient_service.create_case(

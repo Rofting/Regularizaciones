@@ -1,7 +1,9 @@
 import hashlib
+import os
 import re
 import shutil
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
@@ -44,6 +46,19 @@ def _transaction(connection: sqlite3.Connection) -> Iterator[None]:
         return
 
     connection.execute("BEGIN")
+    try:
+        yield
+    except Exception:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+
+
+@contextmanager
+def _registration_transaction(connection: sqlite3.Connection) -> Iterator[None]:
+    """Inicia una escritura exclusiva para publicar una fuente y su fila juntas."""
+    connection.execute("BEGIN IMMEDIATE")
     try:
         yield
     except Exception:
@@ -154,6 +169,12 @@ def _safe_filename(name: str) -> str:
 def register_source_document(connection: sqlite3.Connection, case_id: int, *,
                              source_path: str | Path, archive_root: str | Path,
                              document_kind: str) -> tuple[SourceDocument, bool]:
+    if connection.in_transaction:
+        raise RuntimeError(
+            "No registre fuentes dentro de una transacción externa; "
+            "registre el documento fuera de esa transacción"
+        )
+
     source = Path(source_path)
     if not source.is_file():
         raise FileNotFoundError(f"El archivo fuente no existe o no es un archivo: {source}")
@@ -162,10 +183,11 @@ def register_source_document(connection: sqlite3.Connection, case_id: int, *,
     destination = Path(archive_root) / str(case_id) / "fuentes" / (
         f"{sha256[:12]}_{_safe_filename(source.name)}"
     )
-    destination_preexisted = destination.exists()
+    staging_path: Path | None = None
+    final_created = False
 
     try:
-        with _transaction(connection):
+        with _registration_transaction(connection):
             existing = connection.execute(
                 """SELECT id_document, id_case, original_name, archived_path, sha256,
                           document_kind, status
@@ -176,10 +198,19 @@ def register_source_document(connection: sqlite3.Connection, case_id: int, *,
                 return document_from_row(existing), False
 
             case = get_case(connection, case_id)
-            if destination_preexisted:
-                raise FileExistsError(f"Ya existe un archivo archivado en {destination}")
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent, prefix=f".{destination.name}.",
+                suffix=".tmp", delete=False,
+            ) as staging_file:
+                staging_path = Path(staging_file.name)
+            shutil.copy2(source, staging_path)
+            if destination.exists():
+                raise FileExistsError(f"Ya existe un archivo archivado en {destination}")
+            os.link(staging_path, destination)
+            final_created = True
+            staging_path.unlink()
+            staging_path = None
             cursor = connection.execute(
                 """INSERT INTO source_documents
                    (id_case, original_name, archived_path, sha256, document_kind, status)
@@ -192,7 +223,9 @@ def register_source_document(connection: sqlite3.Connection, case_id: int, *,
                 )
             document = document_from_row(_document_row(connection, cursor.lastrowid))
     except Exception:
-        if not destination_preexisted and destination.exists():
+        if staging_path is not None and staging_path.exists():
+            staging_path.unlink()
+        if final_created and destination.exists():
             destination.unlink()
         raise
     return document, True
