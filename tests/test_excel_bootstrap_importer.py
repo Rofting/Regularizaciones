@@ -624,6 +624,140 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
             "SELECT COUNT(*) FROM facturas"
         ).fetchone()[0])
 
+    def test_invoice_row_with_unreadable_date_creates_issue(self):
+        workbook_path = _make_master(self.root / "fecha_factura_ilegible.xlsx")
+        workbook = load_workbook(workbook_path)
+        workbook["GAS"]["B10"] = "fecha imposible"
+        workbook.save(workbook_path)
+
+        import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=workbook_path, profile=self.profile, actor="Prueba",
+        )
+
+        self.assertIsNone(self.connection.execute(
+            "SELECT id_factura FROM facturas WHERE tipo_suministro='GAS'"
+        ).fetchone())
+        issue = self.connection.execute(
+            """SELECT code,field_name FROM review_issues
+               WHERE id_case=? AND field_name='GAS.B10.invoice_date'""",
+            (self.case.id_case,),
+        ).fetchone()
+        self.assertEqual("INCOMPATIBLE_DATE", issue["code"])
+
+    def test_invoice_row_requires_valid_supply_endpoints(self):
+        workbook_path = _make_master(self.root / "extremos_incompletos.xlsx")
+        workbook = load_workbook(workbook_path)
+        workbook["GAS"]["D10"] = None
+        workbook["GAS"]["F10"] = "fin ilegible"
+        workbook.save(workbook_path)
+
+        import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=workbook_path, profile=self.profile, actor="Prueba",
+        )
+
+        self.assertIsNone(self.connection.execute(
+            "SELECT id_factura FROM facturas WHERE tipo_suministro='GAS'"
+        ).fetchone())
+        issues = {
+            row["field_name"]: row["code"]
+            for row in self.connection.execute(
+                """SELECT field_name,code FROM review_issues
+                   WHERE id_case=? AND field_name LIKE 'GAS.%date'""",
+                (self.case.id_case,),
+            )
+        }
+        self.assertEqual("MISSING_REQUIRED_FIELD", issues["GAS.D10.start_date"])
+        self.assertEqual("INCOMPATIBLE_DATE", issues["GAS.F10.end_date"])
+
+    def test_reused_master_hash_validates_new_case_and_returns_current_period(self):
+        workbook = _make_master(self.root / "maestro_reutilizado.xlsx")
+        first = import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=workbook, profile=self.profile, actor="Prueba",
+        )
+        second_case = expedient_service.create_case(
+            self.connection,
+            self.community_id,
+            name="2026-2027",
+            start_date=date(2026, 9, 1),
+            end_date=date(2027, 8, 31),
+        )
+
+        second = import_master_excel(
+            self.connection, id_case=second_case.id_case,
+            workbook_path=workbook, profile=self.profile, actor="Prueba",
+        )
+
+        self.assertEqual(first.id_batch, second.id_batch)
+        self.assertNotEqual(first.id_periodo, second.id_periodo)
+        self.assertEqual(
+            expedient_service.get_case(
+                self.connection, second_case.id_case
+            ).period_id,
+            second.id_periodo,
+        )
+        self.assertGreater(self.connection.execute(
+            """SELECT COUNT(*) FROM review_issues
+               WHERE id_case=? AND code='INCOMPATIBLE_DATE' AND status='open'""",
+            (second_case.id_case,),
+        ).fetchone()[0], 0)
+        second_document = self.connection.execute(
+            """SELECT status FROM source_documents
+               WHERE id_case=? AND document_kind='excel_master_bootstrap'""",
+            (second_case.id_case,),
+        ).fetchone()
+        self.assertEqual("under_review", second_document["status"])
+
+    def test_reused_companion_hash_validates_new_period_and_document_states(self):
+        owners = _make_owners(self.root / "propietarios_reutilizados.csv")
+        readings = _make_readings(self.root / "lecturas_reutilizadas.xlsx")
+        import_companion_sources(
+            self.connection, id_case=self.case.id_case,
+            owner_list_path=owners, readings_path=readings,
+            profile=self.profile, actor="Prueba",
+        )
+        second_case = expedient_service.create_case(
+            self.connection,
+            self.community_id,
+            name="2026-2027",
+            start_date=date(2026, 9, 1),
+            end_date=date(2027, 8, 31),
+        )
+
+        second = import_companion_sources(
+            self.connection, id_case=second_case.id_case,
+            owner_list_path=owners, readings_path=readings,
+            profile=self.profile, actor="Prueba",
+        )
+
+        self.assertEqual(
+            expedient_service.get_case(
+                self.connection, second_case.id_case
+            ).period_id,
+            second.id_periodo,
+        )
+        statuses = {
+            row["document_kind"]: row["status"]
+            for row in self.connection.execute(
+                """SELECT document_kind,status FROM source_documents
+                   WHERE id_case=?""",
+                (second_case.id_case,),
+            )
+        }
+        self.assertEqual("validated", statuses["owner_list"])
+        self.assertEqual("under_review", statuses["meter_readings"])
+        self.assertGreater(self.connection.execute(
+            """SELECT COUNT(*) FROM review_issues
+               WHERE id_case=? AND code='INCOMPATIBLE_DATE' AND status='open'""",
+            (second_case.id_case,),
+        ).fetchone()[0], 0)
+        self.assertEqual(0, self.connection.execute(
+            "SELECT COUNT(*) FROM lecturas_vecino WHERE id_periodo=?",
+            (second.id_periodo,),
+        ).fetchone()[0])
+
 
 if __name__ == "__main__":
     unittest.main()

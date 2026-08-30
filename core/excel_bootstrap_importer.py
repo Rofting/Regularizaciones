@@ -256,6 +256,21 @@ def _link_batch_to_case(
     )
 
 
+def _batch_is_linked_to_case(
+    connection: sqlite3.Connection,
+    *,
+    id_case: int,
+    id_batch: int,
+    id_periodo: int,
+    source_kind: str,
+) -> bool:
+    return connection.execute(
+        """SELECT 1 FROM case_import_batches
+           WHERE id_case=? AND id_batch=? AND id_periodo=? AND source_kind=?""",
+        (id_case, id_batch, id_periodo, source_kind),
+    ).fetchone() is not None
+
+
 def _store_sources(
     connection: sqlite3.Connection, id_batch: int, values: Iterable[_Source]
 ) -> None:
@@ -366,6 +381,15 @@ def _invoice_identity(service: str, invoice_date: date, start: date | None,
     return f"BOOT-{service}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]}"
 
 
+def _cell_has_value(cell) -> bool:
+    return cell is not None and _clean(cell.value) != ""
+
+
+def _is_invoice_summary(value: Any) -> bool:
+    label = _header(value)
+    return label.startswith("SUMA") or label.startswith("TOTAL") or label.startswith("SUBTOTAL")
+
+
 def _parse_invoice_sheets(
     connection: sqlite3.Connection,
     *,
@@ -394,21 +418,76 @@ def _parse_invoice_sheets(
         header_row, columns = found
         for row in range(header_row + 1, sheet.max_row + 1):
             date_cell = sheet.cell(row, int(columns["date"]))
+            start_cell = sheet.cell(row, int(columns["start"])) if columns["start"] else None
+            end_cell = sheet.cell(row, int(columns["end"])) if columns["end"] else None
+            total_cell = sheet.cell(row, int(columns["total"]))
+            notes_cell = sheet.cell(row, int(columns["notes"])) if columns["notes"] else None
+            relevant_cells = [date_cell, start_cell, end_cell, total_cell, notes_cell]
+            relevant_cells.extend(
+                sheet.cell(row, int(column)) for column in columns["consumption"]
+            )
+            for key in ("fixed", "variable"):
+                if columns[key]:
+                    relevant_cells.append(sheet.cell(row, int(columns[key])))
+            if not any(_cell_has_value(cell) for cell in relevant_cells):
+                continue
+            if _is_invoice_summary(date_cell.value):
+                continue
             invoice_date = _date(date_cell.value)
             if invoice_date is None:
+                missing = not _cell_has_value(date_cell)
+                _issue(
+                    connection, id_case=id_case, id_document=id_document,
+                    code="MISSING_REQUIRED_FIELD" if missing else "INCOMPATIBLE_DATE",
+                    field_name=f"{sheet_name}.{date_cell.coordinate}.invoice_date",
+                    message=(
+                        "Falta la fecha requerida de la factura"
+                        if missing else "La fecha de la factura no es válida"
+                    ),
+                    detected_value=date_cell.value,
+                )
                 continue
             if not (case.start_date <= invoice_date <= case.end_date):
                 _issue(
                     connection, id_case=id_case, id_document=id_document,
                     code="INCOMPATIBLE_DATE",
-                    field_name=f"{sheet_name}.{date_cell.coordinate}",
+                    field_name=f"{sheet_name}.{date_cell.coordinate}.invoice_date",
                     message="La fecha de la factura queda fuera del expediente",
                     detected_value=date_cell.value,
                 )
                 continue
-            start_cell = sheet.cell(row, int(columns["start"])) if columns["start"] else None
-            end_cell = sheet.cell(row, int(columns["end"])) if columns["end"] else None
-            total_cell = sheet.cell(row, int(columns["total"]))
+            invalid_endpoint = False
+            parsed_endpoints = {}
+            for field_name, cell in (("start_date", start_cell), ("end_date", end_cell)):
+                parsed = _date(cell.value) if cell is not None else None
+                if parsed is None:
+                    missing = not _cell_has_value(cell)
+                    address = cell.coordinate if cell is not None else "?"
+                    _issue(
+                        connection, id_case=id_case, id_document=id_document,
+                        code="MISSING_REQUIRED_FIELD" if missing else "INCOMPATIBLE_DATE",
+                        field_name=f"{sheet_name}.{address}.{field_name}",
+                        message=(
+                            f"Falta el extremo requerido {field_name}"
+                            if missing else f"El extremo {field_name} no es una fecha válida"
+                        ),
+                        detected_value=cell.value if cell is not None else None,
+                    )
+                    invalid_endpoint = True
+                parsed_endpoints[field_name] = parsed
+            if invalid_endpoint:
+                continue
+            start_date = parsed_endpoints["start_date"]
+            end_date = parsed_endpoints["end_date"]
+            if end_date < start_date:
+                _issue(
+                    connection, id_case=id_case, id_document=id_document,
+                    code="INCOMPATIBLE_DATE",
+                    field_name=f"{sheet_name}.{start_cell.coordinate}:{end_cell.coordinate}.supply_range",
+                    message="El fin de suministro es anterior al inicio",
+                    detected_value=f"{start_date} - {end_date}",
+                )
+                continue
             total = _number(total_cell.value)
             if total is None:
                 _issue(
@@ -418,10 +497,7 @@ def _parse_invoice_sheets(
                     message="Falta el total requerido de la factura",
                 )
                 continue
-            notes_cell = sheet.cell(row, int(columns["notes"])) if columns["notes"] else None
             provider = _clean(notes_cell.value if notes_cell else None) or schema["service"]
-            start_date = _date(start_cell.value) if start_cell else None
-            end_date = _date(end_cell.value) if end_cell else None
             invoice_number = _invoice_identity(
                 schema["service"], invoice_date, start_date, end_date, provider
             )
@@ -617,6 +693,34 @@ def _parse_reference_parameters(
     _store_sources(connection, id_batch, sources)
 
 
+def _validate_reused_master_period(
+    connection: sqlite3.Connection,
+    *,
+    archived_path: Path,
+    id_case: int,
+    id_document: int,
+    case,
+) -> None:
+    """Revalida solo el contrato temporal al reutilizar un lote físico."""
+    try:
+        reference = parse_reference_workbook(archived_path)
+    except (ReferenceValidationError, ValueError, TypeError) as error:
+        _issue(
+            connection, id_case=id_case, id_document=id_document,
+            code="UNRECOGNIZED_HEADER", field_name="ANALISIS.reference",
+            message="No se puede reinterpretar el período del libro maestro",
+            detected_value=error,
+        )
+        return
+    if reference.start_date != case.start_date or reference.end_date != case.end_date:
+        _issue(
+            connection, id_case=id_case, id_document=id_document,
+            code="INCOMPATIBLE_DATE", field_name="DATOS.period",
+            message="El periodo del libro no coincide con el expediente actual",
+            detected_value=f"{reference.start_date} - {reference.end_date}",
+        )
+
+
 def _parse_other_expenses(
     connection: sqlite3.Connection,
     *,
@@ -703,14 +807,33 @@ def import_master_excel(
         connection, case.community_id, document.sha256, source_kind
     )
     if existing is not None:
-        with connection:
+        existing_batch_id = int(existing["id_batch"])
+        if _batch_is_linked_to_case(
+            connection, id_case=id_case, id_batch=existing_batch_id,
+            id_periodo=period_id, source_kind=source_kind,
+        ):
+            return BootstrapImportResult(
+                existing_batch_id, period_id, 0, 0, 0,
+                _open_issue_count(connection, id_case),
+            )
+        connection.execute("BEGIN IMMEDIATE")
+        try:
             _link_batch_to_case(
-                connection, id_case=id_case, id_batch=int(existing["id_batch"]),
+                connection, id_case=id_case, id_batch=existing_batch_id,
                 id_periodo=period_id, source_kind=source_kind,
                 source_hash=document.sha256,
             )
+            _validate_reused_master_period(
+                connection, archived_path=archived_path, id_case=id_case,
+                id_document=document.id_document, case=case,
+            )
+            _validate_document_if_clean(connection, document.id_document)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         return BootstrapImportResult(
-            int(existing["id_batch"]), int(existing["id_periodo"]), 0, 0, 0,
+            existing_batch_id, period_id, 0, 0, 0,
             _open_issue_count(connection, id_case),
         )
 
@@ -791,21 +914,19 @@ def _import_owner_source(
     existing = _existing_batch(
         connection, case.community_id, document.sha256, source_kind
     )
-    if existing is not None:
-        with connection:
-            _link_batch_to_case(
-                connection, id_case=id_case, id_batch=int(existing["id_batch"]),
-                id_periodo=period_id, source_kind=source_kind,
-                source_hash=document.sha256,
-            )
-        return int(existing["id_batch"]), 0
+    existing_batch_id = int(existing["id_batch"]) if existing is not None else None
+    if existing_batch_id is not None and _batch_is_linked_to_case(
+        connection, id_case=id_case, id_batch=existing_batch_id,
+        id_periodo=period_id, source_kind=source_kind,
+    ):
+        return existing_batch_id, 0
     with archived_path.open(
         "r", encoding="utf-8-sig", errors="replace", newline=""
     ) as handle:
         rows = list(csv.reader(handle, delimiter=";"))
     connection.execute("BEGIN IMMEDIATE")
     try:
-        batch_id = _start_batch(
+        batch_id = existing_batch_id or _start_batch(
             connection, community_id=case.community_id, period_id=period_id,
             source_kind=source_kind, archived_path=document.archived_path,
             source_hash=document.sha256,
@@ -875,11 +996,12 @@ def _import_owner_source(
                             field(column), value,
                         ))
                 _store_sources(connection, batch_id, sources)
-        connection.execute(
-            """UPDATE import_batches SET status='validated',validated_at=datetime('now')
-               WHERE id_batch=?""",
-            (batch_id,),
-        )
+        if existing_batch_id is None:
+            connection.execute(
+                """UPDATE import_batches SET status='validated',validated_at=datetime('now')
+                   WHERE id_batch=?""",
+                (batch_id,),
+            )
         _validate_document_if_clean(connection, document.id_document)
         connection.commit()
     except Exception:
@@ -968,18 +1090,16 @@ def _import_reading_source(
     existing = _existing_batch(
         connection, case.community_id, document.sha256, source_kind
     )
-    if existing is not None:
-        with connection:
-            _link_batch_to_case(
-                connection, id_case=id_case, id_batch=int(existing["id_batch"]),
-                id_periodo=period_id, source_kind=source_kind,
-                source_hash=document.sha256,
-            )
-        return int(existing["id_batch"]), 0
+    existing_batch_id = int(existing["id_batch"]) if existing is not None else None
+    if existing_batch_id is not None and _batch_is_linked_to_case(
+        connection, id_case=id_case, id_batch=existing_batch_id,
+        id_periodo=period_id, source_kind=source_kind,
+    ):
+        return existing_batch_id, 0
     sheet_name, rows = _reading_grid(archived_path)
     connection.execute("BEGIN IMMEDIATE")
     try:
-        batch_id = _start_batch(
+        batch_id = existing_batch_id or _start_batch(
             connection, community_id=case.community_id, period_id=period_id,
             source_kind=source_kind, archived_path=document.archived_path,
             source_hash=document.sha256,
@@ -1129,11 +1249,12 @@ def _import_reading_source(
                     field_name=f"reading.{owner['codigo_vivienda']}.{service}",
                     message="Faltan las lecturas inicial y final del propietario activo",
                 )
-        connection.execute(
-            """UPDATE import_batches SET status='validated',validated_at=datetime('now')
-               WHERE id_batch=?""",
-            (batch_id,),
-        )
+        if existing_batch_id is None:
+            connection.execute(
+                """UPDATE import_batches SET status='validated',validated_at=datetime('now')
+                   WHERE id_batch=?""",
+                (batch_id,),
+            )
         _validate_document_if_clean(connection, document.id_document)
         connection.commit()
     except Exception:
