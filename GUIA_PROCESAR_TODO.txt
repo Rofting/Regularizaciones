@@ -12,9 +12,14 @@ Flujo actual de apertura y revisión manual de fuentes:
   6. Confirmar valor y motivo; el sistema conserva la auditoría.
   7. Esperar el estado Listo para cálculo antes de usar las salidas posteriores.
 
-La fuente se archiva y se revisa manualmente por ahora. Una incidencia abierta
-bloquea el estado Listo para cálculo. Las acciones históricas de PDF, Excel y
-tarjeta permanecen en OTRAS ACCIONES.
+Esta primera entrega no calcula automáticamente cuotas a partir de documentos ni
+genera resultados de regularización; esos conceptos, sus coeficientes y el cálculo
+llegarán en una entrega posterior. La fuente se archiva y se revisa manualmente
+por ahora. Una incidencia abierta bloquea el estado Listo para cálculo.
+
+Las acciones históricas disponibles en OTRAS ACCIONES se denominan actualmente
+Procesar PDFs recibidos, Regenerar Excel, Calcular reparto y Generar cartas; son
+acciones separadas y no automatizan esas operaciones desde el expediente.
 
 ════════════════════════════════════════════════════════════════
   PROCESAR TODO — Guía rápida del nuevo flujo automático
