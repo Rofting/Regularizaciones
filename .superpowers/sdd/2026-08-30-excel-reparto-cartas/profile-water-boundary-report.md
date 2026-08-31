@@ -71,6 +71,25 @@ LF/CRLF de Git).
 
 ## Suite completa
 
+### Verificación final con el entorno del proyecto
+
+Comando exacto ejecutado desde el worktree, con UTF-8:
+
+```text
+PYTHONUTF8=1 C:\\Users\\Jose\\Proyectos\\Soporte\\Soporte\\Flujo calculo regularizaciones\\.venv-fase1\\Scripts\\python.exe -m unittest discover -s tests -t . -q
+```
+
+Resultado:
+
+```text
+Ran 143 tests in 20.032s
+OK
+```
+
+Código de salida: 0.
+
+### Ejecución anterior con runtime incompleto
+
 Comando:
 
 ```text
