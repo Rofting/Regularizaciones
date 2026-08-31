@@ -64,7 +64,42 @@ def _safe_date(value: str | None) -> date | None:
         raise ExportBlockedError(f"Fecha normalizada no válida: {value!r}") from error
 
 
-def _profile_for_community(project_root: Path, community_code: str) -> ExcelProfile:
+def _profile_for_community(
+    connection: sqlite3.Connection,
+    project_root: Path,
+    community_code: str,
+    community_id: int,
+) -> ExcelProfile:
+    """Resuelve primero el perfil que ya está activo en la base.
+
+    Un JSON nuevo para la misma comunidad no puede cambiar silenciosamente el
+    formato de un expediente histórico. Sólo el primer uso, sin registro,
+    puede escoger el único perfil compatible disponible.
+    """
+    active = connection.execute(
+        """SELECT profile_key,profile_version FROM excel_template_profiles
+           WHERE id_comunidad=? AND status='active'
+           ORDER BY id_template_profile""",
+        (community_id,),
+    ).fetchall()
+    if len(active) > 1:
+        raise ExportBlockedError(
+            f"Hay varios perfiles activos para la comunidad {community_code}"
+        )
+    if active:
+        row = active[0]
+        try:
+            profile = load_profile(row["profile_key"], project_root)
+        except (LookupError, ValueError) as error:
+            raise ExportBlockedError(
+                f"No se puede cargar el perfil activo {row['profile_key']}: {error}"
+            ) from error
+        if profile.version != row["profile_version"]:
+            raise ExportBlockedError("La versión del perfil activo no coincide con su registro")
+        if profile.community_code != str(community_code):
+            raise ExportBlockedError("El perfil activo no corresponde a la comunidad")
+        return profile
+
     config_directory = project_root / "config" / "excel_profiles"
     matches: list[ExcelProfile] = []
     for path in sorted(config_directory.glob("*.json")):
@@ -295,7 +330,8 @@ def _input_hash(connection: sqlite3.Connection, case: sqlite3.Row, profile: Exce
     period_id = int(case["id_periodo"])
     payload = {
         "case": {key: case[key] for key in (
-            "id_case", "id_comunidad", "nombre", "fecha_inicio", "fecha_fin", "id_periodo"
+            "id_case", "id_comunidad", "codigo", "comunidad_nombre", "nombre",
+            "fecha_inicio", "fecha_fin", "id_periodo"
         )},
         "profile": [profile.key, profile.version],
         "invoices": _query_dicts(
@@ -329,28 +365,61 @@ def _input_hash(connection: sqlite3.Connection, case: sqlite3.Row, profile: Exce
                ORDER BY p.codigo_vivienda,l.fecha_lectura""",
             (case["id_comunidad"], period_id),
         ),
+        "eligible_expenses": _query_dicts(
+            connection,
+            """SELECT id_gasto,fecha,descripcion,importe_total,activo
+               FROM gastos_extra
+               WHERE id_comunidad=? AND activo=1 AND fecha BETWEEN ? AND ?
+               ORDER BY id_gasto""",
+            (case["id_comunidad"], case["fecha_inicio"], case["fecha_fin"]),
+        ),
+        "owners": _query_dicts(
+            connection,
+            """SELECT id_propietario,codigo_vivienda,nombre_propietario,coeficiente,activo
+               FROM propietarios WHERE id_comunidad=? ORDER BY id_propietario""",
+            (case["id_comunidad"],),
+        ),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _input_columns(table: Mapping[str, Any]) -> Mapping[str, str]:
+    """Columnas cuyo valor pertenece a la base de datos.
+
+    Los perfiles nuevos separan explícitamente las columnas derivadas. La
+    compatibilidad con el formato inicial se mantiene para perfiles ya
+    registrados, pero nunca se toma una celda con fórmula como fila inválida.
+    """
+    return table.get("input_columns", table.get("columns", {}))
+
+
+def _derived_columns(table: Mapping[str, Any]) -> Mapping[str, str]:
+    return table.get("derived_columns", {})
+
+
 def _clear_table(sheet, table: Mapping[str, Any]) -> None:
     for row in range(int(table["start_row"]), int(table["end_row"]) + 1):
-        for column in table["columns"].values():
+        for column in _input_columns(table).values():
             cell = sheet[f"{column}{row}"]
-            if not (isinstance(cell.value, str) and cell.value.startswith("=")):
-                cell.value = None
+            cell.value = None
 
 
 def _available_table_rows(sheet, table: Mapping[str, Any]) -> list[int]:
-    """Devuelve solo filas de entrada; nunca permite pisar una fórmula."""
-    result = []
-    for row in range(int(table["start_row"]), int(table["end_row"]) + 1):
-        cells = [sheet[f"{column}{row}"] for column in table["columns"].values()]
-        if any(isinstance(cell.value, str) and cell.value.startswith("=") for cell in cells):
-            continue
-        result.append(row)
-    return result
+    """Todas las filas declaradas son entradas; las fórmulas no las invalidan."""
+    return list(range(int(table["start_row"]), int(table["end_row"]) + 1))
+
+
+def _write_derived_formula(sheet, row: int, columns: Mapping[str, str]) -> None:
+    """Escribe únicamente fórmulas que se derivan de insumos normalizados."""
+    total = columns.get("total")
+    fixed = columns.get("fixed")
+    variable = columns.get("variable")
+    if total and fixed and variable and not (
+        isinstance(sheet[f"{total}{row}"].value, str)
+        and sheet[f"{total}{row}"].value.startswith("=")
+    ):
+        sheet[f"{total}{row}"] = f"={fixed}{row}+{variable}{row}"
 
 
 def _write_invoice_table(
@@ -373,7 +442,8 @@ def _write_invoice_table(
     ).fetchall()
     if len(invoices) > len(available_rows):
         raise ExportBlockedError(f"La plantilla no tiene filas suficientes para {module}")
-    columns = table["columns"]
+    columns = _input_columns(table)
+    derived = _derived_columns(table)
     for row_number, invoice in zip(available_rows, invoices):
         values = {
             "invoice_date": _safe_date(invoice["fecha_factura"]),
@@ -389,6 +459,7 @@ def _write_invoice_table(
         for key, column in columns.items():
             if key in values:
                 sheet[f"{column}{row_number}"] = values[key]
+        _write_derived_formula(sheet, row_number, {**columns, **derived})
 
 
 def _write_other_expenses(connection, workbook, case, table) -> None:
@@ -412,7 +483,7 @@ def _write_other_expenses(connection, workbook, case, table) -> None:
             expenses = [(case["fecha_fin"], "Total de otros gastos", parameter[0])]
     if len(expenses) > len(available_rows):
         raise ExportBlockedError("La plantilla no tiene filas suficientes para otros gastos")
-    columns = table["columns"]
+    columns = _input_columns(table)
     for row_number, expense in zip(available_rows, expenses):
         sheet[f"{columns['date']}{row_number}"] = _safe_date(expense[0])
         sheet[f"{columns['description']}{row_number}"] = expense[1]
@@ -424,34 +495,43 @@ def _write_acs(connection, workbook, case, table) -> None:
     available_rows = _available_table_rows(sheet, table)
     _clear_table(sheet, table)
     readings = connection.execute(
-        """SELECT l.fecha_lectura,l.valor_acumulado
+        """SELECT p.codigo_vivienda,l.fecha_lectura,l.valor_acumulado
            FROM lecturas_vecino l JOIN propietarios p ON p.id_propietario=l.id_propietario
            WHERE p.id_comunidad=? AND p.activo=1 AND l.id_periodo=? AND l.tipo='ACS'
-           ORDER BY l.fecha_lectura,p.id_propietario""",
+           ORDER BY p.codigo_vivienda,l.fecha_lectura""",
         (case["id_comunidad"], case["id_periodo"]),
     ).fetchall()
-    by_date: dict[str, float] = {}
+    by_owner: dict[str, dict[str, float]] = {}
     for reading in readings:
-        by_date[reading["fecha_lectura"]] = (
-            by_date.get(reading["fecha_lectura"], 0.0) + float(reading["valor_acumulado"])
+        by_owner.setdefault(reading["codigo_vivienda"], {})[reading["fecha_lectura"]] = float(
+            reading["valor_acumulado"]
         )
-    initial = by_date[case["fecha_inicio"]]
-    final = by_date[case["fecha_fin"]]
-    columns = table["columns"]
-    if not available_rows:
-        raise ExportBlockedError("La plantilla no tiene una fila disponible para ACS")
-    row = available_rows[0]
-    values = {
-        "period": case["nombre"],
-        "initial_date": _safe_date(case["fecha_inicio"]),
-        "initial": initial,
-        "final_date": _safe_date(case["fecha_fin"]),
-        "final": final,
-        "consumption": final - initial,
-    }
-    for key, column in columns.items():
-        if key in values:
-            sheet[f"{column}{row}"] = values[key]
+    owner_rows = [
+        (code, values[case["fecha_inicio"]], values[case["fecha_fin"]])
+        for code, values in by_owner.items()
+        if case["fecha_inicio"] in values and case["fecha_fin"] in values
+    ]
+    if len(owner_rows) != len(by_owner):
+        raise ExportBlockedError("Faltan lecturas ACS de inicio o cierre")
+    if len(owner_rows) > len(available_rows):
+        raise ExportBlockedError("La plantilla no tiene filas suficientes para ACS")
+    columns = _input_columns(table)
+    derived = _derived_columns(table)
+    for row, (code, initial, final) in zip(available_rows, owner_rows):
+        values = {
+            "owner_code": code,
+            "unit": "m3",
+            "initial": initial,
+            "final": final,
+        }
+        for key, column in columns.items():
+            if key in values:
+                sheet[f"{column}{row}"] = values[key]
+        consumption = derived.get("consumption")
+        initial_column = columns.get("initial")
+        final_column = columns.get("final")
+        if consumption and initial_column and final_column:
+            sheet[f"{consumption}{row}"] = f"={final_column}{row}-{initial_column}{row}"
 
 
 def _write_workbook(
@@ -512,19 +592,41 @@ def _write_workbook(
 
 
 def _restore_missing_ooxml_parts(template: Path, generated: Path) -> None:
-    """Conserva partes privadas que openpyxl no conoce y por tanto descartaría."""
+    """Restaura el diseño OOXML ajeno a las celdas mutables.
+
+    Esta exportación nunca añade hojas, gráficos ni relaciones: sólo escribe
+    entradas ya declaradas. Por ello es seguro restaurar desde la plantilla
+    las partes visuales y sus relaciones, aunque openpyxl las haya recreado.
+    """
     with ZipFile(template, "r") as source:
         source_parts = {name: source.read(name) for name in source.namelist()}
     with ZipFile(generated, "r") as current:
         generated_parts = {name: current.read(name) for name in current.namelist()}
-    missing = {name: data for name, data in source_parts.items() if name not in generated_parts}
-    if not missing:
+    design_prefixes = (
+        "xl/charts/", "xl/drawings/", "xl/media/", "customXml/",
+        "xl/theme/", "xl/printerSettings/",
+    )
+    # openpyxl conserva y reemite los estilos de celda; reemplazar styles.xml
+    # después de escribir fechas puede dejar referencias a estilos nuevos sin
+    # definir. La huella verifica que ningún estilo fuera de los rangos
+    # mutables cambie.
+    design_exact = {"[Content_Types].xml", "_rels/.rels"}
+    restore = {
+        name: data
+        for name, data in source_parts.items()
+        if name not in generated_parts
+        or name.startswith(design_prefixes)
+        or name in design_exact
+        or name.endswith(".rels")
+    }
+    if not restore:
         return
     rebuilt = generated.with_name(generated.stem + ".ooxml" + generated.suffix)
     with ZipFile(rebuilt, "w", ZIP_DEFLATED) as target:
         for name, data in generated_parts.items():
-            target.writestr(name, data)
-        for name, data in missing.items():
+            if name not in restore:
+                target.writestr(name, data)
+        for name, data in restore.items():
             target.writestr(name, data)
     os.replace(rebuilt, generated)
 
@@ -639,7 +741,9 @@ def generate_official_excel(
     case = _case_context(connection, id_case)
     project_root = Path(project_root).resolve()
     output_root = Path(output_root).resolve()
-    profile = _profile_for_community(project_root, case["codigo"])
+    profile = _profile_for_community(
+        connection, project_root, case["codigo"], int(case["id_comunidad"])
+    )
     if profile.community_code != str(case["codigo"]):
         raise ExportBlockedError("El perfil no corresponde a la comunidad del expediente")
     _validate_normalized_inputs(connection, case, profile)

@@ -10,6 +10,7 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import PatternFill
 
 
@@ -20,8 +21,11 @@ if str(CORE_DIR) not in sys.path:
 
 import excel_generator
 import gestor_bd
-from excel_export_service import ExportBlockedError, generate_official_excel
-from excel_validation import WorkbookValidationError, validate_workbook
+from excel_export_service import (
+    ExportBlockedError, _case_context, _input_hash, _profile_for_community,
+    generate_official_excel,
+)
+from excel_validation import WorkbookValidationError, validate_workbook, workbook_fingerprint
 from office_recalculation import (
     DeterministicRecalculator,
     LibreOfficeRecalculator,
@@ -65,39 +69,40 @@ PROFILE_DATA = {
         },
         "tables": {
             "GAS": {
-                "sheet": "GAS", "start_row": 10, "end_row": 20,
-                "columns": {
-                    "invoice_date": "B", "days": "C", "start_date": "D",
-                    "end_date": "F", "consumption": "I", "fixed": "J",
-                    "variable": "K", "total": "L", "provider": "N",
+                "sheet": "GAS", "start_row": 10, "end_row": 30,
+                "input_columns": {
+                    "invoice_date": "B", "end_date": "D", "consumption": "J",
+                    "fixed": "K", "variable": "L", "provider": "O",
                 },
+                "derived_columns": {"total": "M"},
             },
             "ELECTRICIDAD": {
-                "sheet": "ELECTRICIDAD", "start_row": 10, "end_row": 20,
-                "columns": {
+                "sheet": "ELECTRICIDAD", "start_row": 10, "end_row": 21,
+                "input_columns": {
                     "invoice_date": "B", "start_date": "C", "end_date": "D",
                     "consumption": "E", "fixed": "F", "variable": "G",
-                    "total": "H", "provider": "J",
+                    "provider": "J",
                 },
+                "derived_columns": {"total": "H"},
             },
             "AGUA": {
-                "sheet": "AGUA", "start_row": 14, "end_row": 24,
-                "columns": {
-                    "invoice_date": "B", "start_date": "D", "end_date": "F",
-                    "consumption": "H", "total": "T", "variable": "V",
-                    "fixed": "W", "provider": "X",
+                "sheet": "AGUA", "start_row": 10, "end_row": 21,
+                "input_columns": {
+                    "invoice_date": "B", "end_date": "D", "consumption": "I",
+                    "variable": "T", "fixed": "U",
                 },
+                "derived_columns": {"total": "R"},
             },
             "OTROS_GASTOS": {
                 "sheet": "OTROS GASTOS", "start_row": 13, "end_row": 23,
                 "columns": {"date": "D", "description": "E", "amount": "F"},
             },
             "ACS": {
-                "sheet": "LECTURAS ACS M3", "start_row": 7, "end_row": 17,
-                "columns": {
-                    "period": "A", "initial_date": "C", "initial": "D",
-                    "final_date": "E", "final": "F", "consumption": "G",
+                "sheet": "LECTURAS ACS M3", "start_row": 8, "end_row": 26,
+                "input_columns": {
+                    "owner_code": "A", "unit": "B", "initial": "C", "final": "E",
                 },
+                "derived_columns": {"consumption": "G"},
             },
         },
         "parameter_cells": {
@@ -107,17 +112,17 @@ PROFILE_DATA = {
             "acs_variable_billed": ["ANALISIS", "J66"],
         },
         "total_checks": {
-            "invoice_total:GAS": ["GAS", "L10:L20"],
-            "invoice_component:GAS:fixed": ["GAS", "J10:J20"],
-            "invoice_component:GAS:variable": ["GAS", "K10:K20"],
-            "invoice_total:ELECTRICIDAD": ["ELECTRICIDAD", "H10:H20"],
-            "invoice_component:ELECTRICIDAD:fixed": ["ELECTRICIDAD", "F10:F20"],
-            "invoice_component:ELECTRICIDAD:variable": ["ELECTRICIDAD", "G10:G20"],
-            "invoice_total:AGUA": ["AGUA", "T14:T24"],
-            "invoice_component:AGUA:fixed": ["AGUA", "W14:W24"],
-            "invoice_component:AGUA:variable": ["AGUA", "V14:V24"],
+            "invoice_total:GAS": ["GAS", "M10:M30"],
+            "invoice_component:GAS:fixed": ["GAS", "K10:K30"],
+            "invoice_component:GAS:variable": ["GAS", "L10:L30"],
+            "invoice_total:ELECTRICIDAD": ["ELECTRICIDAD", "H10:H21"],
+            "invoice_component:ELECTRICIDAD:fixed": ["ELECTRICIDAD", "F10:F21"],
+            "invoice_component:ELECTRICIDAD:variable": ["ELECTRICIDAD", "G10:G21"],
+            "invoice_total:AGUA": ["AGUA", "R10:R21"],
+            "invoice_component:AGUA:fixed": ["AGUA", "U10:U21"],
+            "invoice_component:AGUA:variable": ["AGUA", "T10:T21"],
             "parameter:extraordinary_expense_actual": ["OTROS GASTOS", "F13:F23"],
-            "reading_total:ACS": ["LECTURAS ACS M3", "G7:G17"],
+            "reading_total:ACS": ["LECTURAS ACS M3", "G8:G26"],
             "parameter:acs_fixed_actual": ["ANALISIS", "H64"],
             "parameter:acs_variable_actual": ["ANALISIS", "J64"],
             "parameter:acs_fixed_billed": ["ANALISIS", "H66"],
@@ -134,11 +139,34 @@ def _make_template(path: Path) -> Path:
         workbook.create_sheet(sheet_name)
     for sheet in workbook.worksheets:
         sheet.print_area = "A1:X40"
+        sheet.freeze_panes = "B8"
+        sheet.row_dimensions[2].height = 27
+        sheet.column_dimensions["A"].width = 19
+    workbook["GAS"].merge_cells("A2:C2")
+    workbook["GAS"]["A2"] = "Diseño saneado"
     workbook["ANALISIS"]["H23"] = "=SUM(H1:H22)"
     workbook["ANALISIS"]["B2"] = "NO TOCAR"
     workbook["ANALISIS"]["B2"].fill = PatternFill("solid", fgColor="D9EAF7")
-    workbook["GAS"]["L11"] = 9999
-    workbook["GAS"]["L12"] = "=SUM(L10:L11)"
+    workbook["GAS"]["M10"] = "=K10+L10"
+    workbook["GAS"]["M11"] = "=K11+L11"
+    workbook["GAS"]["M31"] = "=SUM(M10:M30)"
+    workbook["ELECTRICIDAD"]["H10"] = "=F10+G10"
+    workbook["ELECTRICIDAD"]["H23"] = "=SUM(H10:H21)"
+    workbook["AGUA"]["R10"] = "=T10+U10"
+    workbook["AGUA"]["R23"] = "=SUM(R10:R21)"
+    workbook["LECTURAS ACS M3"]["G8"] = "=E8-C8"
+    workbook["LECTURAS ACS M3"]["G27"] = "=SUM(G8:G26)"
+    for sheet_name, columns, first, last in (
+        ("GAS", ("B", "D"), 10, 30),
+        ("ELECTRICIDAD", ("B", "C", "D"), 10, 21),
+        ("AGUA", ("B", "D"), 10, 21),
+    ):
+        for column in columns:
+            for row in range(first, last + 1):
+                workbook[sheet_name][f"{column}{row}"].number_format = "DD/MM/YYYY"
+    chart = BarChart()
+    chart.add_data(Reference(workbook["GAS"], min_col=11, min_row=10, max_row=11))
+    workbook["GAS"].add_chart(chart, "P2")
     workbook["GAS"]["P5"] = "CELDA AJENA"
     workbook.save(path)
     with ZipFile(path, "a", ZIP_DEFLATED) as archive:
@@ -307,14 +335,22 @@ class ExcelExportServiceTest(unittest.TestCase):
         )
         workbook = load_workbook(result.output_path, data_only=False)
         self.assertIsInstance(workbook["GAS"]["B10"].value, date)
-        self.assertIsInstance(workbook["GAS"]["L10"].value, (int, float))
-        self.assertIsNone(workbook["GAS"]["L11"].value)
-        self.assertEqual("=SUM(L10:L11)", workbook["GAS"]["L12"].value)
+        self.assertEqual(20, workbook["GAS"]["K10"].value)
+        self.assertEqual(80, workbook["GAS"]["L10"].value)
+        self.assertEqual("=K10+L10", workbook["GAS"]["M10"].value)
+        self.assertEqual("=SUM(M10:M30)", workbook["GAS"]["M31"].value)
+        self.assertIsNone(workbook["GAS"]["B32"].value)
         self.assertEqual("=SUM(H1:H22)", workbook["ANALISIS"]["H23"].value)
-        self.assertEqual(40, workbook["LECTURAS ACS M3"]["G7"].value)
+        self.assertEqual("P1-A", workbook["LECTURAS ACS M3"]["A8"].value)
+        self.assertEqual("m3", workbook["LECTURAS ACS M3"]["B8"].value)
+        self.assertEqual("=E8-C8", workbook["LECTURAS ACS M3"]["G8"].value)
+        self.assertEqual("=SUM(G8:G26)", workbook["LECTURAS ACS M3"]["G27"].value)
         self.assertEqual("NO TOCAR", workbook["ANALISIS"]["B2"].value)
         self.assertEqual("00D9EAF7", workbook["ANALISIS"]["B2"].fill.fgColor.rgb)
         self.assertEqual("'ANALISIS'!$A$1:$X$40", str(workbook["ANALISIS"].print_area))
+        self.assertEqual("A2:C2", str(next(iter(workbook["GAS"].merged_cells.ranges))))
+        self.assertEqual("B8", workbook["GAS"].freeze_panes)
+        self.assertEqual(1, len(workbook["GAS"]._charts))
         workbook.close()
         with ZipFile(result.output_path) as archive:
             self.assertEqual(b"<audit>preservar</audit>", archive.read("customXml/item1.xml"))
@@ -445,6 +481,81 @@ class ExcelExportServiceTest(unittest.TestCase):
                 result.output_path,
                 load_profile("658_acs_v1", self.project_root),
                 self._expected_totals(),
+            )
+
+    def test_input_hash_covers_eligible_expenses_and_active_owner_identity(self):
+        from excel_profiles import load_profile
+
+        case = _case_context(self.connection, self.case_id)
+        profile = load_profile("658_acs_v1", self.project_root)
+        initial = _input_hash(self.connection, case, profile)
+        self.connection.execute(
+            """INSERT INTO gastos_extra(id_comunidad,fecha,descripcion,importe_total,activo)
+               VALUES (?,?,?,?,1)""",
+            (self.community_id, "2026-01-10", "Gasto saneado", 12.5),
+        )
+        self.connection.commit()
+        self.assertNotEqual(initial, _input_hash(self.connection, case, profile))
+
+        after_expense = _input_hash(self.connection, case, profile)
+        self.connection.execute(
+            """UPDATE propietarios SET nombre_propietario='Identidad modificada',activo=0
+               WHERE id_comunidad=? AND codigo_vivienda='P1-A'""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        self.assertNotEqual(after_expense, _input_hash(self.connection, case, profile))
+
+    def test_registered_active_profile_selects_its_exact_version(self):
+        v2 = dict(PROFILE_DATA)
+        v2["key"] = "658_acs_v2"
+        v2["version"] = "2"
+        (self.project_root / "config" / "excel_profiles" / "658_acs_v2.json").write_text(
+            json.dumps(v2), encoding="utf-8"
+        )
+        self.connection.execute(
+            """INSERT INTO excel_template_profiles
+               (id_comunidad,profile_key,profile_version,template_relative_path,
+                template_sha256,profile_sha256,status)
+               VALUES (?,?,?,?,?,?,'active')""",
+            (self.community_id, "658_acs_v1", "1",
+             PROFILE_DATA["template_relative_path"], "a" * 64, "b" * 64),
+        )
+        self.connection.commit()
+        self.assertEqual(
+            "658_acs_v1",
+            _profile_for_community(self.connection, self.project_root, "658", self.community_id).key,
+        )
+        self.connection.execute(
+            """INSERT INTO excel_template_profiles
+               (id_comunidad,profile_key,profile_version,template_relative_path,
+                template_sha256,profile_sha256,status)
+               VALUES (?,?,?,?,?,?,'active')""",
+            (self.community_id, "658_acs_v2", "2",
+             PROFILE_DATA["template_relative_path"], "c" * 64, "d" * 64),
+        )
+        self.connection.commit()
+        with self.assertRaisesRegex(ExportBlockedError, "varios perfiles activos"):
+            _profile_for_community(self.connection, self.project_root, "658", self.community_id)
+
+    def test_validator_rejects_layout_or_chart_design_change(self):
+        result = generate_official_excel(
+            self.connection, id_case=self.case_id,
+            project_root=self.project_root, output_root=self.output_root,
+            recalculator=DeterministicRecalculator(),
+        )
+        expected = workbook_fingerprint(self.template, _profile_for_community(
+            self.connection, self.project_root, "658", self.community_id
+        ))
+        workbook = load_workbook(result.output_path)
+        workbook["GAS"].unmerge_cells("A2:C2")
+        workbook.save(result.output_path)
+        workbook.close()
+        from excel_profiles import load_profile
+        with self.assertRaisesRegex(WorkbookValidationError, "combinadas"):
+            validate_workbook(
+                result.output_path, load_profile("658_acs_v1", self.project_root),
+                self._expected_totals(), expected_fingerprint=expected,
             )
 
     def test_missing_libreoffice_has_an_understandable_error(self):

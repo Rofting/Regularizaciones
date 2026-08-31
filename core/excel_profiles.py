@@ -206,7 +206,7 @@ def _workbook_layout(value: Any) -> Mapping[str, Any]:
     for module, table in value["tables"].items():
         if not isinstance(table, dict):
             raise ValueError(f"La tabla {module} debe ser un objeto")
-        for key in ("sheet", "start_row", "end_row", "columns"):
+        for key in ("sheet", "start_row", "end_row"):
             if key not in table:
                 raise ValueError(f"Falta workbook_layout.tables.{module}.{key}")
         if (
@@ -216,8 +216,27 @@ def _workbook_layout(value: Any) -> Mapping[str, Any]:
             or table["end_row"] < table["start_row"]
         ):
             raise ValueError(f"Rango de filas no válido para {module}")
-        if not isinstance(table["columns"], dict) or not table["columns"]:
-            raise ValueError(f"La tabla {module} no declara columnas")
+        legacy_columns = table.get("columns")
+        input_columns = table.get("input_columns")
+        derived_columns = table.get("derived_columns")
+        if legacy_columns is not None:
+            if input_columns is not None or derived_columns is not None:
+                raise ValueError(
+                    f"La tabla {module} no puede mezclar columnas antiguas y separadas"
+                )
+            if not isinstance(legacy_columns, dict) or not legacy_columns:
+                raise ValueError(f"La tabla {module} no declara columnas")
+        else:
+            if not isinstance(input_columns, dict) or not input_columns:
+                raise ValueError(f"La tabla {module} no declara columnas de entrada")
+            if not isinstance(derived_columns, dict):
+                raise ValueError(f"La tabla {module} no declara columnas derivadas")
+            overlap = set(input_columns).intersection(derived_columns)
+            if overlap:
+                raise ValueError(
+                    f"La tabla {module} repite columnas mutables y derivadas: "
+                    + ", ".join(sorted(overlap))
+                )
     return _freeze_json(value)
 
 
