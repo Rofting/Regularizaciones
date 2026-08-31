@@ -56,5 +56,4 @@ cerrar un reinicio, de que la validación del expediente rechaza una incidencia
 cerrada indebidamente y de que un perfil exclusivamente fijo también bloquea
 el reparto hasta que la lectura final sea aprobada.
 
-Commits de la entrega: `348976e`, `1b826be` y la corrección de revisión
-posterior a este informe.
+Commits de la entrega: `348976e`, `1b826be` y `7ff149c`.
