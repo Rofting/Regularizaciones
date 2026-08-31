@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 
 SUPPORTED_ALLOCATION_METHODS = frozenset({
@@ -45,6 +46,9 @@ class ExcelProfile:
     required_sheets: tuple[str, ...]
     required_formula_cells: tuple[tuple[str, str], ...]
     concepts: tuple[ConceptRule, ...]
+    workbook_layout: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 _PROFILE_FIELDS = {
@@ -182,6 +186,41 @@ def _concepts(value: Any) -> tuple[ConceptRule, ...]:
     return tuple(concepts)
 
 
+def _freeze_json(value: Any) -> Any:
+    """Convierte la configuración JSON en una estructura de solo lectura."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _workbook_layout(value: Any) -> Mapping[str, Any]:
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, dict):
+        raise ValueError("workbook_layout debe ser un objeto")
+    for required in ("metadata_cells", "tables", "parameter_cells", "total_checks"):
+        if required not in value or not isinstance(value[required], dict):
+            raise ValueError(f"workbook_layout.{required} debe ser un objeto")
+    for module, table in value["tables"].items():
+        if not isinstance(table, dict):
+            raise ValueError(f"La tabla {module} debe ser un objeto")
+        for key in ("sheet", "start_row", "end_row", "columns"):
+            if key not in table:
+                raise ValueError(f"Falta workbook_layout.tables.{module}.{key}")
+        if (
+            not isinstance(table["start_row"], int)
+            or not isinstance(table["end_row"], int)
+            or table["start_row"] < 1
+            or table["end_row"] < table["start_row"]
+        ):
+            raise ValueError(f"Rango de filas no válido para {module}")
+        if not isinstance(table["columns"], dict) or not table["columns"]:
+            raise ValueError(f"La tabla {module} no declara columnas")
+    return _freeze_json(value)
+
+
 def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
     """Carga y valida un perfil versionado sin salir del directorio de configuración."""
     if not profile_key or Path(profile_key).name != profile_key:
@@ -237,4 +276,5 @@ def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
         required_sheets=required_sheets,
         required_formula_cells=formula_cells,
         concepts=_concepts(data["concepts"]),
+        workbook_layout=_workbook_layout(data.get("workbook_layout")),
     )

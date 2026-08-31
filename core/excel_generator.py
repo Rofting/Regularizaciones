@@ -91,7 +91,11 @@ def _personalizar_datos(ruta_xlsx: str, com, ruta_bd: str):
 def regenerar_excel_comunidad(codigo: str,
                               ruta_bd: str = None,
                               ruta_excels: str = None,
-                              log=None) -> dict:
+                              log=None,
+                              *,
+                              id_case: int | None = None,
+                              project_root: str | Path | None = None,
+                              recalculator=None) -> dict:
     """
     Reconstruye Comunidad_{codigo}.xlsx entero desde la BD.
 
@@ -106,6 +110,48 @@ def regenerar_excel_comunidad(codigo: str,
 
     resultado = {"ok": False, "archivo": None, "periodos_volcados": [],
                  "filas_escritas": 0, "backup": None, "errores": []}
+
+    # El nuevo flujo por expediente queda aislado del regenerador histórico.
+    # Los callers antiguos, que no pasan id_case, conservan exactamente el
+    # comportamiento previo basado en comunidad y todos sus periodos.
+    if id_case is not None:
+        from excel_export_service import generate_official_excel
+
+        connection = sqlite3.connect(ruta_bd)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        try:
+            output_root = (
+                ruta_excels.parent
+                if ruta_excels.name.lower() == "excels_maestros"
+                else ruta_excels
+            )
+            exported = generate_official_excel(
+                connection,
+                id_case=id_case,
+                project_root=Path(project_root or BASE_DIR),
+                output_root=output_root,
+                recalculator=recalculator,
+                progress=lambda stage, payload: log(f"    · {stage}"),
+            )
+            period = connection.execute(
+                """SELECT p.nombre FROM regularization_cases c
+                   JOIN periodos p ON p.id_periodo=c.id_periodo
+                   WHERE c.id_case=?""",
+                (id_case,),
+            ).fetchone()
+            resultado.update({
+                "ok": True,
+                "archivo": str(exported.output_path),
+                "periodos_volcados": [period[0]] if period else [],
+                "backup": str(exported.backup_path) if exported.backup_path else None,
+            })
+        except Exception as error:
+            resultado["errores"].append(f"{type(error).__name__}: {error}")
+            log(f"  ❌ {resultado['errores'][-1]}", "error")
+        finally:
+            connection.close()
+        return resultado
 
     # ── Datos de la comunidad y sus periodos ─────────────────────────────
     con = sqlite3.connect(ruta_bd)

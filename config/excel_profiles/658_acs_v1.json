@@ -22,6 +22,83 @@
   "required_formula_cells": [
     ["ANALISIS", "H23"]
   ],
+  "workbook_layout": {
+    "metadata_cells": {
+      "community_name": ["DATOS", "A1"],
+      "period_label": ["DATOS", "A3"],
+      "owner_count": ["DATOS", "D4"]
+    },
+    "tables": {
+      "GAS": {
+        "sheet": "GAS",
+        "start_row": 10,
+        "end_row": 120,
+        "columns": {
+          "invoice_date": "B", "days": "C", "start_date": "D",
+          "end_date": "F", "consumption": "I", "fixed": "J",
+          "variable": "K", "total": "L", "provider": "N"
+        }
+      },
+      "ELECTRICIDAD": {
+        "sheet": "ELECTRICIDAD",
+        "start_row": 10,
+        "end_row": 120,
+        "columns": {
+          "invoice_date": "B", "start_date": "C", "end_date": "D",
+          "consumption": "E", "fixed": "F", "variable": "G",
+          "total": "H", "provider": "J"
+        }
+      },
+      "AGUA": {
+        "sheet": "AGUA",
+        "start_row": 14,
+        "end_row": 120,
+        "columns": {
+          "invoice_date": "B", "start_date": "D", "end_date": "F",
+          "consumption": "H", "total": "T", "variable": "V",
+          "fixed": "W", "provider": "X"
+        }
+      },
+      "OTROS_GASTOS": {
+        "sheet": "OTROS GASTOS",
+        "start_row": 13,
+        "end_row": 80,
+        "columns": {"date": "D", "description": "E", "amount": "F"}
+      },
+      "ACS": {
+        "sheet": "LECTURAS ACS M3",
+        "start_row": 7,
+        "end_row": 80,
+        "columns": {
+          "period": "A", "initial_date": "C", "initial": "D",
+          "final_date": "E", "final": "F", "consumption": "G"
+        }
+      }
+    },
+    "parameter_cells": {
+      "acs_fixed_actual": ["ANALISIS", "H64"],
+      "acs_variable_actual": ["ANALISIS", "J64"],
+      "acs_fixed_billed": ["ANALISIS", "H66"],
+      "acs_variable_billed": ["ANALISIS", "J66"]
+    },
+    "total_checks": {
+      "invoice_total:GAS": ["GAS", "L10:L120"],
+      "invoice_component:GAS:fixed": ["GAS", "J10:J120"],
+      "invoice_component:GAS:variable": ["GAS", "K10:K120"],
+      "invoice_total:ELECTRICIDAD": ["ELECTRICIDAD", "H10:H120"],
+      "invoice_component:ELECTRICIDAD:fixed": ["ELECTRICIDAD", "F10:F120"],
+      "invoice_component:ELECTRICIDAD:variable": ["ELECTRICIDAD", "G10:G120"],
+      "invoice_total:AGUA": ["AGUA", "T14:T120"],
+      "invoice_component:AGUA:fixed": ["AGUA", "W14:W120"],
+      "invoice_component:AGUA:variable": ["AGUA", "V14:V120"],
+      "parameter:extraordinary_expense_actual": ["OTROS GASTOS", "F13:F80"],
+      "reading_total:ACS": ["LECTURAS ACS M3", "G7:G80"],
+      "parameter:acs_fixed_actual": ["ANALISIS", "H64"],
+      "parameter:acs_variable_actual": ["ANALISIS", "J64"],
+      "parameter:acs_fixed_billed": ["ANALISIS", "H66"],
+      "parameter:acs_variable_billed": ["ANALISIS", "J66"]
+    }
+  },
   "concepts": [
     {
       "key": "acs_fixed",
