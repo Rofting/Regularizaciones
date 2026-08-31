@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from excel_profiles import ConceptRule, ExcelProfile, load_profile
+from excel_export_service import calculate_case_input_hash
 from reconciliation import reconcile_declared_totals
 
 
@@ -137,7 +138,7 @@ def _case_and_profile(connection: sqlite3.Connection, id_case: int) -> tuple[sql
         raise DistributionBlockedError("Hay incidencias abiertas antes del reparto")
 
     latest_export = connection.execute(
-        """SELECT e.status,e.id_periodo,t.profile_key,t.profile_version
+        """SELECT e.status,e.id_periodo,e.input_sha256,t.profile_key,t.profile_version
            FROM excel_export_runs e
            JOIN excel_template_profiles t ON t.id_template_profile=e.id_template_profile
            WHERE e.id_case=?
@@ -158,6 +159,19 @@ def _case_and_profile(connection: sqlite3.Connection, id_case: int) -> tuple[sql
         raise DistributionBlockedError("La versión del perfil no coincide con el Excel validado")
     if profile.community_code != str(case["codigo"]):
         raise DistributionBlockedError("El perfil del Excel no corresponde a la comunidad")
+    try:
+        current_input_hash = calculate_case_input_hash(
+            connection,
+            id_case=id_case,
+            project_root=Path(__file__).resolve().parents[1],
+            profile=profile,
+        )
+    except ValueError as error:
+        raise DistributionBlockedError(str(error)) from error
+    if latest_export["input_sha256"] != current_input_hash:
+        raise DistributionBlockedError(
+            "Las entradas cambiaron desde el Excel validado; debe regenerar Excel antes de repartir"
+        )
     return case, profile
 
 

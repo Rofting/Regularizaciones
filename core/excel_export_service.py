@@ -125,7 +125,8 @@ def _profile_for_community(
     return profile
 
 
-def _case_context(connection: sqlite3.Connection, id_case: int) -> sqlite3.Row:
+def _input_case_context(connection: sqlite3.Connection, id_case: int) -> sqlite3.Row:
+    """Contexto canónico de un expediente para calcular su huella de entrada."""
     row = connection.execute(
         """SELECT c.id_case,c.id_comunidad,c.nombre,c.fecha_inicio,c.fecha_fin,
                   c.estado,c.id_periodo,co.codigo,co.nombre AS comunidad_nombre
@@ -136,6 +137,11 @@ def _case_context(connection: sqlite3.Connection, id_case: int) -> sqlite3.Row:
     ).fetchone()
     if row is None:
         raise ExportBlockedError("El expediente no existe")
+    return row
+
+
+def _case_context(connection: sqlite3.Connection, id_case: int) -> sqlite3.Row:
+    row = _input_case_context(connection, id_case)
     if row["estado"] != "ready_for_calculation":
         raise ExportBlockedError(
             "El expediente debe estar listo para cálculo antes de generar el Excel"
@@ -166,6 +172,30 @@ def _case_context(connection: sqlite3.Connection, id_case: int) -> sqlite3.Row:
     if invalid_documents:
         raise ExportBlockedError("Hay fuentes del expediente pendientes de validación")
     return row
+
+
+def calculate_case_input_hash(
+    connection: sqlite3.Connection,
+    *,
+    id_case: int,
+    project_root: Path,
+    profile: ExcelProfile | None = None,
+) -> str:
+    """Devuelve la huella canónica de las entradas actuales de un expediente.
+
+    Esta es la única puerta pública para comparar las entradas usadas por el
+    Excel oficial con las que pretende usar un reparto posterior. Si el
+    llamante conoce el perfil que empleó una salida histórica debe pasarlo para
+    impedir que un perfil activo más nuevo cambie la huella silenciosamente.
+    """
+    case = _input_case_context(connection, id_case)
+    root = Path(project_root).resolve()
+    selected_profile = profile or _profile_for_community(
+        connection, root, case["codigo"], int(case["id_comunidad"])
+    )
+    if selected_profile.community_code != str(case["codigo"]):
+        raise ExportBlockedError("El perfil no corresponde a la comunidad del expediente")
+    return _input_hash(connection, case, selected_profile)
 
 
 def _required_parameter_keys(profile: ExcelProfile) -> set[str]:
@@ -360,7 +390,8 @@ def _input_hash(connection: sqlite3.Connection, case: sqlite3.Row, profile: Exce
         ),
         "readings": _query_dicts(
             connection,
-            """SELECT p.codigo_vivienda,l.fecha_lectura,l.valor_acumulado,l.estado
+            """SELECT p.codigo_vivienda,l.fecha_lectura,l.valor_acumulado,l.estado,
+                      l.approved_by,l.approved_at
                FROM lecturas_vecino l JOIN propietarios p ON p.id_propietario=l.id_propietario
                WHERE p.id_comunidad=? AND l.id_periodo=? AND l.tipo='ACS'
                ORDER BY p.codigo_vivienda,l.fecha_lectura""",
@@ -795,7 +826,9 @@ def generate_official_excel(
     profile_id, template, template_hash = _template_registration(
         connection, case, profile, project_root
     )
-    input_hash = _input_hash(connection, case, profile)
+    input_hash = calculate_case_input_hash(
+        connection, id_case=id_case, project_root=project_root, profile=profile,
+    )
     cursor = connection.execute(
         """INSERT INTO excel_export_runs
            (id_case,id_periodo,id_template_profile,input_sha256,template_sha256,status)

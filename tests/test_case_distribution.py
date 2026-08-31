@@ -17,6 +17,7 @@ from case_distribution import (
     allocate_concept_cents,
     calculate_case_distribution,
 )
+from excel_export_service import calculate_case_input_hash
 from tests.helpers import temporary_database
 
 
@@ -64,6 +65,7 @@ class CaseDistributionTest(unittest.TestCase):
         self._set_parameter("acs_variable_billed", "200.00")
         self._set_parameter("credit_actual", "-3.01")
         self.connection.commit()
+        self._refresh_validated_export()
 
     def tearDown(self):
         self.database.__exit__(None, None, None)
@@ -93,6 +95,18 @@ class CaseDistributionTest(unittest.TestCase):
                VALUES (?,?,?,?, 'EUR')""",
             (self.community_id, self.period_id, key, amount),
         )
+
+    def _refresh_validated_export(self):
+        input_hash = calculate_case_input_hash(
+            self.connection, id_case=self.case_id, project_root=PROJECT_ROOT,
+        )
+        self.connection.execute(
+            """INSERT INTO excel_export_runs
+               (id_case,id_periodo,id_template_profile,input_sha256,template_sha256,status)
+               VALUES (?,?,?,?,?,'validated')""",
+            (self.case_id, self.period_id, self.profile_id, input_hash, "template-hash"),
+        )
+        self.connection.commit()
 
     def _rows(self, concept):
         return self.connection.execute(
@@ -150,19 +164,54 @@ class CaseDistributionTest(unittest.TestCase):
             allocate_concept_cents(-100, {3: 1, 2: 1, 1: 1}),
         )
 
-    def test_ignores_inactive_owners_and_replaces_previous_results_on_rerun(self):
+    def test_requires_a_new_validated_export_before_rerun_after_parameter_change(self):
         calculate_case_distribution(self.connection, id_case=self.case_id)
+        before = [tuple(row) for row in self._rows("acs_fixed")]
         self.connection.execute(
             "UPDATE period_parameters SET numeric_value=120.02 WHERE parameter_key='acs_fixed_actual'"
         )
         self.connection.commit()
 
+        with self.assertRaisesRegex(DistributionBlockedError, "regenerar Excel"):
+            calculate_case_distribution(self.connection, id_case=self.case_id)
+        self.assertEqual(before, [tuple(row) for row in self._rows("acs_fixed")])
+
+        self._refresh_validated_export()
         second = calculate_case_distribution(self.connection, id_case=self.case_id)
 
         self.assertEqual(6, second.owner_result_count)
         self.assertEqual(2, len(self._rows("acs_fixed")))
         self.assertFalse(any(row[0] == self.inactive_owner for row in self._rows("acs_fixed")))
         self.assertEqual(12002, sum(row[2] for row in self._rows("acs_fixed")))
+
+    def test_blocks_reading_change_after_export_without_modifying_results(self):
+        calculate_case_distribution(self.connection, id_case=self.case_id)
+        before = [tuple(row) for row in self._rows("acs_variable")]
+        self.connection.execute(
+            """UPDATE lecturas_vecino SET valor_acumulado=31
+               WHERE id_propietario=? AND fecha_lectura='2026-08-31'""",
+            (self.owner_two,),
+        )
+        self.connection.commit()
+
+        with self.assertRaisesRegex(DistributionBlockedError, "regenerar Excel"):
+            calculate_case_distribution(self.connection, id_case=self.case_id)
+
+        self.assertEqual(before, [tuple(row) for row in self._rows("acs_variable")])
+
+    def test_blocks_owner_coefficient_or_activity_change_after_export(self):
+        calculate_case_distribution(self.connection, id_case=self.case_id)
+        before = [tuple(row) for row in self._rows("credit")]
+        self.connection.execute(
+            "UPDATE propietarios SET coeficiente=3,activo=0 WHERE id_propietario=?",
+            (self.owner_two,),
+        )
+        self.connection.commit()
+
+        with self.assertRaisesRegex(DistributionBlockedError, "regenerar Excel"):
+            calculate_case_distribution(self.connection, id_case=self.case_id)
+
+        self.assertEqual(before, [tuple(row) for row in self._rows("credit")])
 
     def test_absent_optional_concept_removes_stale_rows(self):
         self.connection.execute(
@@ -175,6 +224,7 @@ class CaseDistributionTest(unittest.TestCase):
             (self.owner_one, self.period_id, "credit", 0, -999, -999),
         )
         self.connection.commit()
+        self._refresh_validated_export()
 
         result = calculate_case_distribution(self.connection, id_case=self.case_id)
 
@@ -186,6 +236,7 @@ class CaseDistributionTest(unittest.TestCase):
             "UPDATE propietarios SET coeficiente=0 WHERE id_propietario=?", (self.owner_two,)
         )
         self.connection.commit()
+        self._refresh_validated_export()
 
         with self.assertRaisesRegex(DistributionBlockedError, "peso"):
             calculate_case_distribution(self.connection, id_case=self.case_id)
@@ -202,6 +253,7 @@ class CaseDistributionTest(unittest.TestCase):
             (self.owner_one,),
         )
         self.connection.commit()
+        self._refresh_validated_export()
 
         with self.assertRaisesRegex(DistributionBlockedError, "contador"):
             calculate_case_distribution(self.connection, id_case=self.case_id)
@@ -218,6 +270,7 @@ class CaseDistributionTest(unittest.TestCase):
             (self.owner_one,),
         )
         self.connection.commit()
+        self._refresh_validated_export()
 
         result = calculate_case_distribution(self.connection, id_case=self.case_id)
 
