@@ -1,0 +1,254 @@
+import shutil
+import sqlite3
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest.mock import patch
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CORE_DIR = PROJECT_ROOT / "core"
+if str(CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(CORE_DIR))
+
+import gestor_bd
+from excel_export_service import calculate_case_input_hash
+
+
+class CaseLetterServiceTest(unittest.TestCase):
+    """Contrato de cartas auditables, independiente de datos privados."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.root = Path(self.directory.name) / "project"
+        shutil.copytree(PROJECT_ROOT / "config", self.root / "config")
+        (self.root / "plantillas").mkdir(parents=True)
+        shutil.copy2(
+            PROJECT_ROOT / "plantillas" / "Plantilla_Cartas.docx",
+            self.root / "plantillas" / "Plantilla_Cartas.docx",
+        )
+        (self.root / "config" / "letter_identities.json").write_text(
+            '{"communities":{"658":{"office_name":"Gestión Portable",'
+            '"footer":"Atención de la comunidad",'
+            '"signature":"Equipo gestor", "city":"Valencia"}}}',
+            encoding="utf-8",
+        )
+
+        self.database_path = str(Path(self.directory.name) / "letters.db")
+        gestor_bd.crear_bd(self.database_path)
+        self.connection = gestor_bd.conectar(self.database_path)
+        self.community_id = gestor_bd.obtener_o_crear_comunidad(
+            self.connection, "658", "Comunidad de prueba"
+        )
+        self.period_id = self.connection.execute(
+            """INSERT INTO periodos(id_comunidad,nombre,fecha_inicio,fecha_fin)
+               VALUES (?,?,?,?)""",
+            (self.community_id, "2025-2026", "2025-09-01", "2026-08-31"),
+        ).lastrowid
+        self.case_id = self.connection.execute(
+            """INSERT INTO regularization_cases
+               (id_comunidad,nombre,fecha_inicio,fecha_fin,estado,id_periodo)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                self.community_id, "Regularización 2025-2026", "2025-09-01",
+                "2026-08-31", "reconciled", self.period_id,
+            ),
+        ).lastrowid
+        self.owner_one = self._owner("A-1", "Ana Vecina", 1.0, 100, 120)
+        self.owner_two = self._owner("B-2", "Bruno Vecino", 2.0, 200, 210)
+        self._parameter("acs_fixed_actual", "120.00")
+        self._parameter("acs_fixed_billed", "100.00")
+        self._parameter("acs_variable_actual", "300.00")
+        self._parameter("acs_variable_billed", "200.00")
+        self._parameter("credit_actual", "-3.00")
+        self._result_rows()
+        self._reconcile_all()
+        self._validated_export()
+        self.connection.commit()
+
+    def tearDown(self):
+        self.connection.close()
+        self.directory.cleanup()
+
+    def _owner(self, code, name, coefficient, start, end):
+        owner_id = self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario,coeficiente,activo)
+               VALUES (?,?,?,?,1)""",
+            (self.community_id, code, name, coefficient),
+        ).lastrowid
+        self.connection.executemany(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado)
+               VALUES (?,?,'ACS',?,?,'real')""",
+            [
+                (owner_id, self.period_id, "2025-09-01", start),
+                (owner_id, self.period_id, "2026-08-31", end),
+            ],
+        )
+        return owner_id
+
+    def _parameter(self, key, value):
+        self.connection.execute(
+            """INSERT INTO period_parameters
+               (id_comunidad,id_periodo,parameter_key,numeric_value,unit)
+               VALUES (?,?,?,?,?)""",
+            (self.community_id, self.period_id, key, value, "EUR"),
+        )
+
+    def _result_rows(self):
+        rows = []
+        for owner_id, consumption, fixed_actual, variable_actual, credit_actual in (
+            (self.owner_one, 20.0, 6000, 20000, -100),
+            (self.owner_two, 10.0, 6000, 10000, -200),
+        ):
+            rows.extend([
+                (owner_id, self.period_id, "acs_fixed", None, 5000, fixed_actual,
+                 fixed_actual - 5000),
+                (owner_id, self.period_id, "acs_variable", consumption,
+                 10000 if owner_id == self.owner_one else 10000,
+                 variable_actual, variable_actual - 10000),
+                (owner_id, self.period_id, "credit", None, 0, credit_actual, credit_actual),
+            ])
+        self.connection.executemany(
+            """INSERT INTO owner_concept_results
+               (id_propietario,id_periodo,concept_key,consumption,billed_cents,
+                actual_cents,difference_cents)
+               VALUES (?,?,?,?,?,?,?)""",
+            rows,
+        )
+
+    def _reconcile_all(self):
+        for key, billed, actual in (
+            ("acs_fixed", 10000, 12000),
+            ("acs_variable", 20000, 30000),
+            ("credit", 0, -300),
+        ):
+            self.connection.execute(
+                """INSERT INTO reconciliations
+                   (id_periodo,concept_key,reference_billed_cents,calculated_billed_cents,
+                    reference_actual_cents,calculated_actual_cents,difference_cents,status)
+                   VALUES (?,?,?,?,?,?,?,'cuadrado')""",
+                (self.period_id, key, billed, billed, actual, actual, 0),
+            )
+
+    def _validated_export(self):
+        profile_id = self.connection.execute(
+            """INSERT INTO excel_template_profiles
+               (id_comunidad,profile_key,profile_version,template_relative_path,
+                template_sha256,profile_sha256,status)
+               VALUES (?,?,?,?,?,?, 'active')""",
+            (
+                self.community_id, "658_acs_v1", "1",
+                "plantillas/comunidades/658/658_acs_v1.xlsx",
+                "excel-template", "profile", 
+            ),
+        ).lastrowid
+        input_hash = calculate_case_input_hash(
+            self.connection, id_case=self.case_id, project_root=self.root
+        )
+        self.connection.execute(
+            """INSERT INTO excel_export_runs
+               (id_case,id_periodo,id_template_profile,input_sha256,template_sha256,status)
+               VALUES (?,?,?,?,?,'validated')""",
+            (self.case_id, self.period_id, profile_id, input_hash, "excel-template"),
+        )
+
+    def _run_rows(self, run_id):
+        return self.connection.execute(
+            """SELECT id_propietario,status,output_path,error_message
+               FROM generated_letters WHERE id_letter_run=? ORDER BY id_propietario""",
+            (run_id,),
+        ).fetchall()
+
+    def test_case_letters_use_active_concepts_and_record_each_owner(self):
+        from case_letter_service import generate_case_letters
+
+        result = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root
+        )
+
+        self.assertEqual(2, result.generated_count)
+        self.assertEqual((), result.failures)
+        self.assertTrue(result.output_path.is_dir())
+        rows = self._run_rows(result.id_letter_run)
+        self.assertEqual({"generated"}, {row["status"] for row in rows})
+        self.assertEqual(2, len(list(result.output_path.glob("*.docx"))))
+        self.assertEqual(
+            "completed",
+            self.connection.execute(
+                "SELECT status FROM letter_generation_runs WHERE id_letter_run=?",
+                (result.id_letter_run,),
+            ).fetchone()[0],
+        )
+
+    def test_letter_content_uses_only_active_non_heating_concepts_and_portable_identity(self):
+        from case_letter_service import generate_case_letters
+
+        result = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root
+        )
+        document = next(result.output_path.glob("*.docx"))
+        with zipfile.ZipFile(document) as archive:
+            text = "\n".join(
+                archive.read(name).decode("utf-8", errors="ignore")
+                for name in archive.namelist() if name.startswith("word/") and name.endswith(".xml")
+            )
+        self.assertIn("Cuota fija de ACS", text)
+        self.assertIn("Consumo de ACS", text)
+        self.assertIn("Abono", text)
+        self.assertNotIn("Calefacci", text)
+        self.assertIn("Gesti", text)
+        self.assertIn("Valencia", text)
+        self.assertNotIn("Meditrade", text)
+        self.assertNotIn("Zaragoza", text)
+
+    def test_case_letters_refuse_unreconciled_results_without_writing_files(self):
+        from case_letter_service import LetterGenerationBlockedError, generate_case_letters
+
+        self.connection.execute(
+            "UPDATE reconciliations SET status='descuadrado' WHERE concept_key='acs_variable'"
+        )
+        self.connection.commit()
+
+        with self.assertRaisesRegex(LetterGenerationBlockedError, "concili"):
+            generate_case_letters(
+                self.database_path, id_case=self.case_id, project_root=self.root
+            )
+        self.assertFalse((self.root / "salidas").exists())
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM letter_generation_runs").fetchone()[0])
+
+    def test_one_owner_failure_is_audited_without_removing_other_letter(self):
+        from case_letter_service import generate_case_letters
+
+        def fail_only_for_bruno(datos, ruta_plantilla, ruta_salida):
+            if datos["vecino"]["nombre"] == "Bruno Vecino":
+                raise OSError("plantilla dañada para la prueba")
+            Path(ruta_salida).write_bytes(b"DOCX-SINTETICO")
+            return str(ruta_salida)
+
+        with patch("case_letter_service.generar_carta", side_effect=fail_only_for_bruno):
+            result = generate_case_letters(
+                self.database_path, id_case=self.case_id, project_root=self.root
+            )
+
+        self.assertEqual(1, result.generated_count)
+        self.assertEqual(1, len(result.failures))
+        self.assertIn("Bruno Vecino", result.failures[0])
+        rows = self._run_rows(result.id_letter_run)
+        self.assertEqual(["generated", "failed"], [row["status"] for row in rows])
+        self.assertTrue(Path(rows[0]["output_path"]).is_file())
+        self.assertIsNone(rows[1]["output_path"])
+        self.assertEqual(
+            "incomplete",
+            self.connection.execute(
+                "SELECT status FROM letter_generation_runs WHERE id_letter_run=?",
+                (result.id_letter_run,),
+            ).fetchone()[0],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

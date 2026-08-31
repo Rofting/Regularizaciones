@@ -370,7 +370,7 @@ def _parrafo(doc, texto: str, tam: float = 9, color: str = C_DARK,
 # ---------------------------------------------------------------------------
 
 def _bloque_cabecera(doc: Document, nombre_comunidad: str,
-                     nombre_periodo: str) -> None:
+                     nombre_periodo: str, oficina: str = "Administración de fincas") -> None:
     """Cabecera índigo: título + comunidad + periodo."""
     tabla = doc.add_table(rows=2, cols=1)
     _sin_borde_tabla(tabla)
@@ -378,19 +378,104 @@ def _bloque_cabecera(doc: Document, nombre_comunidad: str,
 
     c1 = tabla.rows[0].cells[0]
     _set_color_celda(c1, C_PRIMARIO)
-    _escribir_celda(c1, "REGULARIZACIÓN DE CONSUMOS  ·  CALEFACCIÓN Y ACS",
+    _escribir_celda(c1, "REGULARIZACIÓN DE CONSUMOS",
                     negrita=True, tamaño=12, color_hex="#FFFFFF",
                     alineacion=WD_ALIGN_PARAGRAPH.CENTER, despues=1)
 
     c2 = tabla.rows[1].cells[0]
     _set_color_celda(c2, C_PRIMARIO_MED)
     _escribir_celda(c2,
-                    f"{nombre_comunidad.upper()}   ·   PERIODO {nombre_periodo}   ·   Administración de Fincas",
+                    f"{nombre_comunidad.upper()}   ·   PERIODO {nombre_periodo}   ·   {oficina}",
                     negrita=False, tamaño=8, color_hex=C_TEXTO_HEADER,
                     alineacion=WD_ALIGN_PARAGRAPH.CENTER, despues=1)
 
     p = doc.add_paragraph()
     _quitar_margen_parrafo(p, 3)
+
+
+def _tabla_conceptos_activos(doc: Document, conceptos: list[dict]) -> None:
+    """Detalle compacto de conceptos canónicos sin inventar un servicio.
+
+    Los conceptos llegan ya filtrados por el perfil del expediente, por lo que
+    una comunidad sin calefacción nunca muestra una columna ni un rótulo de
+    calefacción. Fijo, variable, créditos y extras permanecen como filas
+    independientes para que el propietario pueda revisarlos.
+    """
+    _seccion_titulo(doc, "DETALLE DE LA REGULARIZACIÓN")
+    tabla = doc.add_table(rows=len(conceptos) + 2, cols=4)
+    _sin_borde_tabla(tabla)
+    for index, width in enumerate((7.2, 2.9, 2.9, 3.0)):
+        _set_ancho_col(tabla, index, width)
+    for index, title in enumerate(("Concepto", "Cobrado", "Coste real", "Diferencia")):
+        cell = tabla.rows[0].cells[index]
+        _set_color_celda(cell, C_PRIMARIO_SUAVE)
+        _escribir_celda(cell, title, negrita=True, tamaño=8.5, color_hex=C_PRIMARIO,
+                        alineacion=WD_ALIGN_PARAGRAPH.LEFT if index == 0 else WD_ALIGN_PARAGRAPH.RIGHT,
+                        despues=1)
+    total_billed = total_actual = total_difference = 0.0
+    for row_index, concept in enumerate(conceptos, start=1):
+        row = tabla.rows[row_index]
+        if row_index % 2 == 0:
+            for cell in row.cells:
+                _set_color_celda(cell, C_ZEBRA)
+        billed = float(concept.get("importe_cobrado", 0.0) or 0.0)
+        actual = float(concept.get("importe_real", 0.0) or 0.0)
+        difference = float(concept.get("diferencia", actual - billed) or 0.0)
+        colour = C_VERDE if difference < -0.005 else (C_ROJO if difference > 0.005 else C_DARK)
+        sign = "− " if difference < -0.005 else ("+ " if difference > 0.005 else "")
+        _escribir_celda(row.cells[0], str(concept["label"]), tamaño=8.5, color_hex=C_DARK, despues=1)
+        _escribir_celda(row.cells[1], _fmt_euros(billed), tamaño=8.5, color_hex=C_DARK,
+                        alineacion=WD_ALIGN_PARAGRAPH.RIGHT, despues=1)
+        _escribir_celda(row.cells[2], _fmt_euros(actual), tamaño=8.5, color_hex=C_DARK,
+                        alineacion=WD_ALIGN_PARAGRAPH.RIGHT, despues=1)
+        _escribir_celda(row.cells[3], sign + _fmt_euros(abs(difference)), tamaño=8.5,
+                        color_hex=colour, alineacion=WD_ALIGN_PARAGRAPH.RIGHT, despues=1)
+        total_billed += billed
+        total_actual += actual
+        total_difference += difference
+    row = tabla.rows[-1]
+    for cell in row.cells:
+        _set_color_celda(cell, C_PRIMARIO_SUAVE)
+    colour = C_VERDE if total_difference < -0.005 else (C_ROJO if total_difference > 0.005 else C_PRIMARIO)
+    sign = "− " if total_difference < -0.005 else ("+ " if total_difference > 0.005 else "")
+    _escribir_celda(row.cells[0], "TOTAL", negrita=True, tamaño=9, color_hex=C_PRIMARIO, despues=1)
+    _escribir_celda(row.cells[1], _fmt_euros(total_billed), negrita=True, tamaño=9, color_hex=C_DARK,
+                    alineacion=WD_ALIGN_PARAGRAPH.RIGHT, despues=1)
+    _escribir_celda(row.cells[2], _fmt_euros(total_actual), negrita=True, tamaño=9, color_hex=C_DARK,
+                    alineacion=WD_ALIGN_PARAGRAPH.RIGHT, despues=1)
+    _escribir_celda(row.cells[3], sign + _fmt_euros(abs(total_difference)), negrita=True,
+                    tamaño=9, color_hex=colour, alineacion=WD_ALIGN_PARAGRAPH.RIGHT, despues=1)
+    p = doc.add_paragraph()
+    _quitar_margen_parrafo(p, 3)
+
+
+def _limpiar_identidad_plantilla(doc: Document, identity: dict) -> None:
+    """Elimina marca heredada y aplica identidad portable en cabecera y pie."""
+    for section in doc.sections:
+        for story in (section.header, section.footer):
+            for paragraph in list(story.paragraphs):
+                paragraph._element.getparent().remove(paragraph._element)
+            for table in list(story.tables):
+                table._element.getparent().remove(table._element)
+        header = section.header.add_paragraph()
+        header.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run = header.add_run(identity.get("office_name", "Administración de fincas"))
+        run.font.name = FUENTE_CARTA
+        run.font.size = Pt(7)
+        run.font.color.rgb = _rgb(C_GRIS_ETQ)
+        logo_path = identity.get("logo_path")
+        if logo_path and os.path.isfile(str(logo_path)):
+            try:
+                header.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                header.add_run().add_picture(str(logo_path), width=Cm(1.0))
+            except Exception:
+                pass
+        footer = section.footer.add_paragraph()
+        footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = footer.add_run(identity.get("footer", "Atención de la comunidad"))
+        run.font.name = FUENTE_CARTA
+        run.font.size = Pt(7)
+        run.font.color.rgb = _rgb(C_GRIS_ETQ)
 
 
 def _caja_resultado(doc: Document, diferencia_total: float) -> None:
@@ -936,11 +1021,14 @@ def generar_carta(datos: dict, ruta_plantilla: str, ruta_salida: str) -> str:
     shutil.copy2(ruta_plantilla, ruta_salida)
     doc = Document(ruta_salida)
 
-    # Limpiar el cuerpo preservando el header con logo de Meditrade
+    # El contenido se reconstruye; la identidad heredada no debe filtrarse a
+    # otro despacho aunque la plantilla proceda de una instalación anterior.
     for par in list(doc.paragraphs):
         par._element.getparent().remove(par._element)
     for tabla in list(doc.tables):
         tabla._element.getparent().remove(tabla._element)
+    identity = datos.get("identity") or {}
+    _limpiar_identidad_plantilla(doc, identity)
 
     vecino  = datos["vecino"]
     periodo = datos["periodo"]
@@ -949,16 +1037,25 @@ def generar_carta(datos: dict, ruta_plantilla: str, ruta_salida: str) -> str:
     total   = datos["total"]
     medias  = datos.get("medias") or {}
     cuota_fija = datos.get("cuota_fija") or {}
+    conceptos_activos = list(datos.get("conceptos") or ())
     dif_fija   = round(sum(cf["diferencia"] for cf in cuota_fija.values()), 2)
     total_general = round(total["diferencia"] + dif_fija, 2)
+    if conceptos_activos:
+        total_general = round(sum(float(item.get("diferencia", 0.0) or 0.0)
+                                  for item in conceptos_activos), 2)
     nombre_comunidad = datos.get("comunidad", "COMUNIDAD DE PROPIETARIOS")
 
     nombre_periodo = periodo["nombre"]
     hoy       = datetime.now()
-    fecha_str = f"Zaragoza, {hoy.day} de {MESES_ES[hoy.month]} de {hoy.year}"
+    city = str(identity.get("city", "")).strip()
+    fecha_text = f"{hoy.day} de {MESES_ES[hoy.month]} de {hoy.year}"
+    fecha_str = f"{city}, {fecha_text}" if city else fecha_text
 
     # 1. CABECERA
-    _bloque_cabecera(doc, nombre_comunidad, nombre_periodo)
+    _bloque_cabecera(
+        doc, nombre_comunidad, nombre_periodo,
+        identity.get("office_name", "Administración de fincas"),
+    )
 
     # 2. RESULTADO DESTACADO (lo más importante, primero)
     _caja_resultado(doc, total_general)
@@ -975,23 +1072,28 @@ def generar_carta(datos: dict, ruta_plantilla: str, ruta_salida: str) -> str:
                  n_vecinos   = medias.get("n_vecinos", 0))
 
     # 4. INTRO BREVE (una línea)
-    _parrafo(doc,
-             "Conforme al acuerdo de la última Junta General, le remitimos la regularización "
-             f"de Calefacción y ACS del periodo {nombre_periodo} según las lecturas de su contador individual.",
-             tam=8.5, despues=6)
+    intro = (
+        "Conforme al acuerdo de la última Junta General, le remitimos la regularización "
+        f"del periodo {nombre_periodo} con los conceptos detallados a continuación."
+        if conceptos_activos else
+        "Conforme al acuerdo de la última Junta General, le remitimos la regularización "
+        f"de Calefacción y ACS del periodo {nombre_periodo} según las lecturas de su contador individual."
+    )
+    _parrafo(doc, intro, tam=8.5, despues=6)
 
     # 5. DETALLE COMBINADO (una sola tabla: calefacción + ACS)
-    _tabla_suministros_combinada(doc, calef, acs)
-
-    # 5b. CUOTA FIJA (si la comunidad la regulariza)
-    _tabla_cuota_fija(doc, cuota_fija)
-
-    # 5c. RESUMEN DE TOTALES
-    _tabla_totales(doc,
-                   dif_fija  = dif_fija,
-                   dif_calef = calef.get("diferencia", 0.0) if calef else 0.0,
-                   dif_acs   = acs.get("diferencia", 0.0) if acs else 0.0,
-                   total_general = total_general)
+    if conceptos_activos:
+        _tabla_conceptos_activos(doc, conceptos_activos)
+    else:
+        _tabla_suministros_combinada(doc, calef, acs)
+        # 5b. CUOTA FIJA (si la comunidad la regulariza)
+        _tabla_cuota_fija(doc, cuota_fija)
+        # 5c. RESUMEN DE TOTALES
+        _tabla_totales(doc,
+                       dif_fija  = dif_fija,
+                       dif_calef = calef.get("diferencia", 0.0) if calef else 0.0,
+                       dif_acs   = acs.get("diferencia", 0.0) if acs else 0.0,
+                       total_general = total_general)
 
     # 6. COMPARATIVA DE CONSUMO (franjas de vecinos + histórico propio)
     grafica = datos.get("consumo_grafica") or {}
@@ -1004,11 +1106,11 @@ def generar_carta(datos: dict, ruta_plantilla: str, ruta_salida: str) -> str:
             history=grafica.get("history", []),
             unit=grafica.get("unit", "m³"),
         )
-    if not png:
+    if not png and not conceptos_activos:
         png = _grafica_unica(calef, acs, medias)
     if png:
         _insertar_imagen(doc, png, 16.2)
-    else:
+    elif not conceptos_activos:
         calef_cob, calef_real = calef.get("importe_cobrado", 0.0), calef.get("importe_real", 0.0)
         acs_cob,   acs_real   = acs.get("importe_cobrado", 0.0),   acs.get("importe_real", 0.0)
         _bloque_comparativa_fallback(doc, calef_cob, calef_real, acs_cob, acs_real)
@@ -1018,7 +1120,7 @@ def generar_carta(datos: dict, ruta_plantilla: str, ruta_salida: str) -> str:
              "Puede verificar los datos con sus recibos y comunicarnos cualquier discrepancia "
              "en un plazo de 30 días. Quedamos a su disposición. Reciba un cordial saludo.",
              tam=8.5, despues=4)
-    _parrafo(doc, "La Administración  ·  Administración de Fincas",
+    _parrafo(doc, identity.get("signature", "La Administración"),
              tam=8.5, negrita=True, alin=WD_ALIGN_PARAGRAPH.RIGHT, despues=0)
 
     doc.save(ruta_salida)

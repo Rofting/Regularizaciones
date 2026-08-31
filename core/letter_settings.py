@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,69 @@ class LetterConcept:
     service: str | None
     unit: str | None
     display_order: int
+
+
+@dataclass(frozen=True)
+class LetterIdentity:
+    """Identidad de despacho configurable por comunidad, sin marca implícita."""
+
+    office_name: str
+    footer: str
+    signature: str
+    city: str
+    logo_path: Path | None = None
+
+
+def load_community_letter_identity(project_root: Path, community_code: str) -> LetterIdentity:
+    """Carga una identidad opcional y segura para las cartas de una comunidad.
+
+    El archivo no contiene datos de reparto y puede instalarse en cada despacho:
+    ``config/letter_identities.json``. Un logo sólo se acepta si queda dentro
+    del proyecto para impedir que una configuración abra rutas arbitrarias.
+    """
+    root = Path(project_root).resolve()
+    defaults = {
+        "office_name": "Administración de fincas",
+        "footer": "Atención de la comunidad",
+        "signature": "La Administración",
+        "city": "",
+    }
+    path = root / "config" / "letter_identities.json"
+    if path.is_file():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise ValueError("La configuración de identidad de cartas no es válida") from error
+        if not isinstance(payload, dict):
+            raise ValueError("La configuración de identidad de cartas no es válida")
+        communities = payload.get("communities", {})
+        if not isinstance(communities, dict):
+            raise ValueError("communities debe ser un objeto en la identidad de cartas")
+        configured = communities.get(str(community_code), {})
+        if not isinstance(configured, dict):
+            raise ValueError("La identidad de la comunidad no es válida")
+        for key in defaults:
+            value = configured.get(key)
+            if value is not None:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{key} debe ser un texto no vacío")
+                defaults[key] = value.strip()
+        logo_raw = configured.get("logo_path")
+    else:
+        logo_raw = None
+
+    logo_path = None
+    if logo_raw is not None:
+        if not isinstance(logo_raw, str) or not logo_raw.strip():
+            raise ValueError("logo_path debe ser una ruta relativa no vacía")
+        candidate = (root / logo_raw).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise ValueError("logo_path debe quedar dentro del proyecto") from None
+        if candidate.is_file():
+            logo_path = candidate
+    return LetterIdentity(logo_path=logo_path, **defaults)
 
 
 def available_concepts(connection: sqlite3.Connection) -> tuple[LetterConcept, ...]:
