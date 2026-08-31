@@ -72,7 +72,7 @@ class DatabaseMigrationTest(unittest.TestCase):
 
         self.assertTrue(EXPECTED_TABLES.issubset(tables))
         self.assertIn("email", columns)
-        self.assertEqual([1, 2, 3, 4], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4, 5], [row[0] for row in versions])
         self.assertEqual(
             [
                 "acs_fixed",
@@ -100,7 +100,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM regularization_concepts"
             ).fetchone()[0]
 
-        self.assertEqual([1, 2, 3, 4], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4, 5], [row[0] for row in versions])
         self.assertEqual(8, concept_count)
 
     def test_migration_two_creates_case_and_review_tables(self):
@@ -126,7 +126,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
         self.assertTrue({
             "regularization_cases", "source_documents", "extraction_candidates",
             "review_issues", "manual_corrections",
@@ -143,13 +143,13 @@ class DatabaseMigrationTest(unittest.TestCase):
             for statement in gestor_bd.TABLAS:
                 connection.execute(statement)
             connection.commit()
-            self.assertEqual(4, gestor_bd.aplicar_migraciones(connection))
-            self.assertEqual(4, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(5, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(5, gestor_bd.aplicar_migraciones(connection))
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
 
-        self.assertEqual([1, 2, 3, 4], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4, 5], [row[0] for row in versions])
 
     def test_migration_three_links_cases_and_creates_export_audit_tables(self):
         with closing(self._connect()) as connection:
@@ -177,7 +177,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(4, version)
+        self.assertEqual(5, version)
         self.assertTrue({
             "invoice_components",
             "period_parameters",
@@ -188,6 +188,18 @@ class DatabaseMigrationTest(unittest.TestCase):
         }.issubset(tables))
         self.assertIn("id_periodo", case_columns)
         self.assertIn("idx_case_period", indexes)
+
+    def test_migration_five_records_explicit_estimation_approval(self):
+        with closing(self._connect()) as connection:
+            for statement in gestor_bd.TABLAS:
+                connection.execute(statement)
+            connection.commit()
+            gestor_bd.aplicar_migraciones(connection)
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(lecturas_vecino)")
+            }
+
+        self.assertTrue({"approved_by", "approved_at"}.issubset(columns))
 
     def test_failed_migration_rolls_back_every_statement(self):
         with closing(self._connect()) as connection:

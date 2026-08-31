@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 MIGRATION_1_SQL = (
@@ -355,11 +355,26 @@ def _migration_4(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _migration_5(connection: sqlite3.Connection) -> None:
+    """Audita la aprobación explícita de lecturas estimadas.
+
+    Una nota libre no basta para convertir una lectura irregular en consumo
+    repartible: el nombre de quien la aprueba y el momento de aprobación son
+    datos distintos y obligatorios para el motor de reparto de expedientes.
+    """
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(lecturas_vecino)")}
+    if "approved_by" not in columns:
+        connection.execute("ALTER TABLE lecturas_vecino ADD COLUMN approved_by TEXT")
+    if "approved_at" not in columns:
+        connection.execute("ALTER TABLE lecturas_vecino ADD COLUMN approved_at TEXT")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
     3: _migration_3,
     4: _migration_4,
+    5: _migration_5,
 }
 
 
