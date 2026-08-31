@@ -46,7 +46,7 @@ def resolve_case_profile(
     active_community_id: int,
     project_root: Path,
 ) -> ExcelProfile:
-    """Confirma pertenencia y carga el perfil registrado de esa comunidad."""
+    """Confirma pertenencia y resuelve el perfil registrado o de bootstrap."""
     try:
         case = case_ingestion.assert_case_belongs_to_community(
             connection, id_case, active_community_id
@@ -62,11 +62,35 @@ def resolve_case_profile(
            ORDER BY profiles.id_template_profile""",
         (case.community_id,),
     ).fetchall()
-    if not rows or not rows[0]["profile_key"]:
-        raise WorkflowBlockedError("La comunidad no tiene un perfil Excel activo")
+    if not rows:
+        raise WorkflowBlockedError("La comunidad no existe")
+    row = rows[0]
+    if not row["profile_key"]:
+        root = Path(project_root)
+        directory = root / "config" / "excel_profiles"
+        candidates: list[ExcelProfile] = []
+        if directory.is_dir():
+            for path in sorted(directory.glob("*.json")):
+                try:
+                    configured = load_profile(path.stem, root)
+                except (LookupError, ValueError):
+                    continue
+                if (
+                    configured.community_code == str(row["codigo"])
+                    and configured.workbook_layout
+                ):
+                    candidates.append(configured)
+        if not candidates:
+            raise WorkflowBlockedError(
+                "No hay un perfil Excel de configuración compatible para esta comunidad"
+            )
+        if len(candidates) != 1:
+            raise WorkflowBlockedError(
+                "La comunidad tiene varios perfiles Excel de configuración compatibles"
+            )
+        return candidates[0]
     if len(rows) != 1:
         raise WorkflowBlockedError("La comunidad tiene varios perfiles Excel activos")
-    row = rows[0]
     try:
         profile = load_profile(str(row["profile_key"]), Path(project_root))
     except (LookupError, ValueError) as error:

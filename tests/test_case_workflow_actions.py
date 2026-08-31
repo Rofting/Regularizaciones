@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -84,6 +86,59 @@ class CaseWorkflowActionsTest(unittest.TestCase):
 
         self.assertEqual("658_acs_v1", profile.key)
         self.assertEqual("658", profile.community_code)
+
+    def test_resolves_single_json_profile_before_first_export_registration(self):
+        from case_workflow_actions import resolve_case_profile
+
+        self.connection.execute("DELETE FROM excel_template_profiles WHERE id_comunidad=?", (self.community_id,))
+        self.connection.commit()
+
+        profile = resolve_case_profile(
+            self.connection,
+            id_case=self.case_id,
+            active_community_id=self.community_id,
+            project_root=PROJECT_ROOT,
+        )
+
+        self.assertEqual("658_acs_v1", profile.key)
+        self.assertTrue(profile.workbook_layout)
+
+    def test_blocks_bootstrap_when_no_registered_or_configured_profile_exists(self):
+        from case_workflow_actions import WorkflowBlockedError, resolve_case_profile
+
+        self.connection.execute("DELETE FROM excel_template_profiles WHERE id_comunidad=?", (self.community_id,))
+        self.connection.commit()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config" / "excel_profiles").mkdir(parents=True)
+            with self.assertRaisesRegex(WorkflowBlockedError, "configuración"):
+                resolve_case_profile(
+                    self.connection, id_case=self.case_id,
+                    active_community_id=self.community_id, project_root=root,
+                )
+
+    def test_blocks_bootstrap_when_multiple_json_profiles_match_the_community(self):
+        from case_workflow_actions import WorkflowBlockedError, resolve_case_profile
+
+        self.connection.execute("DELETE FROM excel_template_profiles WHERE id_comunidad=?", (self.community_id,))
+        self.connection.commit()
+        reference = json.loads(
+            (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_directory = root / "config" / "excel_profiles"
+            profile_directory.mkdir(parents=True)
+            for key in ("portable_a", "portable_b"):
+                candidate = {**reference, "key": key}
+                (profile_directory / f"{key}.json").write_text(
+                    json.dumps(candidate), encoding="utf-8"
+                )
+            with self.assertRaisesRegex(WorkflowBlockedError, "varios perfiles"):
+                resolve_case_profile(
+                    self.connection, id_case=self.case_id,
+                    active_community_id=self.community_id, project_root=root,
+                )
 
     def test_excel_distribution_and_letters_forward_consistent_progress_events(self):
         from case_workflow_actions import (

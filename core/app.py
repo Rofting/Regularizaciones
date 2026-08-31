@@ -1052,16 +1052,18 @@ class AppGestionFincas(ctk.CTk):
             )
             issues = review.list_open_issues(connection, self.id_expediente)
             open_count = len(issues)
-            profile_row = connection.execute(
-                """SELECT profile_key FROM excel_template_profiles
-                   WHERE id_comunidad=? AND status='active'
-                   ORDER BY id_template_profile""",
-                (self.id_comunidad,),
-            ).fetchall()
-            profile_label = (
-                profile_row[0]["profile_key"] if len(profile_row) == 1 else
-                "Sin perfil" if not profile_row else "Revisar perfiles activos"
-            )
+            workflow = MOD.get("case_workflow_actions")
+            if workflow:
+                try:
+                    profile = workflow.resolve_case_profile(
+                        connection, id_case=self.id_expediente,
+                        active_community_id=self.id_comunidad, project_root=BASE_DIR,
+                    )
+                    profile_label = profile.key
+                except workflow.WorkflowBlockedError as error:
+                    profile_label = f"Perfil pendiente: {error}"
+            else:
+                profile_label = "Perfil no disponible"
         except LookupError as exc:
             self._limpiar_contexto_expediente()
             self._refrescar_lista_expedientes()
