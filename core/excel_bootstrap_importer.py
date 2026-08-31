@@ -708,7 +708,7 @@ def _parse_invoice_sheets(
             if not (case.start_date <= invoice_date <= case.end_date):
                 _issue(
                     connection, id_case=id_case, id_document=id_document,
-                    code="INCOMPATIBLE_DATE",
+                    code="INVOICE_OUTSIDE_PERIOD",
                     field_name=f"{sheet_name}.{date_cell.coordinate}.invoice_date",
                     message="La fecha de la factura queda fuera del expediente",
                     detected_value=date_cell.value,

@@ -13,6 +13,7 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import gestor_bd
+import document_review
 from case_distribution import (
     DistributionBlockedError,
     allocate_concept_cents,
@@ -356,6 +357,63 @@ class CaseDistributionTest(unittest.TestCase):
         result = calculate_case_distribution(self.connection, id_case=self.case_id)
 
         self.assertEqual(6, result.owner_result_count)
+
+    def test_distribution_unblocks_after_every_counter_reset_is_approved(self):
+        document_id = self.connection.execute(
+            """INSERT INTO source_documents
+               (id_case,original_name,archived_path,sha256,document_kind,status)
+               VALUES (?,'lecturas.xlsx','archivo_lecturas.xlsx',
+                       'lecturas-sinteticas','meter_readings','under_review')""",
+            (self.case_id,),
+        ).lastrowid
+        self.connection.execute(
+            """UPDATE lecturas_vecino SET valor_acumulado=?,estado='contador_averiado'
+               WHERE id_propietario=? AND fecha_lectura='2026-08-31'""",
+            (5, self.owner_one),
+        )
+        self.connection.execute(
+            """UPDATE lecturas_vecino SET valor_acumulado=?,estado='contador_averiado'
+               WHERE id_propietario=? AND fecha_lectura='2026-08-31'""",
+            (6, self.owner_two),
+        )
+        self.connection.commit()
+        first_issue = document_review.create_review_issue(
+            self.connection, self.case_id, document_id, code="COUNTER_RESET",
+            field_name="reading.A.ACS", message="Contador reiniciado", detected_value="10 -> 5",
+        )
+        second_issue = document_review.create_review_issue(
+            self.connection, self.case_id, document_id, code="COUNTER_RESET",
+            field_name="reading.B.ACS", message="Contador reiniciado", detected_value="20 -> 6",
+        )
+        self._refresh_validated_export()
+
+        with self.assertRaisesRegex(DistributionBlockedError, "incidencias abiertas"):
+            calculate_case_distribution(self.connection, id_case=self.case_id)
+
+        document_review.approve_counter_reset_estimate(
+            self.connection, first_issue.id_issue, consumption="12",
+            reason="Sustitución confirmada", approved_by="gestora",
+        )
+        self._refresh_validated_export()
+        with self.assertRaisesRegex(DistributionBlockedError, "incidencias abiertas"):
+            calculate_case_distribution(self.connection, id_case=self.case_id)
+
+        document_review.approve_counter_reset_estimate(
+            self.connection, second_issue.id_issue, consumption="9",
+            reason="Sustitución confirmada", approved_by="gestora",
+        )
+        self._refresh_validated_export()
+
+        result = calculate_case_distribution(self.connection, id_case=self.case_id)
+
+        self.assertEqual(6, result.owner_result_count)
+        self.assertEqual(
+            {"resolved"},
+            {row[0] for row in self.connection.execute(
+                "SELECT status FROM review_issues WHERE id_issue IN (?,?)",
+                (first_issue.id_issue, second_issue.id_issue),
+            )},
+        )
 
     def test_blocks_when_latest_export_is_not_validated(self):
         self.connection.execute(

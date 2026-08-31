@@ -309,8 +309,18 @@ def open_archived_file(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         messagebox.showerror("No se pudo abrir el archivo", str(exc))
 
 
+def resolution_route_for_issue(issue: ReviewIssue) -> str:
+    """Selecciona la ruta de revisión sin crear controles de Tk."""
+    if issue.code == "COUNTER_RESET":
+        return "counter_reset_estimate"
+    if issue.code == "INVOICE_OUTSIDE_PERIOD":
+        return "dismiss_invoice_outside_period"
+    return "generic_correction"
+
+
 def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
-    dialog = _dialog(app, "Resolver incidencia", 620, 590)
+    route = resolution_route_for_issue(issue)
+    dialog = _dialog(app, "Resolver incidencia", 620, 620)
     panel = ctk.CTkFrame(
         dialog,
         fg_color=C["panel"],
@@ -322,7 +332,10 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     panel.grid_columnconfigure(0, weight=1)
     ctk.CTkLabel(
         panel,
-        text="Revisa el dato pendiente",
+        text=(
+            "Confirma la estimación" if route == "counter_reset_estimate"
+            else "Revisa el dato pendiente"
+        ),
         font=UIM.fuente(20, "bold"),
         text_color=C["texto"],
     ).grid(row=0, column=0, sticky="w", padx=22, pady=(22, 3))
@@ -365,11 +378,48 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         hover_color=C["acento_suave"],
     ).grid(row=2, column=0, sticky="w", padx=22, pady=(6, 0))
 
-    value = _field(panel, "Valor confirmado", 3)
-    reason = _field(panel, "Motivo de la corrección", 5)
+    value = None
+    if route == "counter_reset_estimate":
+        ctk.CTkLabel(
+            panel,
+            text=(
+                "El contador bajó de valor. No se usará hasta que confirmes "
+                "un consumo estimado del período; se guardará como una "
+                "estimación aprobada y trazable."
+            ),
+            font=UIM.fuente(11),
+            text_color=C["texto_sec"],
+            justify="left",
+            wraplength=520,
+        ).grid(row=3, column=0, sticky="w", padx=22, pady=(14, 0))
+        value = _field(panel, "Consumo estimado del período (m³)", 4)
+        reason = _field(panel, "Motivo/soporte de la estimación", 6)
+        action_row = 8
+        action_text = "Aprobar estimación"
+    elif route == "dismiss_invoice_outside_period":
+        ctk.CTkLabel(
+            panel,
+            text=(
+                "Esta factura queda fuera del período del expediente. Puedes "
+                "cerrarla como no aplicable sin modificar la factura ni "
+                "incorporarla al cálculo."
+            ),
+            font=UIM.fuente(11),
+            text_color=C["texto_sec"],
+            justify="left",
+            wraplength=520,
+        ).grid(row=3, column=0, sticky="w", padx=22, pady=(14, 0))
+        reason = _field(panel, "Motivo del cierre", 4)
+        action_row = 6
+        action_text = "Cerrar: no corresponde al período"
+    else:
+        value = _field(panel, "Valor confirmado", 3)
+        reason = _field(panel, "Motivo de la corrección", 5)
+        action_row = 7
+        action_text = "Guardar corrección"
 
     actions = ctk.CTkFrame(panel, fg_color="transparent")
-    actions.grid(row=7, column=0, sticky="ew", padx=22, pady=(20, 16))
+    actions.grid(row=action_row, column=0, sticky="ew", padx=22, pady=(20, 16))
     ctk.CTkButton(
         actions,
         text="Cancelar",
@@ -384,27 +434,43 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     ).pack(side="right")
 
     def save():
-        confirmed = value.get().strip()
         correction_reason = reason.get().strip()
-        if not confirmed or not correction_reason:
+        confirmed = value.get().strip() if value is not None else ""
+        if (route != "dismiss_invoice_outside_period" and not confirmed) or not correction_reason:
             messagebox.showwarning(
                 "Datos requeridos",
-                "Indica el valor confirmado y el motivo de la corrección.",
+                (
+                    "Indica el consumo estimado y el soporte de la estimación."
+                    if route == "counter_reset_estimate"
+                    else "Indica el valor confirmado y el motivo de la corrección."
+                ),
             )
             return
 
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
-            document_review.resolve_issue(
-                connection,
-                issue.id_issue,
-                value=confirmed,
-                reason=correction_reason,
-            )
+            if route == "counter_reset_estimate":
+                document_review.approve_counter_reset_estimate(
+                    connection, issue.id_issue, consumption=confirmed,
+                    reason=correction_reason, approved_by="usuario_local",
+                )
+            elif route == "dismiss_invoice_outside_period":
+                document_review.dismiss_invoice_outside_period(
+                    connection, issue.id_issue, reason=correction_reason,
+                    dismissed_by="usuario_local",
+                )
+            else:
+                document_review.resolve_issue(
+                    connection, issue.id_issue, value=confirmed,
+                    reason=correction_reason,
+                )
             remaining = len(document_review.list_open_issues(connection, issue.id_case))
             ready = None
             if not remaining:
                 ready = document_review.validate_case_ready(connection, issue.id_case)
+        except (LookupError, ValueError) as error:
+            messagebox.showwarning("No se pudo guardar", str(error))
+            return
         finally:
             connection.close()
         dialog.destroy()
@@ -417,7 +483,7 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
 
     ctk.CTkButton(
         actions,
-        text="Guardar corrección",
+        text=action_text,
         command=save,
         height=38,
         corner_radius=9,
@@ -425,4 +491,4 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         fg_color=C["primario"],
         hover_color=C["primario_hover"],
     ).pack(side="right", padx=(0, 8))
-    value.focus_set()
+    (value or reason).focus_set()

@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from itertools import count
 from typing import Collection, Iterator, Mapping
 
@@ -9,6 +10,8 @@ from expedient_service import get_case, set_case_status
 
 _savepoint_counter = count()
 _MISSING_FIELD_CODE = "MISSING_REQUIRED_FIELD"
+_COUNTER_RESET_CODE = "COUNTER_RESET"
+_INVOICE_OUTSIDE_PERIOD_CODE = "INVOICE_OUTSIDE_PERIOD"
 
 
 @contextmanager
@@ -42,6 +45,72 @@ def _normalise_value(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _positive_consumption(value: object) -> Decimal:
+    """Valida el consumo confirmado sin convertirlo en una lectura acumulada."""
+    if isinstance(value, bool):
+        raise ValueError("El consumo estimado debe ser un número positivo")
+    try:
+        parsed = Decimal(str(value).strip().replace(",", "."))
+    except (InvalidOperation, ValueError):
+        raise ValueError("El consumo estimado debe ser un número positivo") from None
+    if not parsed.is_finite() or parsed <= 0:
+        raise ValueError("El consumo estimado debe ser un número positivo")
+    return parsed
+
+
+def _decimal_text(value: Decimal | float | int) -> str:
+    rendered = format(Decimal(str(value)), "f")
+    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+
+
+def _counter_reset_target(
+    connection: sqlite3.Connection, issue: sqlite3.Row
+) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row, sqlite3.Row]:
+    """Obtiene la pareja canónica de lecturas que una incidencia puede corregir."""
+    if issue["code"] != _COUNTER_RESET_CODE:
+        raise LookupError("La incidencia no corresponde a un reinicio de contador")
+    prefix, separator, remainder = str(issue["field_name"]).partition("reading.")
+    if prefix or not separator:
+        raise LookupError("La incidencia no apunta a una lectura de propietario")
+    property_code, separator, service = remainder.rpartition(".")
+    if not separator or not property_code or service not in {"ACS", "CALEFACCION"}:
+        raise LookupError("La incidencia no apunta a una lectura de propietario")
+    case = connection.execute(
+        """SELECT id_case,id_comunidad,id_periodo,fecha_inicio,fecha_fin
+           FROM regularization_cases WHERE id_case=?""",
+        (issue["id_case"],),
+    ).fetchone()
+    if case is None or case["id_periodo"] is None:
+        raise LookupError("El expediente no tiene un período de lecturas válido")
+    owner = connection.execute(
+        """SELECT id_propietario FROM propietarios
+           WHERE id_comunidad=? AND codigo_vivienda=?""",
+        (case["id_comunidad"], property_code),
+    ).fetchone()
+    if owner is None:
+        raise LookupError("La lectura no pertenece a un propietario del expediente")
+    readings = connection.execute(
+        """SELECT id_lectura,fecha_lectura,valor_acumulado,estado,metodo_estimacion,
+                  fuente,notas,approved_by,approved_at
+           FROM lecturas_vecino
+           WHERE id_propietario=? AND id_periodo=? AND tipo=?
+             AND fecha_lectura IN (?,?)
+           ORDER BY fecha_lectura""",
+        (
+            owner["id_propietario"], case["id_periodo"], service,
+            case["fecha_inicio"], case["fecha_fin"],
+        ),
+    ).fetchall()
+    by_date = {row["fecha_lectura"]: row for row in readings}
+    initial = by_date.get(case["fecha_inicio"])
+    final = by_date.get(case["fecha_fin"])
+    if initial is None or final is None:
+        raise LookupError("No se encuentran las lecturas inicial y final del período")
+    if final["estado"] != "contador_averiado" or final["valor_acumulado"] >= initial["valor_acumulado"]:
+        raise LookupError("La lectura ya no es un reinicio pendiente de aprobar")
+    return case, owner, initial, final
 
 
 def _issue_row(connection: sqlite3.Connection, issue_id: int):
@@ -283,6 +352,124 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
         )
         resolved = _issue_row(connection, issue_id)
     return review_issue_from_row(resolved)
+
+
+def approve_counter_reset_estimate(
+    connection: sqlite3.Connection,
+    issue_id: int,
+    *,
+    consumption: object,
+    reason: str,
+    approved_by: str,
+) -> ReviewIssue:
+    """Aprueba una estimación humana para un contador reiniciado.
+
+    ``consumption`` es la variación del período confirmada por el gestor, no
+    una lectura nueva. La lectura final guardada se transforma en un valor
+    virtual continuo para que el motor de reparto conserve su contrato de
+    lectura inicial/final sin utilizar el valor disminuido de origen.
+    """
+    confirmed_consumption = _positive_consumption(consumption)
+    normalized_reason = reason.strip()
+    normalized_approver = approved_by.strip()
+    if not normalized_reason:
+        raise ValueError("El motivo de la estimación es obligatorio")
+    if not normalized_approver:
+        raise ValueError("La persona que aprueba la estimación es obligatoria")
+
+    with _transaction(connection):
+        issue = _issue_row(connection, issue_id)
+        if issue is None or issue["status"] != "open":
+            raise LookupError("Incidencia no encontrada")
+        case, owner, initial, final = _counter_reset_target(connection, issue)
+        original_final = Decimal(str(final["valor_acumulado"]))
+        corrected_final = Decimal(str(initial["valor_acumulado"])) + confirmed_consumption
+        corrected_text = _decimal_text(corrected_final)
+        original_text = _decimal_text(original_final)
+        notes = (
+            f"Estimación manual aprobada tras reinicio; valor original={original_text}; "
+            f"consumo confirmado={_decimal_text(confirmed_consumption)}; "
+            f"lectura virtual={corrected_text}; motivo={normalized_reason}; "
+            f"aprobada por={normalized_approver}"
+        )
+        if final["notas"]:
+            notes = f"{final['notas']} | {notes}"
+        connection.execute(
+            """INSERT INTO manual_corrections
+               (id_issue,original_value,corrected_value,reason,resolved_by)
+               VALUES (?,?,?,?,?)""",
+            (issue_id, original_text, corrected_text, normalized_reason, normalized_approver),
+        )
+        connection.execute(
+            """INSERT INTO extraction_candidates
+               (id_document,field_name,value,source,validation_status)
+               VALUES (?, ?, ?, 'manual_counter_reset', 'validated')
+               ON CONFLICT(id_document,field_name) DO UPDATE SET
+                   value=excluded.value,source=excluded.source,
+                   validation_status=excluded.validation_status""",
+            (issue["id_document"], issue["field_name"], corrected_text),
+        )
+        connection.execute(
+            """UPDATE lecturas_vecino
+               SET valor_acumulado=?,estado='estimado',metodo_estimacion='counter_reset_manual',
+                   notas=?,approved_by=?,approved_at=datetime('now')
+               WHERE id_lectura=?""",
+            (corrected_text, notes, normalized_approver, final["id_lectura"]),
+        )
+        owner_state = "estado_contador_acs" if issue["field_name"].endswith(".ACS") else "estado_contador_cal"
+        connection.execute(
+            f"UPDATE propietarios SET {owner_state}='ok' WHERE id_propietario=?",
+            (owner["id_propietario"],),
+        )
+        connection.execute(
+            """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
+               WHERE id_issue=?""",
+            (issue_id,),
+        )
+        resolved = _issue_row(connection, issue_id)
+    return review_issue_from_row(resolved)
+
+
+def dismiss_invoice_outside_period(
+    connection: sqlite3.Connection,
+    issue_id: int,
+    *,
+    reason: str,
+    dismissed_by: str,
+) -> ReviewIssue:
+    """Cierra con trazabilidad una factura que no debe entrar en el período.
+
+    No corrige su fecha ni crea una factura: sólo documenta que la fuente
+    identificada no corresponde a este expediente.
+    """
+    normalized_reason = reason.strip()
+    normalized_actor = dismissed_by.strip()
+    if not normalized_reason:
+        raise ValueError("El motivo del cierre es obligatorio")
+    if not normalized_actor:
+        raise ValueError("La persona responsable del cierre es obligatoria")
+    with _transaction(connection):
+        issue = _issue_row(connection, issue_id)
+        if issue is None or issue["status"] != "open":
+            raise LookupError("Incidencia no encontrada")
+        if issue["code"] != _INVOICE_OUTSIDE_PERIOD_CODE:
+            raise LookupError("La incidencia no corresponde a una factura fuera del período")
+        connection.execute(
+            """INSERT INTO manual_corrections
+               (id_issue,original_value,corrected_value,reason,resolved_by)
+               VALUES (?,?,?,?,?)""",
+            (
+                issue_id, issue["detected_value"], "no_corresponde_al_periodo",
+                normalized_reason, normalized_actor,
+            ),
+        )
+        connection.execute(
+            """UPDATE review_issues SET status='dismissed',resolved_at=datetime('now')
+               WHERE id_issue=?""",
+            (issue_id,),
+        )
+        dismissed = _issue_row(connection, issue_id)
+    return review_issue_from_row(dismissed)
 
 
 def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> RegularizationCase:

@@ -536,7 +536,7 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
             )
         }
         self.assertTrue(
-            {"UNRECOGNIZED_HEADER", "INCOMPATIBLE_DATE", "TOTAL_MISMATCH"}.issubset(codes)
+            {"UNRECOGNIZED_HEADER", "INVOICE_OUTSIDE_PERIOD", "TOTAL_MISMATCH"}.issubset(codes)
         )
 
     def test_idempotent_retry_preserves_resolved_issue_and_manual_correction(self):
@@ -853,6 +853,24 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
             (self.case.id_case,),
         ).fetchone()
         self.assertEqual("INCOMPATIBLE_DATE", issue["code"])
+
+    def test_invoice_date_outside_case_period_uses_dedicated_issue_code(self):
+        workbook_path = _make_master(self.root / "fecha_factura_fuera_periodo.xlsx")
+        workbook = load_workbook(workbook_path)
+        workbook["GAS"]["B10"] = date(2027, 1, 1)
+        workbook.save(workbook_path)
+
+        import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=workbook_path, profile=self.profile, actor="Prueba",
+        )
+
+        issue = self.connection.execute(
+            """SELECT code FROM review_issues
+               WHERE id_case=? AND field_name='GAS.B10.invoice_date'""",
+            (self.case.id_case,),
+        ).fetchone()
+        self.assertEqual("INVOICE_OUTSIDE_PERIOD", issue["code"])
 
     def test_invoice_row_requires_valid_supply_endpoints(self):
         workbook_path = _make_master(self.root / "extremos_incompletos.xlsx")
