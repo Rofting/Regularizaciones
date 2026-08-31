@@ -358,6 +358,50 @@ class CaseDistributionTest(unittest.TestCase):
 
         self.assertEqual(6, result.owner_result_count)
 
+    def test_fixed_only_profile_still_blocks_unapproved_final_counter_reading(self):
+        fixed_only = ExcelProfile(
+            key="synthetic_fixed_only_v1",
+            version="1",
+            community_code="658",
+            template_relative_path="plantillas/synthetic-fixed.xlsx",
+            active_modules=(),
+            required_sheets=(),
+            required_formula_cells=(),
+            concepts=(
+                ConceptRule(
+                    key="acs_fixed", allocation_method="equal",
+                    actual_source="period_parameters.acs_fixed_actual",
+                    billed_source="period_parameters.acs_fixed_billed", required=True,
+                ),
+            ),
+        )
+        profile_id = self.connection.execute(
+            """INSERT INTO excel_template_profiles
+               (id_comunidad,profile_key,profile_version,template_relative_path,
+                template_sha256,profile_sha256,status)
+               VALUES (?,?,'1',?,'template-fixed','profile-fixed','active')""",
+            (self.community_id, fixed_only.key, fixed_only.template_relative_path),
+        ).lastrowid
+        self.connection.execute(
+            """UPDATE lecturas_vecino SET estado='contador_averiado'
+               WHERE id_propietario=? AND fecha_lectura='2026-08-31'""",
+            (self.owner_one,),
+        )
+        fixed_hash = calculate_case_input_hash(
+            self.connection, id_case=self.case_id, project_root=PROJECT_ROOT, profile=fixed_only,
+        )
+        self.connection.execute(
+            """INSERT INTO excel_export_runs
+               (id_case,id_periodo,id_template_profile,input_sha256,template_sha256,status)
+               VALUES (?,?,?,?,?,'validated')""",
+            (self.case_id, self.period_id, profile_id, fixed_hash, "template-fixed"),
+        )
+        self.connection.commit()
+
+        with patch("case_distribution.load_profile", return_value=fixed_only):
+            with self.assertRaisesRegex(DistributionBlockedError, "lectura final"):
+                calculate_case_distribution(self.connection, id_case=self.case_id)
+
     def test_distribution_unblocks_after_every_counter_reset_is_approved(self):
         document_id = self.connection.execute(
             """INSERT INTO source_documents

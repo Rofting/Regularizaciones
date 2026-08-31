@@ -300,6 +300,41 @@ class DocumentReviewTest(unittest.TestCase):
             "SELECT COUNT(*) FROM manual_corrections WHERE id_issue=?", (issue.id_issue,)
         ).fetchone()[0])
 
+    def test_generic_correction_cannot_resolve_counter_reset(self):
+        issue, owner_id, _period_id = self._create_counter_reset_issue()
+
+        with self.assertRaisesRegex(ValueError, "estimación aprobada"):
+            document_review.resolve_issue(
+                self.connection, issue.id_issue, value="112",
+                reason="No debe permitirlo", resolved_by="gestora",
+            )
+
+        self.assertEqual("open", self.connection.execute(
+            "SELECT status FROM review_issues WHERE id_issue=?", (issue.id_issue,)
+        ).fetchone()[0])
+        self.assertEqual(0, self.connection.execute(
+            "SELECT COUNT(*) FROM manual_corrections WHERE id_issue=?", (issue.id_issue,)
+        ).fetchone()[0])
+        self.assertEqual((5.0, "contador_averiado", None), tuple(self.connection.execute(
+            """SELECT valor_acumulado,estado,approved_by FROM lecturas_vecino
+               WHERE id_propietario=? AND fecha_lectura='2026-01-31'""", (owner_id,)
+        ).fetchone()))
+
+    def test_ready_validation_blocks_a_resolved_counter_reset_without_approved_reading(self):
+        issue, _owner_id, _period_id = self._create_counter_reset_issue()
+        self.connection.execute(
+            "UPDATE review_issues SET status='resolved',resolved_at=datetime('now') WHERE id_issue=?",
+            (issue.id_issue,),
+        )
+        self.connection.commit()
+
+        with self.assertRaisesRegex(ValueError, "lectura final"):
+            document_review.validate_case_ready(self.connection, self.case.id_case)
+
+        self.assertEqual("under_review", expedient_service.get_case(
+            self.connection, self.case.id_case
+        ).status)
+
     def test_counter_reset_estimate_rejects_a_property_from_another_community(self):
         self._create_counter_reset_issue()
         other_community = gestor_bd.obtener_o_crear_comunidad(

@@ -22,16 +22,27 @@
   seguro de una factura fuera de período. El enrutado se prueba sin crear una
   ventana Tk.
 
+## Corrección de revisión 1
+
+- La corrección genérica rechaza explícitamente `COUNTER_RESET`; no puede
+  resolverlo ni escribir una corrección manual alternativa.
+- `assert_case_final_readings_approved` revisa las lecturas finales canónicas
+  del expediente antes de declararlo listo y antes de repartir. Bloquea tanto
+  `contador_averiado` como `estimado` sin aprobador y fecha.
+- Esta segunda guarda se ejecuta aun cuando el perfil sólo tenga conceptos
+  fijos, por lo que una configuración sin reparto por consumo tampoco puede
+  ocultar una lectura irregular.
+
 ## Verificación
 
 Ejecutado sin fuentes reales ni envío de correo:
 
 ```text
 python -m unittest discover -s tests -t . -q
-Ran 138 tests in 20.249s
+Ran 142 tests in 20.196s
 OK
 
-python -m py_compile core/document_review.py core/expedient_ui.py core/excel_bootstrap_importer.py
+python -m py_compile core/document_review.py core/case_distribution.py core/expedient_ui.py core/excel_bootstrap_importer.py
 git diff --check
 ```
 
@@ -39,3 +50,11 @@ Las pruebas cubren estimación aprobada, entrada inválida, pertenencia al
 expediente, aislamiento entre propietarios, rollback de auditoría al fallar la
 lectura, desbloqueo del reparto al aprobar todas las incidencias y
 clasificación/cierre de factura fuera de período.
+
+La corrección incluye además las pruebas de que la ruta genérica no puede
+cerrar un reinicio, de que la validación del expediente rechaza una incidencia
+cerrada indebidamente y de que un perfil exclusivamente fijo también bloquea
+el reparto hasta que la lectura final sea aprobada.
+
+Commits de la entrega: `348976e`, `1b826be` y la corrección de revisión
+posterior a este informe.

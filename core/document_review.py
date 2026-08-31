@@ -320,6 +320,10 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
         issue = _issue_row(connection, issue_id)
         if issue is None or issue["status"] != "open":
             raise LookupError("Incidencia no encontrada")
+        if issue["code"] == _COUNTER_RESET_CODE:
+            raise ValueError(
+                "Un reinicio de contador sólo se puede cerrar con una estimación aprobada"
+            )
         candidate = connection.execute(
             """SELECT value FROM extraction_candidates
                WHERE id_document = ? AND field_name = ?""",
@@ -472,6 +476,47 @@ def dismiss_invoice_outside_period(
     return review_issue_from_row(dismissed)
 
 
+def assert_case_final_readings_approved(
+    connection: sqlite3.Connection, case_id: int
+) -> None:
+    """Impide avanzar si una lectura final irregular sigue sin aprobación.
+
+    Esta guarda se aplica aunque el perfil no reparta un concepto por consumo:
+    así una incidencia cerrada indebidamente no puede convertir el expediente
+    en calculable dejando una lectura canónica pendiente.
+    """
+    case = connection.execute(
+        """SELECT id_comunidad,id_periodo,fecha_fin FROM regularization_cases
+           WHERE id_case=?""",
+        (case_id,),
+    ).fetchone()
+    if case is None:
+        raise LookupError("Expediente no encontrado")
+    if case["id_periodo"] is None:
+        return
+    unresolved = connection.execute(
+        """SELECT COUNT(*) FROM lecturas_vecino AS reading
+           JOIN propietarios AS owner ON owner.id_propietario=reading.id_propietario
+           WHERE owner.id_comunidad=? AND reading.id_periodo=?
+             AND reading.fecha_lectura=?
+             AND (
+                 reading.estado='contador_averiado'
+                 OR (
+                     reading.estado='estimado'
+                     AND (
+                         trim(COALESCE(reading.approved_by,''))=''
+                         OR trim(COALESCE(reading.approved_at,''))=''
+                     )
+                 )
+             )""",
+        (case["id_comunidad"], case["id_periodo"], case["fecha_fin"]),
+    ).fetchone()[0]
+    if unresolved:
+        raise ValueError(
+            "Hay una lectura final de contador pendiente de estimación aprobada"
+        )
+
+
 def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> RegularizationCase:
     with _transaction(connection):
         open_count = connection.execute(
@@ -481,6 +526,7 @@ def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> Regular
         if open_count:
             raise ValueError(f"{open_count} incidencia abierta(s) por resolver")
 
+        assert_case_final_readings_approved(connection, case_id)
         case = get_case(connection, case_id)
         if case.status == "draft":
             case = set_case_status(connection, case_id, "gathering_sources")

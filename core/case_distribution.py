@@ -9,6 +9,7 @@ from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+import document_review
 from excel_profiles import ConceptRule, ExcelProfile, load_profile
 from excel_export_service import calculate_case_input_hash
 from reconciliation import reconcile_declared_totals
@@ -136,6 +137,10 @@ def _case_and_profile(connection: sqlite3.Connection, id_case: int) -> tuple[sql
     ).fetchone()[0]
     if open_issues:
         raise DistributionBlockedError("Hay incidencias abiertas antes del reparto")
+    try:
+        document_review.assert_case_final_readings_approved(connection, id_case)
+    except ValueError as error:
+        raise DistributionBlockedError(str(error)) from error
 
     latest_export = connection.execute(
         """SELECT e.status,e.id_periodo,e.input_sha256,t.profile_key,t.profile_version
