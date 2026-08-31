@@ -97,7 +97,7 @@ def _importar_modulos():
                    "excel_writer", "carta_writer", "importar_lecturas_metrigest",
                    "importar_excel_maestro", "letter_settings", "regularization_flow",
                    "expedient_service", "document_review", "case_ingestion",
-                   "expedient_ui"]:
+                   "expedient_ui", "case_workflow_actions"]:
         try:
             modulos[nombre] = __import__(nombre)
         except ImportError:
@@ -246,14 +246,22 @@ class AppGestionFincas(ctk.CTk):
         nav.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 12))
         ctk.CTkLabel(nav, text="EL FLUJO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(19, 10))
         self.botones = {}
-        acciones = (("1", "Crear expediente", "Define el intervalo a revisar", self._accion_crear_expediente), ("2", "Añadir fuentes", "Archiva documentos sin alterarlos", self._accion_anadir_fuentes), ("3", "Resolver incidencias", "Confirma solo los datos pendientes", self._accion_resolver_incidencias))
+        acciones = (
+            ("1", "Crear expediente", "Define el intervalo a revisar", self._accion_crear_expediente),
+            ("2", "Importar modelo inicial", "Carga el Excel histórico una sola vez", self._accion_importar_modelo_inicial),
+            ("3", "Añadir fuentes", "Archiva los PDF nuevos sin alterarlos", self._accion_anadir_fuentes),
+            ("4", "Resolver incidencias", "Confirma solo los datos pendientes", self._accion_resolver_incidencias),
+            ("5", "Generar Excel oficial", "Reconstruye el modelo desde datos validados", self._accion_generar_excel_expediente),
+            ("6", "Calcular reparto final", "Cuadra cada concepto al céntimo", self._accion_calcular_reparto_expediente),
+            ("7", "Generar cartas", "Prepara una carta auditada por propietario", self._accion_generar_cartas_expediente),
+        )
         for number, name, description, command in acciones:
-            row = ctk.CTkButton(nav, text=f"{number}   {name}\n     {description}", command=command, anchor="w", height=64, corner_radius=11, font=UIM.fuente(12, "bold"), fg_color=C["acento_suave"], hover_color=C["acento_suave_hover"], text_color=C["primario"])
+            row = ctk.CTkButton(nav, text=f"{number}   {name}\n     {description}", command=command, anchor="w", height=50, corner_radius=11, font=UIM.fuente(11, "bold"), fg_color=C["acento_suave"], hover_color=C["acento_suave_hover"], text_color=C["primario"])
             row.pack(fill="x", padx=12, pady=4)
             self.botones[name] = row
         ctk.CTkFrame(nav, fg_color=C["borde"], height=1).pack(fill="x", padx=16, pady=16)
         ctk.CTkLabel(nav, text="OTRAS ACCIONES", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(0, 7))
-        for name, command in (("Regularización guiada", self._accion_regularizacion_guiada), ("Calcular reparto", self._accion_calcular_reparto), ("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Regenerar Excel", self._accion_actualizar_excel), ("Generar cartas", self._accion_generar_cartas), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
+        for name, command in (("Regularización guiada", self._accion_regularizacion_guiada), ("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
             button = ctk.CTkButton(nav, text=name, command=command, height=32, corner_radius=8, anchor="w", font=UIM.fuente(11), fg_color="transparent", hover_color=C["acento_suave"], text_color=C["texto_sec"])
             button.pack(fill="x", padx=12, pady=1)
             self.botones[name] = button
@@ -292,7 +300,7 @@ class AppGestionFincas(ctk.CTk):
         self.lbl_estado_resumen = ctk.CTkLabel(state_summary, text="Elige un expediente para continuar.", font=UIM.fuente(13, "bold"), text_color=C["texto"], justify="left", wraplength=225)
         self.lbl_estado_resumen.pack(side="left", anchor="w")
         self.expediente_metricas = {}
-        for key, label, value in (("rango", "Fechas", "—"), ("fuentes", "Fuentes", "0"), ("estado", "Estado", "—"), ("incidencias", "Incidencias", "0 abiertas")):
+        for key, label, value in (("rango", "Fechas", "—"), ("perfil", "Perfil Excel", "—"), ("fuentes", "Fuentes", "0"), ("estado", "Estado", "—"), ("incidencias", "Incidencias", "0 abiertas")):
             line = ctk.CTkFrame(state, fg_color=C["panel_2"], corner_radius=9)
             line.pack(fill="x", padx=16, pady=4)
             ctk.CTkLabel(line, text=label, font=UIM.fuente(11), text_color=C["texto_sec"]).pack(side="left", padx=10, pady=9)
@@ -887,6 +895,87 @@ class AppGestionFincas(ctk.CTk):
             return
         expedient_ui.open_create_case_dialog(self)
 
+    def _validar_expediente_activo(self) -> bool:
+        """Evita que los botones de resultado operen sin contexto auditable."""
+        if not self.id_comunidad:
+            self.log("Selecciona una comunidad antes de continuar.", "aviso")
+            return False
+        if not self.id_expediente:
+            self.log("Crea o selecciona un expediente antes de continuar.", "aviso")
+            return False
+        if not MOD.get("case_workflow_actions"):
+            self.log("No está disponible el flujo por expediente.", "error")
+            return False
+        return True
+
+    def _accion_importar_modelo_inicial(self):
+        """Pide sólo las fuentes de arranque; el trabajo ordinario será PDF."""
+        if not self._validar_expediente_activo():
+            return
+        master = filedialog.askopenfilename(
+            title="Selecciona el Excel maestro inicial",
+            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")],
+        )
+        if not master:
+            return
+        owners = readings = None
+        include_companions = messagebox.askyesno(
+            "Fuentes complementarias",
+            "¿Quieres añadir ahora el listado de propietarios y las lecturas?\n\n"
+            "Son opcionales. Si una comunidad no las usa, el sistema mostrará "
+            "las incidencias necesarias sin inventar datos.",
+            parent=self,
+        )
+        if include_companions:
+            owners = filedialog.askopenfilename(
+                title="Selecciona el listado de propietarios (opcional en otras comunidades)",
+                filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+            )
+            if not owners:
+                return
+            readings = filedialog.askopenfilename(
+                title="Selecciona las lecturas complementarias",
+                filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")],
+            )
+            if not readings:
+                return
+        self._en_hilo(
+            lambda: self._importar_modelo_inicial_impl(master, owners, readings)
+        )
+
+    def _accion_generar_excel_expediente(self):
+        if self._validar_expediente_activo():
+            self._en_hilo(self._generar_excel_expediente_impl)
+
+    def _accion_calcular_reparto_expediente(self):
+        if self._validar_expediente_activo():
+            self._en_hilo(self._calcular_reparto_expediente_impl)
+
+    def _accion_generar_cartas_expediente(self):
+        if not self._validar_expediente_activo():
+            return
+        workflow = MOD["case_workflow_actions"]
+        try:
+            concepts = workflow.available_case_letter_concepts(
+                self.ruta_bd_expedientes,
+                id_case=self.id_expediente,
+                active_community_id=self.id_comunidad,
+                project_root=BASE_DIR,
+            )
+        except Exception as exc:
+            self.log(f"No se pueden preparar las cartas: {exc}", "aviso")
+            return
+        if not concepts:
+            self.log(
+                "Aún no hay conceptos calculados y activos para las cartas. "
+                "Genera el Excel oficial y calcula el reparto final.",
+                "aviso",
+            )
+            return
+        selected = self._dialogo_conceptos_cartas(concepts=concepts)
+        if selected is not None:
+            self._en_hilo(lambda: self._generar_cartas_expediente_impl(selected))
+
     def _accion_anadir_fuentes(self):
         expedient_ui = MOD.get("expedient_ui")
         ingestion = MOD.get("case_ingestion")
@@ -963,6 +1052,16 @@ class AppGestionFincas(ctk.CTk):
             )
             issues = review.list_open_issues(connection, self.id_expediente)
             open_count = len(issues)
+            profile_row = connection.execute(
+                """SELECT profile_key FROM excel_template_profiles
+                   WHERE id_comunidad=? AND status='active'
+                   ORDER BY id_template_profile""",
+                (self.id_comunidad,),
+            ).fetchall()
+            profile_label = (
+                profile_row[0]["profile_key"] if len(profile_row) == 1 else
+                "Sin perfil" if not profile_row else "Revisar perfiles activos"
+            )
         except LookupError as exc:
             self._limpiar_contexto_expediente()
             self._refrescar_lista_expedientes()
@@ -989,7 +1088,8 @@ class AppGestionFincas(ctk.CTk):
         status_label = status_labels.get(case.status, case.status)
         summary = (
             f"{case.name}\n{date_range}\n{document_count} fuente(s) · "
-            f"{open_count} incidencia(s) abierta(s)\nEstado: {status_label}"
+            f"Perfil: {profile_label}\n{open_count} incidencia(s) abierta(s)\n"
+            f"Estado: {status_label}"
         )
         self._resumen_ejercicio(summary)
         self._refrescar_bandeja_incidencias(issues)
@@ -998,6 +1098,7 @@ class AppGestionFincas(ctk.CTk):
             metrics = getattr(self, "expediente_metricas", {})
             values = {
                 "rango": date_range,
+                "perfil": profile_label,
                 "fuentes": str(document_count),
                 "estado": status_label,
                 "incidencias": f"{open_count} abiertas",
@@ -1022,14 +1123,21 @@ class AppGestionFincas(ctk.CTk):
         )
         if open_count:
             self._actualizar_etapa("validacion")
-            self.log(f"{open_count} incidencia(s) por resolver", "aviso")
+            self.log(f"{open_count} incidencia(s) por resolver antes de generar el Excel oficial", "aviso")
         elif case.status == "ready_for_calculation":
             self._actualizar_etapa("calculo")
-            self.log("Listo para cálculo", "ok")
+            self.log("Listo para generar el Excel oficial", "ok")
+        elif case.status == "reconciled":
+            self._actualizar_etapa("cartas")
+            self.log("Reparto conciliado. Elige los conceptos activos y genera las cartas.", "ok")
+        elif case.status == "deliveries_generated":
+            self._actualizar_etapa("fin")
+            self.log("Cartas generadas. Puedes abrir la carpeta de salida o cerrar el expediente.", "ok")
         elif document_count:
             self._actualizar_etapa("fuentes")
             self.log(
-                f"Expediente actualizado · {document_count} fuente(s) · estado {case.status}",
+                f"Expediente actualizado · {document_count} fuente(s). "
+                "Revisa las incidencias o completa sus fuentes.",
                 "info",
             )
 
@@ -1143,6 +1251,7 @@ class AppGestionFincas(ctk.CTk):
             metrics = getattr(self, "expediente_metricas", {})
             for key, value in {
                 "rango": "—",
+                "perfil": "—",
                 "fuentes": "0",
                 "estado": "—",
                 "incidencias": "0 abiertas",
@@ -1557,6 +1666,142 @@ class AppGestionFincas(ctk.CTk):
             for err in resultado.get("errores", []):
                 self.log(f"  ❌ {err}", "error")
 
+    def _progreso_expediente(self, stage, details):
+        """Traduce hitos técnicos a actividad que puede seguir el despacho."""
+        messages = {
+            "validate_case": ("validacion", "Comprobando el expediente seleccionado…"),
+            "importar_modelo": ("fuentes", "Importando el modelo inicial archivado…"),
+            "importar_complementarias": ("fuentes", "Incorporando propietarios y lecturas complementarias…"),
+            "generar_excel": ("calculo", "Generando y comprobando el Excel oficial…"),
+            "calcular_reparto": ("calculo", "Calculando el reparto final al céntimo…"),
+            "generar_cartas": ("cartas", "Preparando las cartas por propietario…"),
+            "reused": ("cartas", "Las cartas ya estaban generadas y auditadas."),
+            "completed": ("fin", "Documentos generados y auditados."),
+            "incomplete": ("cartas", "Algunas cartas necesitan revisión individual."),
+        }
+        key, text = messages.get(stage, ("calculo", "El expediente sigue procesándose…"))
+        technical_messages = {
+            "prepare_template": "Preparando la plantilla oficial…",
+            "recalculate": "Recalculando las fórmulas del Excel…",
+            "reconcile": "Comprobando que los importes cuadran…",
+            "publish": "Publicando el Excel validado…",
+            "validate_export": "Comprobando el Excel validado…",
+            "generate_letter": "Generando una carta del lote…",
+            "complete": "Reparto calculado y conciliado.",
+        }
+        technical = str(details.get("technical_stage") or "")
+        if technical.startswith("write_"):
+            text = "Incorporando datos validados al Excel oficial…"
+        elif technical.startswith("calculate_"):
+            text = "Distribuyendo un concepto y comprobando los céntimos…"
+        elif technical in technical_messages:
+            text = technical_messages[technical]
+        self._actualizar_etapa(key)
+        self._estado(text, procesando=True)
+        self._resumen_ejercicio(text)
+        self.log(f"  ▸ {text}", "info")
+
+    def _refrescar_despues_de_accion(self, case_id):
+        def refresh():
+            self._refrescar_lista_expedientes(select_case_id=case_id)
+            self._refrescar_expediente()
+            self._actualizar_banner()
+        self.after(0, refresh)
+
+    def _importar_modelo_inicial_impl(self, master, owners=None, readings=None):
+        workflow = MOD["case_workflow_actions"]
+        self._estado("Importando el modelo inicial…", procesando=True)
+        self.log("━━━ IMPORTAR MODELO INICIAL ━━━", "titulo")
+        self.log("  ℹ️ Este paso sirve sólo para arrancar desde un Excel histórico. "
+                 "Las siguientes regularizaciones se nutrirán de PDF.", "info")
+        result, companions = workflow.run_bootstrap_import(
+            self.ruta_bd_expedientes,
+            id_case=self.id_expediente,
+            active_community_id=self.id_comunidad,
+            project_root=BASE_DIR,
+            master_path=master,
+            owner_list_path=owners,
+            readings_path=readings,
+            progress=self._progreso_expediente,
+        )
+        self.log(f"  ✅ Modelo inicial incorporado ({result.imported_invoice_count} factura(s)).", "ok")
+        if companions is not None:
+            self.log(
+                f"  ✅ Complementarias: {companions.imported_owner_count} propietario(s) y "
+                f"{companions.imported_reading_count} lectura(s).", "ok"
+            )
+        if result.open_issue_count:
+            self.log(
+                f"  ⚠️ {result.open_issue_count} incidencia(s) pendiente(s). "
+                "Ábrelas y confirma el dato solicitado antes de continuar.", "aviso"
+            )
+        else:
+            self.log("  ✅ Fuentes importadas sin incidencias. Genera el Excel oficial.", "ok")
+        self._refrescar_despues_de_accion(self.id_expediente)
+
+    def _generar_excel_expediente_impl(self):
+        workflow = MOD["case_workflow_actions"]
+        self._estado("Generando Excel oficial…", procesando=True)
+        self.log("━━━ GENERAR EXCEL OFICIAL ━━━", "titulo")
+        result = workflow.run_generate_excel(
+            self.ruta_bd_expedientes,
+            id_case=self.id_expediente,
+            active_community_id=self.id_comunidad,
+            project_root=BASE_DIR,
+            output_root=BASE_DIR,
+            progress=self._progreso_expediente,
+        )
+        self.log(f"  ✅ Excel validado: {result.output_path.name}", "ok")
+        if result.backup_path:
+            self.log(f"  💾 Copia anterior: {result.backup_path.name}", "neutro")
+        self._actualizar_etapa("calculo")
+        self._refrescar_despues_de_accion(self.id_expediente)
+        self.after(0, lambda: self._ofrecer_abrir_archivo(str(result.output_path), "Excel oficial"))
+
+    def _calcular_reparto_expediente_impl(self):
+        workflow = MOD["case_workflow_actions"]
+        self._estado("Calculando reparto final…", procesando=True)
+        self.log("━━━ CALCULAR REPARTO FINAL ━━━", "titulo")
+        result = workflow.run_calculate_distribution(
+            self.ruta_bd_expedientes,
+            id_case=self.id_expediente,
+            active_community_id=self.id_comunidad,
+            project_root=BASE_DIR,
+            progress=self._progreso_expediente,
+        )
+        self.log(
+            f"  ✅ Reparto conciliado: {result.owner_result_count} resultado(s) "
+            f"en {len(result.concept_totals_cents)} concepto(s).", "ok"
+        )
+        self._actualizar_etapa("cartas")
+        self._refrescar_despues_de_accion(self.id_expediente)
+
+    def _generar_cartas_expediente_impl(self, selected):
+        workflow = MOD["case_workflow_actions"]
+        self._estado("Generando cartas…", procesando=True)
+        self.log("━━━ GENERAR CARTAS ━━━", "titulo")
+        self.log("  ▸ Conceptos incluidos: " + ", ".join(selected), "info")
+        result = workflow.run_generate_letters(
+            self.ruta_bd_expedientes,
+            id_case=self.id_expediente,
+            active_community_id=self.id_comunidad,
+            project_root=BASE_DIR,
+            selected_concepts=tuple(selected),
+            progress=self._progreso_expediente,
+        )
+        if result.failures:
+            self.log(
+                f"  ⚠️ {result.generated_count} carta(s) generada(s); "
+                f"{len(result.failures)} requiere(n) revisión.", "aviso"
+            )
+            for failure in result.failures[:4]:
+                self.log(f"     {failure}", "aviso")
+        else:
+            self.log(f"  ✅ {result.generated_count} carta(s) generada(s) y auditada(s).", "ok")
+            self._actualizar_etapa("fin")
+        self._refrescar_despues_de_accion(self.id_expediente)
+        self.after(0, lambda: self._ofrecer_abrir_carpeta(str(result.output_path)))
+
     def _calcular_reparto_impl(self):
         if not self._validar_seleccion():
             return
@@ -1591,21 +1836,29 @@ class AppGestionFincas(ctk.CTk):
         else:
             self.log(f"  ❌ {resultado.get('error', 'Error desconocido')}", "error")
 
-    def _dialogo_conceptos_cartas(self):
-        """Pide las partidas a incluir y las guarda para la comunidad activa."""
+    def _dialogo_conceptos_cartas(self, concepts=None):
+        """Pide partidas activas del expediente y recuerda la preferencia comunitaria."""
         settings = MOD.get("letter_settings")
         if not settings or not MOD.get("gestor_bd"):
             return ()
         try:
-            con = MOD["gestor_bd"].conectar(str(RUTA_BD))
-            concepts = settings.available_concepts(con)
+            con = MOD["gestor_bd"].conectar(str(self.ruta_bd_expedientes))
+            stored = settings.available_concepts(con)
             selected = set(settings.load_selected_concepts(con, self.id_comunidad))
             con.close()
         except Exception as exc:
             self.log(f"❌ No se pudo cargar la configuración de conceptos: {exc}", "error")
             return None
-        if not concepts:
-            self.log("⚠️  No hay conceptos disponibles para esta comunidad", "aviso")
+        if concepts is None:
+            options = tuple((concept.key, concept.label) for concept in stored)
+        else:
+            options = tuple((str(key), str(label)) for key, label in concepts)
+        allowed_keys = {key for key, _label in options}
+        selected.intersection_update(allowed_keys)
+        if not selected:
+            selected = set(allowed_keys)
+        if not options:
+            self.log("⚠️  No hay conceptos activos disponibles para esta carta", "aviso")
             return None
 
         dialog = ctk.CTkToplevel(self)
@@ -1617,16 +1870,16 @@ class AppGestionFincas(ctk.CTk):
         ctk.CTkLabel(dialog, text="¿Qué conceptos quieres incluir?",
                      font=UIM.fuente(17, "bold"), text_color=C["texto"]).pack(
                          anchor="w", padx=24, pady=(22, 4))
-        ctk.CTkLabel(dialog, text="La selección se guarda para esta comunidad y se puede cambiar en cada generación.",
+        ctk.CTkLabel(dialog, text="Solo se muestran los conceptos activos de este expediente. La selección se recuerda para esta comunidad.",
                      font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=420,
                      justify="left").pack(anchor="w", padx=24, pady=(0, 14))
         variables = {}
         panel = ctk.CTkFrame(dialog, fg_color=C["acento_suave"], corner_radius=12)
         panel.pack(fill="both", expand=True, padx=20, pady=(0, 16))
-        for concept in concepts:
-            variable = tk.BooleanVar(value=concept.key in selected)
-            variables[concept.key] = variable
-            ctk.CTkCheckBox(panel, text=concept.label, variable=variable,
+        for key, label in options:
+            variable = tk.BooleanVar(value=key in selected)
+            variables[key] = variable
+            ctk.CTkCheckBox(panel, text=label, variable=variable,
                             font=UIM.fuente(12), text_color=C["texto"]).pack(
                                 anchor="w", padx=18, pady=8)
         result = {"value": None}
@@ -1636,7 +1889,7 @@ class AppGestionFincas(ctk.CTk):
                 messagebox.showwarning("Selección incompleta", "Selecciona al menos un concepto.", parent=dialog)
                 return
             try:
-                con = MOD["gestor_bd"].conectar(str(RUTA_BD))
+                con = MOD["gestor_bd"].conectar(str(self.ruta_bd_expedientes))
                 result["value"] = settings.save_selected_concepts(con, self.id_comunidad, chosen)
                 con.close()
             except Exception as exc:
@@ -1955,10 +2208,20 @@ class AppGestionFincas(ctk.CTk):
     def _deshabilitar_botones(self):
         for btn in self.botones.values():
             btn.configure(state="disabled")
+        for selector in (getattr(self, "cb_comunidad", None),
+                         getattr(self, "cb_periodo", None),
+                         getattr(self, "cb_expediente", None)):
+            if selector is not None:
+                selector.configure(state="disabled")
 
     def _habilitar_botones(self):
         for btn in self.botones.values():
             btn.configure(state="normal")
+        for selector in (getattr(self, "cb_comunidad", None),
+                         getattr(self, "cb_periodo", None),
+                         getattr(self, "cb_expediente", None)):
+            if selector is not None:
+                selector.configure(state="normal")
 
     def _abrir_entrada(self):
         os.startfile(str(RUTA_ENTRADA)) if sys.platform == "win32" else \
@@ -1978,6 +2241,18 @@ class AppGestionFincas(ctk.CTk):
                 os.startfile(carpeta)
             else:
                 os.system(f"xdg-open '{carpeta}'")
+
+    def _ofrecer_abrir_archivo(self, archivo: str, titulo: str):
+        """Sólo ofrece abrir un resultado publicado correctamente."""
+        if messagebox.askyesno(
+            titulo,
+            f"{titulo} guardado en:\n{archivo}\n\n¿Abrir ahora?",
+            parent=self,
+        ):
+            if sys.platform == "win32":
+                os.startfile(archivo)
+            else:
+                os.system(f"xdg-open '{archivo}'")
 
     # -----------------------------------------------------------------------
     # DIÁLOGOS

@@ -126,7 +126,10 @@ def _validated_export(
 
 
 def _active_results(
-    connection: sqlite3.Connection, case: sqlite3.Row, profile: ExcelProfile
+    connection: sqlite3.Connection,
+    case: sqlite3.Row,
+    profile: ExcelProfile,
+    selected_concepts: tuple[str, ...] | None = None,
 ) -> tuple[tuple[str, ...], list[sqlite3.Row]]:
     profile_keys = tuple(concept.key for concept in profile.concepts)
     if not profile_keys:
@@ -150,6 +153,17 @@ def _active_results(
     )
     if not active_keys or not rows:
         raise LetterGenerationBlockedError("No hay resultados canónicos para las cartas")
+    if selected_concepts is not None:
+        requested = tuple(dict.fromkeys(str(key).strip() for key in selected_concepts))
+        if not requested or any(not key for key in requested):
+            raise LetterGenerationBlockedError("Debe seleccionarse al menos un concepto activo")
+        unavailable = tuple(key for key in requested if key not in active_keys)
+        if unavailable:
+            raise LetterGenerationBlockedError(
+                "El concepto seleccionado no está activo en este expediente: "
+                + ", ".join(unavailable)
+            )
+        active_keys = tuple(key for key in active_keys if key in requested)
     owner_ids = [
         int(row[0]) for row in connection.execute(
             "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND activo=1 ORDER BY id_propietario",
@@ -347,6 +361,7 @@ def generate_case_letters(
     *,
     id_case: int,
     project_root: Path,
+    selected_concepts: tuple[str, ...] | None = None,
     progress: ProgressCallback | None = None,
 ) -> LetterBatchResult:
     """Genera cartas una a una, auditando el resultado de cada propietario."""
@@ -357,7 +372,9 @@ def generate_case_letters(
     try:
         case = _case_context(connection, id_case)
         export, profile = _validated_export(connection, case, root)
-        active_keys, rows = _active_results(connection, case, profile)
+        active_keys, rows = _active_results(
+            connection, case, profile, selected_concepts=selected_concepts
+        )
         identity = load_community_letter_identity(root, str(case["codigo"]))
         template = root / "plantillas" / "Plantilla_Cartas.docx"
         if not template.is_file():

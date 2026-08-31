@@ -184,6 +184,34 @@ class CaseLetterServiceTest(unittest.TestCase):
             ).fetchone()[0],
         )
 
+    def test_case_letters_only_accept_selected_concepts_from_the_active_profile(self):
+        from case_letter_service import LetterGenerationBlockedError, generate_case_letters
+
+        result = generate_case_letters(
+            self.database_path,
+            id_case=self.case_id,
+            project_root=self.root,
+            selected_concepts=("acs_fixed", "credit"),
+        )
+        document = next(result.output_path.glob("*.docx"))
+        with zipfile.ZipFile(document) as archive:
+            text = "\n".join(
+                archive.read(name).decode("utf-8", errors="ignore")
+                for name in archive.namelist()
+                if name.startswith("word/") and name.endswith(".xml")
+            )
+        self.assertIn("Cuota fija de ACS", text)
+        self.assertIn("Abono", text)
+        self.assertNotIn("Consumo de ACS", text)
+
+        with self.assertRaisesRegex(LetterGenerationBlockedError, "no está activo"):
+            generate_case_letters(
+                self.database_path,
+                id_case=self.case_id,
+                project_root=self.root,
+                selected_concepts=("heating_fixed",),
+            )
+
     def test_letter_content_uses_only_active_non_heating_concepts_and_portable_identity(self):
         from case_letter_service import generate_case_letters
 
