@@ -6,10 +6,12 @@ No forma parte de la aplicación gráfica ni se ejecuta en la suite ordinaria.
 
 ## Preparación
 
-Use una carpeta de salida nueva o vacía situada fuera del repositorio y fuera
-de las carpetas que contienen las fuentes. Defina explícitamente estas cuatro
-variables, apuntando las tres primeras a archivos y la última al directorio de
-salida:
+Use una carpeta de salida nueva o vacía, específica para esta validación y
+situada fuera del repositorio y de las carpetas que contienen las fuentes. No
+use una unidad, su carpeta de usuario ni `Users`: cree una subcarpeta acotada
+en Temp o en una zona privada destinada a validaciones. Defina explícitamente
+estas cuatro variables, apuntando las tres primeras a archivos y la última al
+directorio de salida:
 
 ```powershell
 $env:REGULARIZACION_658_MASTER = "<archivo maestro>"
@@ -29,9 +31,11 @@ Desde la carpeta del proyecto, con el entorno virtual activado:
 python core/private_658_validation.py
 ```
 
-El runner crea una subcarpeta única dentro de la raíz indicada. Copia sólo la
-configuración y la plantilla Word públicas. Archiva el maestro y registra la
-plantilla Excel privada dentro de esa ejecución aislada.
+El runner crea una subcarpeta única dentro de la raíz indicada. Copia sólo el
+perfil público necesario (`658_acs_v1.json`) y la plantilla Word pública; no
+copia identidades de despacho, proveedores ni otros archivos de configuración.
+Archiva el maestro y registra la plantilla Excel privada dentro de esa
+ejecución aislada.
 
 ## Resultado esperado
 
@@ -54,7 +58,8 @@ renderizada para una revisión visual. El envío de correo sigue siendo manual.
 
 ## Seguridad y limpieza
 
-El runner rechaza la raíz si coincide con el repositorio, lo contiene, está
-dentro de él, es una carpeta de fuentes o no está vacía. No borra nada. Para
-retirar el material de validación, elimine manualmente sólo la subcarpeta de
-ejecución confirmada dentro de la raíz privada.
+El runner rechaza la raíz si es una unidad, la carpeta de usuario o su padre,
+si coincide con el repositorio, lo contiene, está dentro de él, es una carpeta
+de fuentes o no está vacía. No borra nada. Para retirar el material de
+validación, elimine manualmente sólo la subcarpeta de ejecución confirmada
+dentro de la raíz privada.

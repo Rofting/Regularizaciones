@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -29,14 +30,37 @@ class Private658ValidationGuardsTest(unittest.TestCase):
             with self.assertRaisesRegex(PrivateValidationBlockedError, "segura"):
                 prepare_validation_run(root.parent, project_root=root)
 
+    def test_validation_root_cannot_be_drive_home_or_its_broad_parent(self):
+        from private_658_validation import PrivateValidationBlockedError, prepare_validation_run
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "operator"
+            home.mkdir()
+            project = root / "separate-project"
+            profile = project / "config" / "excel_profiles" / "658_acs_v1.json"
+            profile.parent.mkdir(parents=True)
+            profile.write_text("{}", encoding="utf-8")
+            (project / "plantillas").mkdir()
+            (project / "plantillas" / "Plantilla_Cartas.docx").write_bytes(b"public-template")
+            with patch("private_658_validation.Path.home", return_value=home):
+                for broad_root in (Path(root.anchor), home, home.parent):
+                    with self.subTest(validation_root=broad_root):
+                        with self.assertRaisesRegex(PrivateValidationBlockedError, "segura"):
+                            prepare_validation_run(broad_root, project_root=project)
+                self.assertEqual([], list(home.glob("validacion_*")))
+
     def test_safe_empty_root_creates_one_new_run_and_copies_only_public_assets(self):
         from private_658_validation import prepare_validation_run
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             project = root / "project"
-            (project / "config").mkdir(parents=True)
-            (project / "config" / "sample.json").write_text("{}", encoding="utf-8")
+            profile = project / "config" / "excel_profiles" / "658_acs_v1.json"
+            profile.parent.mkdir(parents=True)
+            profile.write_text("{}", encoding="utf-8")
+            (project / "config" / "office-private.json").write_text("no copiar", encoding="utf-8")
+            (project / "config" / "letter_identities.json").write_text("no copiar", encoding="utf-8")
             (project / "plantillas").mkdir()
             (project / "plantillas" / "Plantilla_Cartas.docx").write_bytes(b"public-template")
             destination = root / "private-validation"
@@ -44,7 +68,9 @@ class Private658ValidationGuardsTest(unittest.TestCase):
             run = prepare_validation_run(destination, project_root=project)
 
             self.assertTrue(run.is_dir())
-            self.assertTrue((run / "config" / "sample.json").is_file())
+            self.assertTrue((run / "config" / "excel_profiles" / "658_acs_v1.json").is_file())
+            self.assertFalse((run / "config" / "office-private.json").exists())
+            self.assertFalse((run / "config" / "letter_identities.json").exists())
             self.assertTrue((run / "plantillas" / "Plantilla_Cartas.docx").is_file())
             self.assertFalse((run / "gestion.db").exists())
             self.assertFalse((run / "expedientes").exists())

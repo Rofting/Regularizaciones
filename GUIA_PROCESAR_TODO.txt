@@ -48,7 +48,8 @@ Existe un comprobador técnico independiente, sin interfaz, para verificar las
 tres fuentes reales antes de usar el flujo en producción. No se ejecuta con
 la aplicación ni en las pruebas normales. Requiere las cuatro variables de
 entorno documentadas en docs/validacion-excel-reparto-cartas.md y una carpeta
-nueva y vacía de salida. El informe resultante no muestra propietarios,
+nueva y vacía, acotada bajo Temp o una zona privada (nunca una unidad ni la
+carpeta de usuario). El informe resultante no muestra propietarios,
 direcciones, importes individuales ni nombres de archivos fuente.
 
 CONTROLES IMPORTANTES

@@ -36,6 +36,7 @@ REQUIRED_ENVIRONMENT = (
     "REGULARIZACION_658_LECTURAS",
     "REGULARIZACION_658_VALIDATION_ROOT",
 )
+PUBLIC_PROFILE_PATH = Path("config") / "excel_profiles" / "658_acs_v1.json"
 
 
 class PrivateValidationBlockedError(ValueError):
@@ -91,6 +92,10 @@ def validation_environment(environ: Mapping[str, str] | None = None) -> Validati
 def _require_safe_validation_root(validation_root: Path, project_root: Path) -> None:
     root = validation_root.resolve()
     project = project_root.resolve()
+    home = Path.home().resolve()
+    volume_root = Path(root.anchor).resolve()
+    if root in {volume_root, home, home.parent.resolve()}:
+        raise PrivateValidationBlockedError("La raíz de validación no es segura")
     if root == project or _is_relative_to(project, root) or _is_relative_to(root, project):
         raise PrivateValidationBlockedError("La raíz de validación no es segura")
     if root.exists() and not root.is_dir():
@@ -104,17 +109,18 @@ def prepare_validation_run(validation_root: Path, *, project_root: Path) -> Path
     destination = Path(validation_root).resolve()
     source_project = Path(project_root).resolve()
     _require_safe_validation_root(destination, source_project)
-    destination.mkdir(parents=True, exist_ok=True)
-    run = destination / ("validacion_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(4))
-    run.mkdir()
-
-    config = source_project / "config"
-    if not config.is_dir():
-        raise PrivateValidationBlockedError("No existe la configuración pública requerida")
-    shutil.copytree(config, run / "config")
+    profile_source = source_project / PUBLIC_PROFILE_PATH
+    if not profile_source.is_file():
+        raise PrivateValidationBlockedError("No existe el perfil público requerido")
     public_word = source_project / "plantillas" / "Plantilla_Cartas.docx"
     if not public_word.is_file():
         raise PrivateValidationBlockedError("No existe la plantilla Word pública requerida")
+    destination.mkdir(parents=True, exist_ok=True)
+    run = destination / ("validacion_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(4))
+    run.mkdir()
+    profile_destination = run / PUBLIC_PROFILE_PATH
+    profile_destination.parent.mkdir(parents=True)
+    shutil.copy2(profile_source, profile_destination)
     (run / "plantillas").mkdir()
     shutil.copy2(public_word, run / "plantillas" / public_word.name)
     return run
