@@ -304,6 +304,55 @@ class CaseLetterServiceTest(unittest.TestCase):
         self.assertNotEqual(first.id_letter_run, second.id_letter_run)
         self.assertEqual(2, second.generated_count)
 
+    def test_audit_failure_after_publish_compensates_final_document(self):
+        from case_letter_service import generate_case_letters
+
+        with patch(
+            "case_letter_service._mark_generated",
+            side_effect=sqlite3.OperationalError("fallo al confirmar auditoría"),
+        ):
+            result = generate_case_letters(
+                self.database_path, id_case=self.case_id, project_root=self.root
+            )
+
+        self.assertEqual(0, result.generated_count)
+        self.assertEqual(2, len(result.failures))
+        self.assertEqual([], list(result.output_path.glob("*.docx")))
+        self.assertEqual([], list(result.output_path.glob("*.tmp")))
+        self.assertEqual({"failed"}, {row["status"] for row in self._run_rows(result.id_letter_run)})
+
+    def test_new_run_uses_its_own_directory_without_reusing_old_owner_document(self):
+        from carta_writer import generar_carta as real_generate
+        from case_letter_service import generate_case_letters
+
+        first = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root
+        )
+        old_bruno = first.output_path / "CARTA_B-2_BRUNO_VECINO.docx"
+        self.assertTrue(old_bruno.is_file())
+        (self.root / "config" / "letter_identities.json").write_text(
+            '{"communities":{"658":{"office_name":"Nueva gestión",'
+            '"footer":"Atención de la comunidad",'
+            '"signature":"Equipo gestor", "city":"Valencia"}}}',
+            encoding="utf-8",
+        )
+
+        def fail_only_for_bruno(datos, ruta_plantilla, ruta_salida):
+            if datos["vecino"]["nombre"] == "Bruno Vecino":
+                raise OSError("fallo de la segunda ejecución")
+            return real_generate(datos, ruta_plantilla, ruta_salida)
+
+        with patch("case_letter_service.generar_carta", side_effect=fail_only_for_bruno):
+            second = generate_case_letters(
+                self.database_path, id_case=self.case_id, project_root=self.root
+            )
+
+        self.assertNotEqual(first.id_letter_run, second.id_letter_run)
+        self.assertNotEqual(first.output_path, second.output_path)
+        self.assertTrue(old_bruno.is_file())
+        self.assertFalse((second.output_path / "CARTA_B-2_BRUNO_VECINO.docx").exists())
+        self.assertEqual(1, second.generated_count)
+
 
 if __name__ == "__main__":
     unittest.main()

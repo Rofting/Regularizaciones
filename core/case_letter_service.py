@@ -296,10 +296,12 @@ def _reusable_completed_run(
             input_hash, template_hash,
         ),
     ).fetchall()
-    expected_directory = output_directory.resolve()
+    period_directory = output_directory.resolve()
     for run in runs:
         try:
-            if Path(run["output_path"]).resolve() != expected_directory:
+            run_directory = Path(run["output_path"]).resolve()
+            run_directory.relative_to(period_directory)
+            if run_directory == period_directory:
                 continue
         except (OSError, TypeError):
             continue
@@ -314,11 +316,11 @@ def _reusable_completed_run(
             continue
         if all(
             row["status"] == "generated"
-            and _is_safe_generated_path(row["output_path"], expected_directory)
+            and _is_safe_generated_path(row["output_path"], run_directory)
             for row in rows
         ):
             return LetterBatchResult(
-                int(run["id_letter_run"]), output_directory, len(rows), ()
+                int(run["id_letter_run"]), run_directory, len(rows), ()
             )
     return None
 
@@ -326,6 +328,18 @@ def _reusable_completed_run(
 def _temporary_destination(destination: Path) -> Path:
     """Reserva un nombre hermano no visible como carta final."""
     return destination.with_name(f".{destination.stem}.{uuid.uuid4().hex}.tmp")
+
+
+def _mark_generated(
+    connection: sqlite3.Connection, generated_row: int, destination: Path
+) -> None:
+    """Confirma que el archivo publicado tiene una auditoría coherente."""
+    connection.execute(
+        """UPDATE generated_letters SET status='generated',output_path=?,error_message=NULL,
+               updated_at=datetime('now') WHERE id_generated_letter=?""",
+        (str(destination), generated_row),
+    )
+    connection.commit()
 
 
 def generate_case_letters(
@@ -388,7 +402,18 @@ def generate_case_letters(
             (id_case, case["id_periodo"], export["id_export_run"], input_hash, template_hash, str(output_path)),
         )
         run_id = int(cursor.lastrowid)
+        output_path = output_path / f"lote_{run_id}"
+        connection.execute(
+            """UPDATE letter_generation_runs SET output_path=?,updated_at=datetime('now')
+               WHERE id_letter_run=?""",
+            (str(output_path), run_id),
+        )
         connection.commit()
+        try:
+            output_path.mkdir(parents=False, exist_ok=False)
+        except Exception as error:
+            _write_run_status(connection, run_id, "failed", f"No se pudo crear salida: {error}")
+            raise
 
         failures: list[str] = []
         generated = 0
@@ -434,29 +459,38 @@ def generate_case_letters(
                     "logo_path": identity.logo_path,
                 },
             }
+            published = False
             try:
                 generar_carta(letter_data, str(template), str(temporary_destination))
                 os.replace(temporary_destination, destination)
-                connection.execute(
-                    """UPDATE generated_letters SET status='generated',output_path=?,error_message=NULL,
-                           updated_at=datetime('now') WHERE id_generated_letter=?""",
-                    (str(destination), generated_row),
-                )
-                connection.commit()
+                published = True
+                _mark_generated(connection, generated_row, destination)
                 generated += 1
             except Exception as error:
+                if published:
+                    try:
+                        destination.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 try:
                     temporary_destination.unlink(missing_ok=True)
                 except OSError:
                     pass
                 message = f"{owner['nombre']}: {type(error).__name__}: {error}"
                 failures.append(message)
-                connection.execute(
-                    """UPDATE generated_letters SET status='failed',error_message=?,updated_at=datetime('now')
-                           WHERE id_generated_letter=?""",
-                    (message, generated_row),
-                )
-                connection.commit()
+                try:
+                    connection.rollback()
+                    connection.execute(
+                        """UPDATE generated_letters SET status='failed',output_path=NULL,error_message=?,
+                               updated_at=datetime('now') WHERE id_generated_letter=?""",
+                        (message, generated_row),
+                    )
+                    connection.commit()
+                except sqlite3.Error:
+                    try:
+                        connection.rollback()
+                    except sqlite3.Error:
+                        pass
 
         status = "completed" if not failures else "incomplete"
         _write_run_status(connection, run_id, status, "; ".join(failures) if failures else None)
