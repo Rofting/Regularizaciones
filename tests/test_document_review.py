@@ -300,6 +300,37 @@ class DocumentReviewTest(unittest.TestCase):
             "SELECT COUNT(*) FROM manual_corrections WHERE id_issue=?", (issue.id_issue,)
         ).fetchone()[0])
 
+    def test_counter_reset_estimate_rejects_a_property_from_another_community(self):
+        self._create_counter_reset_issue()
+        other_community = gestor_bd.obtener_o_crear_comunidad(
+            self.connection, "OTRA", "Otra comunidad"
+        )
+        self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario,coeficiente)
+               VALUES (?, 'Z', 'Propietario ajeno', 1)""",
+            (other_community,),
+        )
+        self.connection.commit()
+        issue = document_review.create_review_issue(
+            self.connection, self.case.id_case, self.document.id_document,
+            code="COUNTER_RESET", field_name="reading.Z.ACS",
+            message="Contador reiniciado", detected_value="10 -> 5",
+        )
+
+        with self.assertRaisesRegex(LookupError, "propietario del expediente"):
+            document_review.approve_counter_reset_estimate(
+                self.connection, issue.id_issue, consumption="12",
+                reason="Soporte comprobado", approved_by="gestora",
+            )
+
+        self.assertEqual("open", self.connection.execute(
+            "SELECT status FROM review_issues WHERE id_issue=?", (issue.id_issue,)
+        ).fetchone()[0])
+        self.assertEqual(0, self.connection.execute(
+            "SELECT COUNT(*) FROM manual_corrections WHERE id_issue=?", (issue.id_issue,)
+        ).fetchone()[0])
+
     def test_counter_reset_estimate_rolls_back_audit_when_canonical_update_fails(self):
         issue, owner_id, _period_id = self._create_counter_reset_issue()
         self.connection.execute(

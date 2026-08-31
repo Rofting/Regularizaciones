@@ -35,7 +35,7 @@ python -m py_compile core/document_review.py core/expedient_ui.py core/excel_boo
 git diff --check
 ```
 
-Las pruebas cubren estimación aprobada, entrada inválida, aislamiento entre
-propietarios, rollback de auditoría al fallar la lectura, desbloqueo del reparto
-al aprobar todas las incidencias y clasificación/cierre de factura fuera de
-período.
+Las pruebas cubren estimación aprobada, entrada inválida, pertenencia al
+expediente, aislamiento entre propietarios, rollback de auditoría al fallar la
+lectura, desbloqueo del reparto al aprobar todas las incidencias y
+clasificación/cierre de factura fuera de período.
