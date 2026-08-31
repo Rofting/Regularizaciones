@@ -4,6 +4,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,7 @@ from case_distribution import (
     calculate_case_distribution,
 )
 from excel_export_service import calculate_case_input_hash
+from excel_profiles import ConceptRule, ExcelProfile
 from tests.helpers import temporary_database
 
 
@@ -212,6 +214,85 @@ class CaseDistributionTest(unittest.TestCase):
             calculate_case_distribution(self.connection, id_case=self.case_id)
 
         self.assertEqual(before, [tuple(row) for row in self._rows("credit")])
+
+    def test_heating_reading_change_invalidates_reparto_and_legacy_projection(self):
+        profile = ExcelProfile(
+            key="synthetic_heating_v1",
+            version="1",
+            community_code="658",
+            template_relative_path="plantillas/synthetic.xlsx",
+            active_modules=("CALEFACCION",),
+            required_sheets=("LECTURAS CALEF KWH",),
+            required_formula_cells=(),
+            concepts=(
+                ConceptRule(
+                    key="heating_fixed", allocation_method="equal",
+                    actual_source="period_parameters.heating_fixed_actual",
+                    billed_source="period_parameters.heating_fixed_billed", required=True,
+                ),
+                ConceptRule(
+                    key="heating_variable", allocation_method="consumption",
+                    actual_source="period_parameters.heating_variable_actual",
+                    billed_source="period_parameters.heating_variable_billed", required=True,
+                ),
+            ),
+        )
+        self._set_parameter("heating_fixed_actual", "20.00")
+        self._set_parameter("heating_fixed_billed", "10.00")
+        self._set_parameter("heating_variable_actual", "60.00")
+        self._set_parameter("heating_variable_billed", "30.00")
+        for owner_id, first, last in (
+            (self.owner_one, 100, 130),
+            (self.owner_two, 200, 210),
+        ):
+            self.connection.executemany(
+                """INSERT INTO lecturas_vecino
+                   (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado)
+                   VALUES (?,?,'CALEFACCION',?,?,'real')""",
+                [
+                    (owner_id, self.period_id, "2025-09-01", first),
+                    (owner_id, self.period_id, "2026-08-31", last),
+                ],
+            )
+        self.connection.commit()
+        heating_hash = calculate_case_input_hash(
+            self.connection, id_case=self.case_id, project_root=PROJECT_ROOT, profile=profile,
+        )
+        self.connection.execute(
+            """INSERT INTO excel_export_runs
+               (id_case,id_periodo,id_template_profile,input_sha256,template_sha256,status)
+               VALUES (?,?,?,?,?,'validated')""",
+            (self.case_id, self.period_id, self.profile_id, heating_hash, "template-hash"),
+        )
+        self.connection.commit()
+
+        with patch("case_distribution.load_profile", return_value=profile):
+            calculate_case_distribution(self.connection, id_case=self.case_id)
+            before = [tuple(row) for row in self._rows("heating_variable")]
+            before_legacy = [tuple(row) for row in self.connection.execute(
+                """SELECT id_propietario,importe_cobrado,importe_real,diferencia
+                   FROM repartos WHERE id_periodo=? AND tipo_suministro='CALEFACCION'
+                   ORDER BY id_propietario""",
+                (self.period_id,),
+            )]
+            self.connection.execute(
+                """UPDATE lecturas_vecino SET valor_acumulado=212
+                   WHERE id_propietario=? AND tipo='CALEFACCION'
+                     AND fecha_lectura='2026-08-31'""",
+                (self.owner_two,),
+            )
+            self.connection.commit()
+
+            with self.assertRaisesRegex(DistributionBlockedError, "regenerar Excel"):
+                calculate_case_distribution(self.connection, id_case=self.case_id)
+
+        self.assertEqual(before, [tuple(row) for row in self._rows("heating_variable")])
+        self.assertEqual(before_legacy, [tuple(row) for row in self.connection.execute(
+            """SELECT id_propietario,importe_cobrado,importe_real,diferencia
+               FROM repartos WHERE id_periodo=? AND tipo_suministro='CALEFACCION'
+               ORDER BY id_propietario""",
+            (self.period_id,),
+        )])
 
     def test_absent_optional_concept_removes_stale_rows(self):
         self.connection.execute(

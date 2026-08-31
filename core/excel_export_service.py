@@ -357,8 +357,40 @@ def _query_dicts(connection: sqlite3.Connection, query: str, parameters: tuple) 
     return [dict(zip(names, row)) for row in cursor.fetchall()]
 
 
+def _profile_reading_types(profile: ExcelProfile) -> tuple[str, ...]:
+    """Tipos de contador que forman parte de las entradas del perfil.
+
+    Los libros de ACS no deben invalidarse por una lectura de calefacción que
+    no utilizan, mientras que un perfil de calefacción sí debe fijar esa
+    lectura en su huella de entrada. Se reconocen tanto módulos declarados
+    como conceptos que usan la convención de nombre de cada servicio.
+    """
+    types: set[str] = set()
+    concept_keys = {concept.key for concept in profile.concepts}
+    if "ACS" in profile.active_modules or any(key.startswith("acs_") for key in concept_keys):
+        types.add("ACS")
+    if "CALEFACCION" in profile.active_modules or any(
+        key.startswith("heating_") for key in concept_keys
+    ):
+        types.add("CALEFACCION")
+    return tuple(sorted(types))
+
+
 def _input_hash(connection: sqlite3.Connection, case: sqlite3.Row, profile: ExcelProfile) -> str:
     period_id = int(case["id_periodo"])
+    reading_types = _profile_reading_types(profile)
+    reading_rows = []
+    if reading_types:
+        placeholders = ",".join("?" for _ in reading_types)
+        reading_rows = _query_dicts(
+            connection,
+            f"""SELECT p.codigo_vivienda,l.tipo,l.fecha_lectura,l.valor_acumulado,l.estado,
+                       l.approved_by,l.approved_at
+                FROM lecturas_vecino l JOIN propietarios p ON p.id_propietario=l.id_propietario
+                WHERE p.id_comunidad=? AND l.id_periodo=? AND l.tipo IN ({placeholders})
+                ORDER BY p.codigo_vivienda,l.tipo,l.fecha_lectura""",
+            (case["id_comunidad"], period_id, *reading_types),
+        )
     payload = {
         "case": {key: case[key] for key in (
             "id_case", "id_comunidad", "codigo", "comunidad_nombre", "nombre",
@@ -388,15 +420,7 @@ def _input_hash(connection: sqlite3.Connection, case: sqlite3.Row, profile: Exce
                ORDER BY parameter_key""",
             (case["id_comunidad"], period_id),
         ),
-        "readings": _query_dicts(
-            connection,
-            """SELECT p.codigo_vivienda,l.fecha_lectura,l.valor_acumulado,l.estado,
-                      l.approved_by,l.approved_at
-               FROM lecturas_vecino l JOIN propietarios p ON p.id_propietario=l.id_propietario
-               WHERE p.id_comunidad=? AND l.id_periodo=? AND l.tipo='ACS'
-               ORDER BY p.codigo_vivienda,l.fecha_lectura""",
-            (case["id_comunidad"], period_id),
-        ),
+        "readings": reading_rows,
         "eligible_expenses": _query_dicts(
             connection,
             """SELECT id_gasto,fecha,descripcion,importe_total,activo
