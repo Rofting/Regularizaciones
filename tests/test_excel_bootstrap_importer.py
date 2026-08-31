@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import sqlite3
 import sys
 import tempfile
@@ -23,6 +24,7 @@ import gestor_bd
 import document_review
 import excel_bootstrap_importer
 from excel_bootstrap_importer import import_companion_sources, import_master_excel
+from excel_export_service import _case_context, _template_registration
 
 
 def _make_master(path: Path, *, missing_water_fixed: bool = False) -> Path:
@@ -269,6 +271,109 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
         self.assertTrue(Path(document["archived_path"]).is_file())
         self.assertNotEqual(workbook.resolve(), Path(document["archived_path"]).resolve())
         self.assertEqual(64, len(document["sha256"]))
+
+    def test_bootstrap_installs_verified_private_template_and_registers_it(self):
+        project = self.root / "proyecto_portable"
+        profile_dir = project / "config" / "excel_profiles"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "658_acs_v1.json").write_text(
+            (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        profile = excel_profiles.load_profile("658_acs_v1", project)
+        workbook = _make_master(self.root / "modelo_instalable.xlsx")
+        original_source = workbook.read_bytes()
+        source_hash = hashlib.sha256(original_source).hexdigest()
+
+        first = import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=workbook, profile=profile, actor="Prueba",
+            project_root=project,
+        )
+        template = project / profile.template_relative_path
+        template_bytes = template.read_bytes()
+        second = import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=workbook, profile=profile, actor="Prueba",
+            project_root=project,
+        )
+
+        self.assertEqual(template, first.installed_template_path)
+        self.assertEqual(source_hash, first.installed_template_sha256)
+        self.assertEqual(template_bytes, template.read_bytes())
+        self.assertEqual(original_source, workbook.read_bytes())
+        self.assertEqual(template, second.installed_template_path)
+        registration = self.connection.execute(
+            """SELECT template_relative_path,template_sha256 FROM excel_template_profiles
+               WHERE id_comunidad=? AND status='active'""",
+            (self.community_id,),
+        ).fetchone()
+        self.assertEqual(profile.template_relative_path, registration["template_relative_path"])
+        self.assertEqual(source_hash, registration["template_sha256"])
+        document_review.validate_case_ready(self.connection, self.case.id_case)
+        case_context = _case_context(self.connection, self.case.id_case)
+        _profile_id, exported_template, exported_hash = _template_registration(
+            self.connection, case_context, profile, project
+        )
+        self.assertEqual(template, exported_template)
+        self.assertEqual(source_hash, exported_hash)
+        document = self.connection.execute(
+            "SELECT archived_path FROM source_documents WHERE document_kind='excel_master_bootstrap'"
+        ).fetchone()
+        self.assertNotEqual(template.resolve(), Path(document["archived_path"]).resolve())
+
+    def test_different_master_hash_creates_template_conflict_without_overwriting(self):
+        project = self.root / "proyecto_conflicto"
+        profile_dir = project / "config" / "excel_profiles"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "658_acs_v1.json").write_text(
+            (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_text(
+                encoding="utf-8"
+            ), encoding="utf-8"
+        )
+        profile = excel_profiles.load_profile("658_acs_v1", project)
+        initial = _make_master(self.root / "modelo_original.xlsx")
+        import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=initial, profile=profile, actor="Prueba", project_root=project,
+        )
+        template = project / profile.template_relative_path
+        original_template = template.read_bytes()
+        changed = _append_gas_invoice(initial, self.root / "modelo_distinto.xlsx")
+
+        with self.assertRaisesRegex(excel_bootstrap_importer.TemplateInstallationConflictError, "nueva versión"):
+            import_master_excel(
+                self.connection, id_case=self.case.id_case,
+                workbook_path=changed, profile=profile, actor="Prueba", project_root=project,
+            )
+
+        self.assertEqual(original_template, template.read_bytes())
+        issue = self.connection.execute(
+            """SELECT code,message FROM review_issues
+               WHERE id_case=? AND code='TEMPLATE_VERSION_CONFLICT' AND status='open'""",
+            (self.case.id_case,),
+        ).fetchone()
+        self.assertIsNotNone(issue)
+        self.assertIn("nueva versión", issue["message"])
+
+    def test_template_installation_rejects_a_path_outside_the_project(self):
+        from dataclasses import replace
+
+        workbook = _make_master(self.root / "modelo_ruta_segura.xlsx")
+        invalid_profile = replace(self.profile, template_relative_path="../fuera.xlsx")
+        with self.assertRaisesRegex(excel_bootstrap_importer.TemplateInstallationError, "fuera"):
+            import_master_excel(
+                self.connection, id_case=self.case.id_case,
+                workbook_path=workbook, profile=invalid_profile, actor="Prueba",
+                project_root=self.root / "proyecto_ruta_segura",
+            )
+        self.assertFalse((self.root / "fuera.xlsx").exists())
+
+    def test_private_community_templates_are_ignored_by_git(self):
+        ignored = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("plantillas/comunidades/", ignored)
 
     def test_missing_required_water_component_creates_issue_and_blocks_case(self):
         workbook = _make_master(

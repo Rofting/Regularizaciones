@@ -1716,17 +1716,26 @@ class AppGestionFincas(ctk.CTk):
         self.log("━━━ IMPORTAR MODELO INICIAL ━━━", "titulo")
         self.log("  ℹ️ Este paso sirve sólo para arrancar desde un Excel histórico. "
                  "Las siguientes regularizaciones se nutrirán de PDF.", "info")
-        result, companions = workflow.run_bootstrap_import(
-            self.ruta_bd_expedientes,
-            id_case=self.id_expediente,
-            active_community_id=self.id_comunidad,
-            project_root=BASE_DIR,
-            master_path=master,
-            owner_list_path=owners,
-            readings_path=readings,
-            progress=self._progreso_expediente,
-        )
+        try:
+            result, companions = workflow.run_bootstrap_import(
+                self.ruta_bd_expedientes,
+                id_case=self.id_expediente,
+                active_community_id=self.id_comunidad,
+                project_root=BASE_DIR,
+                master_path=master,
+                owner_list_path=owners,
+                readings_path=readings,
+                progress=self._progreso_expediente,
+            )
+        except Exception:
+            self._refrescar_despues_de_accion(self.id_expediente)
+            raise
         self.log(f"  ✅ Modelo inicial incorporado ({result.imported_invoice_count} factura(s)).", "ok")
+        if result.installed_template_path:
+            self.log(
+                "  ✅ Plantilla instalada y verificada: "
+                f"{result.installed_template_path.name}", "ok"
+            )
         if companions is not None:
             self.log(
                 f"  ✅ Complementarias: {companions.imported_owner_count} propietario(s) y "

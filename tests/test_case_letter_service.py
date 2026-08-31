@@ -143,7 +143,7 @@ class CaseLetterServiceTest(unittest.TestCase):
             (
                 self.community_id, "658_acs_v1", "1",
                 "plantillas/comunidades/658/658_acs_v1.xlsx",
-                "excel-template", "profile", 
+                "excel-template", "profile",
             ),
         ).lastrowid
         input_hash = calculate_case_input_hash(

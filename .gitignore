@@ -25,6 +25,9 @@ salidas/
 Excels_Maestros/
 Excels_Maestros_backup*/
 
+# Plantillas privadas instaladas desde los maestros de cada comunidad
+plantillas/comunidades/
+
 # Archivos temporales de Office
 ~$*.xlsx
 ~$*.xls

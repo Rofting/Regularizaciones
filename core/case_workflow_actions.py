@@ -158,7 +158,7 @@ def run_bootstrap_import(
         _emit(progress, "importar_modelo", id_case=id_case)
         result = excel_bootstrap_importer.import_master_excel(
             connection, id_case=id_case, workbook_path=Path(master_path),
-            profile=profile, actor=actor,
+            profile=profile, actor=actor, project_root=Path(project_root),
         )
         if owner_list_path and readings_path:
             _emit(progress, "importar_complementarias", id_case=id_case)

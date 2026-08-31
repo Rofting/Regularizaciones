@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import os
 import re
+import shutil
 import sqlite3
+import tempfile
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -40,6 +43,8 @@ class BootstrapImportResult:
     imported_owner_count: int
     imported_reading_count: int
     open_issue_count: int
+    installed_template_path: Path | None = None
+    installed_template_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,14 @@ class CompanionImportResult:
     imported_owner_count: int
     imported_reading_count: int
     open_issue_count: int
+
+
+class TemplateInstallationError(ValueError):
+    """No se puede instalar una plantilla privada de forma segura."""
+
+
+class TemplateInstallationConflictError(TemplateInstallationError):
+    """La comunidad ya tiene una plantilla diferente para ese perfil."""
 
 
 @dataclass(frozen=True)
@@ -206,6 +219,184 @@ def _verified_archived_path(document) -> Path:
     if not archived_path.is_file() or _sha256(archived_path) != document.sha256:
         raise RuntimeError("La copia archivada no supera la verificación de hash")
     return archived_path
+
+
+def _private_template_path(project_root: Path, profile: ExcelProfile) -> Path:
+    root = Path(project_root).resolve()
+    destination = (root / profile.template_relative_path).resolve()
+    try:
+        destination.relative_to(root)
+    except ValueError:
+        raise TemplateInstallationError("La plantilla queda fuera del proyecto") from None
+    return destination
+
+
+def _profile_sha256(project_root: Path, profile: ExcelProfile) -> str:
+    config_path = Path(project_root).resolve() / "config" / "excel_profiles" / f"{profile.key}.json"
+    if not config_path.is_file():
+        raise TemplateInstallationError(
+            f"No existe el perfil configurado para instalar la plantilla: {config_path}"
+        )
+    return _sha256(config_path)
+
+
+def _record_template_conflict(
+    connection: sqlite3.Connection,
+    *,
+    id_case: int,
+    id_document: int,
+    profile: ExcelProfile,
+    message: str,
+) -> None:
+    _issue(
+        connection,
+        id_case=id_case,
+        id_document=id_document,
+        code="TEMPLATE_VERSION_CONFLICT",
+        field_name=f"template.{profile.key}",
+        message=message,
+    )
+
+
+def _install_private_template(
+    connection: sqlite3.Connection,
+    *,
+    id_case: int,
+    document,
+    profile: ExcelProfile,
+    project_root: Path,
+) -> tuple[Path, str]:
+    """Publica una copia verificable del archivo ya archivado, sin sobrescribir.
+
+    ``os.link`` reserva el nombre de destino en la misma carpeta de forma
+    atómica. Si otra ejecución ya publicó el archivo, sólo se acepta cuando
+    su huella es idéntica; de otro modo se registra una incidencia y se exige
+    una versión de perfil nueva.
+    """
+    archive = _verified_archived_path(document)
+    expected_hash = document.sha256
+    if _sha256(archive) != expected_hash:
+        raise TemplateInstallationError("La plantilla archivada no supera la verificación de hash")
+    destination = _private_template_path(project_root, profile)
+    _profile_sha256(project_root, profile)
+    if destination.exists():
+        if not destination.is_file():
+            raise TemplateInstallationError("La ruta de plantilla instalada no es un archivo")
+        installed_hash = _sha256(destination)
+        if installed_hash == expected_hash:
+            return destination, installed_hash
+        message = (
+            "La plantilla instalada no coincide con el maestro importado; "
+            "debe registrarse una nueva versión de perfil antes de reemplazarla"
+        )
+        _record_template_conflict(
+            connection, id_case=id_case, id_document=document.id_document,
+            profile=profile, message=message,
+        )
+        raise TemplateInstallationConflictError(message)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_name = temporary.name
+        temporary_path = Path(temporary_name)
+        shutil.copy2(archive, temporary_path)
+        if _sha256(temporary_path) != expected_hash:
+            raise TemplateInstallationError("La copia temporal de plantilla no supera la verificación de hash")
+        try:
+            os.link(temporary_path, destination)
+        except FileExistsError:
+            installed_hash = _sha256(destination) if destination.is_file() else None
+            if installed_hash == expected_hash:
+                return destination, installed_hash
+            message = (
+                "Otra instalación publicó una plantilla distinta; debe registrarse "
+                "una nueva versión de perfil antes de reemplazarla"
+            )
+            _record_template_conflict(
+                connection, id_case=id_case, id_document=document.id_document,
+                profile=profile, message=message,
+            )
+            raise TemplateInstallationConflictError(message)
+        installed_hash = _sha256(destination)
+        if installed_hash != expected_hash:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise TemplateInstallationError("La plantilla publicada no supera la verificación de hash")
+        return destination, installed_hash
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _register_installed_template(
+    connection: sqlite3.Connection,
+    *,
+    id_case: int,
+    document,
+    community_id: int,
+    profile: ExcelProfile,
+    project_root: Path,
+    installed_hash: str,
+) -> None:
+    """Registra sólo una plantilla que ya existe y cuya huella fue validada."""
+    destination = _private_template_path(project_root, profile)
+    if not destination.is_file() or _sha256(destination) != installed_hash:
+        raise TemplateInstallationError("La plantilla instalada dejó de coincidir antes de registrarla")
+    profile_hash = _profile_sha256(project_root, profile)
+    active = connection.execute(
+        """SELECT profile_key,profile_version,template_relative_path,template_sha256
+           FROM excel_template_profiles WHERE id_comunidad=? AND status='active'
+           ORDER BY id_template_profile""",
+        (community_id,),
+    ).fetchall()
+    if active:
+        if len(active) != 1:
+            message = "La comunidad tiene varios perfiles activos; debe revisar su configuración"
+            _record_template_conflict(
+                connection, id_case=id_case, id_document=document.id_document,
+                profile=profile, message=message,
+            )
+            raise TemplateInstallationConflictError(message)
+        existing = active[0]
+        if (
+            existing["profile_key"] == profile.key
+            and existing["profile_version"] == profile.version
+            and existing["template_relative_path"] == profile.template_relative_path
+            and existing["template_sha256"] == installed_hash
+        ):
+            return
+        message = (
+            "El registro de plantilla no coincide; debe registrarse una nueva versión "
+            "de perfil antes de reemplazarla"
+        )
+        _record_template_conflict(
+            connection, id_case=id_case, id_document=document.id_document,
+            profile=profile, message=message,
+        )
+        raise TemplateInstallationConflictError(message)
+    connection.execute(
+        """INSERT INTO excel_template_profiles
+           (id_comunidad,profile_key,profile_version,template_relative_path,
+            template_sha256,profile_sha256,status)
+           VALUES (?,?,?,?,?,?,'active')""",
+        (
+            community_id, profile.key, profile.version, profile.template_relative_path,
+            installed_hash, profile_hash,
+        ),
+    )
+    connection.commit()
 
 
 def _existing_batch(
@@ -789,6 +980,7 @@ def import_master_excel(
     workbook_path: Path,
     profile: ExcelProfile,
     actor: str,
+    project_root: Path | None = None,
 ) -> BootstrapImportResult:
     """Importa un modelo maestro sin usarlo como fuente viva de cálculo."""
     path = Path(workbook_path).resolve()
@@ -802,6 +994,25 @@ def import_master_excel(
         document_kind="excel_master_bootstrap",
     )
     archived_path = _verified_archived_path(document)
+    installed_template_path: Path | None = None
+    installed_template_sha256: str | None = None
+    if project_root is not None:
+        installed_template_path, installed_template_sha256 = _install_private_template(
+            connection,
+            id_case=id_case,
+            document=document,
+            profile=profile,
+            project_root=Path(project_root),
+        )
+        _register_installed_template(
+            connection,
+            id_case=id_case,
+            document=document,
+            community_id=case.community_id,
+            profile=profile,
+            project_root=Path(project_root),
+            installed_hash=installed_template_sha256,
+        )
     source_kind = "excel_master_bootstrap"
     existing = _existing_batch(
         connection, case.community_id, document.sha256, source_kind
@@ -814,7 +1025,8 @@ def import_master_excel(
         ):
             return BootstrapImportResult(
                 existing_batch_id, period_id, 0, 0, 0,
-                _open_issue_count(connection, id_case),
+                _open_issue_count(connection, id_case), installed_template_path,
+                installed_template_sha256,
             )
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -834,7 +1046,8 @@ def import_master_excel(
             raise
         return BootstrapImportResult(
             existing_batch_id, period_id, 0, 0, 0,
-            _open_issue_count(connection, id_case),
+            _open_issue_count(connection, id_case), installed_template_path,
+            installed_template_sha256,
         )
 
     archived_bytes = archived_path.read_bytes()
@@ -893,7 +1106,8 @@ def import_master_excel(
         values_book.close()
     return BootstrapImportResult(
         batch_id, period_id, imported, 0, 0,
-        _open_issue_count(connection, id_case),
+        _open_issue_count(connection, id_case), installed_template_path,
+        installed_template_sha256,
     )
 
 
