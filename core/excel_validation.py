@@ -91,7 +91,7 @@ def _design_part_hashes(path: Path) -> tuple[tuple[str, str], ...]:
         names = [
             name for name in archive.namelist()
             if name.startswith(prefixes) or name.endswith(".rels")
-            or name in {"[Content_Types].xml", "_rels/.rels"}
+            or name in {"xl/styles.xml", "[Content_Types].xml", "_rels/.rels"}
         ]
         return tuple(
             (name, hashlib.sha256(archive.read(name)).hexdigest())

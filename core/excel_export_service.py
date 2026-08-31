@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sqlite3
+from copy import copy
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -398,6 +399,13 @@ def _derived_columns(table: Mapping[str, Any]) -> Mapping[str, str]:
     return table.get("derived_columns", {})
 
 
+def _set_cell_value(cell, value: Any) -> None:
+    """Cambia contenido sin alterar el estilo efectivo de la plantilla."""
+    style = copy(cell._style)
+    cell.value = value
+    cell._style = style
+
+
 def _clear_table(sheet, table: Mapping[str, Any]) -> None:
     for row in range(int(table["start_row"]), int(table["end_row"]) + 1):
         for column in _input_columns(table).values():
@@ -419,7 +427,7 @@ def _write_derived_formula(sheet, row: int, columns: Mapping[str, str]) -> None:
         isinstance(sheet[f"{total}{row}"].value, str)
         and sheet[f"{total}{row}"].value.startswith("=")
     ):
-        sheet[f"{total}{row}"] = f"={fixed}{row}+{variable}{row}"
+        _set_cell_value(sheet[f"{total}{row}"], f"={fixed}{row}+{variable}{row}")
 
 
 def _write_invoice_table(
@@ -458,7 +466,7 @@ def _write_invoice_table(
         }
         for key, column in columns.items():
             if key in values:
-                sheet[f"{column}{row_number}"] = values[key]
+                _set_cell_value(sheet[f"{column}{row_number}"], values[key])
         _write_derived_formula(sheet, row_number, {**columns, **derived})
 
 
@@ -485,9 +493,9 @@ def _write_other_expenses(connection, workbook, case, table) -> None:
         raise ExportBlockedError("La plantilla no tiene filas suficientes para otros gastos")
     columns = _input_columns(table)
     for row_number, expense in zip(available_rows, expenses):
-        sheet[f"{columns['date']}{row_number}"] = _safe_date(expense[0])
-        sheet[f"{columns['description']}{row_number}"] = expense[1]
-        sheet[f"{columns['amount']}{row_number}"] = float(expense[2])
+        _set_cell_value(sheet[f"{columns['date']}{row_number}"], _safe_date(expense[0]))
+        _set_cell_value(sheet[f"{columns['description']}{row_number}"], expense[1])
+        _set_cell_value(sheet[f"{columns['amount']}{row_number}"], float(expense[2]))
 
 
 def _write_acs(connection, workbook, case, table) -> None:
@@ -506,32 +514,73 @@ def _write_acs(connection, workbook, case, table) -> None:
         by_owner.setdefault(reading["codigo_vivienda"], {})[reading["fecha_lectura"]] = float(
             reading["valor_acumulado"]
         )
-    owner_rows = [
-        (code, values[case["fecha_inicio"]], values[case["fecha_fin"]])
-        for code, values in by_owner.items()
-        if case["fecha_inicio"] in values and case["fecha_fin"] in values
-    ]
-    if len(owner_rows) != len(by_owner):
+    if any(
+        case["fecha_inicio"] not in values or case["fecha_fin"] not in values
+        for values in by_owner.values()
+    ):
         raise ExportBlockedError("Faltan lecturas ACS de inicio o cierre")
-    if len(owner_rows) > len(available_rows):
+    if len(available_rows) < 2:
         raise ExportBlockedError("La plantilla no tiene filas suficientes para ACS")
     columns = _input_columns(table)
     derived = _derived_columns(table)
-    for row, (code, initial, final) in zip(available_rows, owner_rows):
-        values = {
-            "owner_code": code,
-            "unit": "m3",
-            "initial": initial,
-            "final": final,
-        }
+    parameters = {
+        row["parameter_key"]: row["numeric_value"]
+        for row in connection.execute(
+            """SELECT parameter_key,numeric_value FROM period_parameters
+               WHERE id_comunidad=? AND id_periodo=?""",
+            (case["id_comunidad"], case["id_periodo"]),
+        )
+    }
+    required = ("acs_variable_actual", "acs_fixed_actual")
+    missing = [key for key in required if parameters.get(key) is None]
+    if missing:
+        raise ExportBlockedError("Faltan parámetros ACS: " + ", ".join(missing))
+
+    initial = sum(values[case["fecha_inicio"]] for values in by_owner.values())
+    final = sum(values[case["fecha_fin"]] for values in by_owner.values())
+    variable_row, fixed_row = available_rows[:2]
+    variable_values = {
+        "charge_date": _safe_date(case["fecha_fin"]),
+        "final_date": _safe_date(case["fecha_fin"]),
+        "final": final,
+        "initial_date": _safe_date(case["fecha_inicio"]),
+        "initial": initial,
+        "variable_fee": float(parameters["acs_variable_actual"]),
+    }
+    fixed_values = {
+        "charge_date": _safe_date(case["fecha_fin"]),
+        "fixed_fee": float(parameters["acs_fixed_actual"]),
+    }
+    for row, values in ((variable_row, variable_values), (fixed_row, fixed_values)):
         for key, column in columns.items():
             if key in values:
-                sheet[f"{column}{row}"] = values[key]
-        consumption = derived.get("consumption")
-        initial_column = columns.get("initial")
-        final_column = columns.get("final")
-        if consumption and initial_column and final_column:
-            sheet[f"{consumption}{row}"] = f"={final_column}{row}-{initial_column}{row}"
+                _set_cell_value(sheet[f"{column}{row}"], values[key])
+
+    consumption = derived.get("consumption")
+    total = derived.get("total")
+    variable_unit = derived.get("variable_unit")
+    fixed_unit = derived.get("fixed_unit")
+    if consumption and columns.get("final") and columns.get("initial"):
+        _set_cell_value(
+            sheet[f"{consumption}{variable_row}"],
+            f"={columns['final']}{variable_row}-{columns['initial']}{variable_row}",
+        )
+    if total and columns.get("variable_fee") and columns.get("fixed_fee"):
+        for row in (variable_row, fixed_row):
+            _set_cell_value(
+                sheet[f"{total}{row}"],
+                f"=SUM({columns['variable_fee']}{row}:{columns['fixed_fee']}{row})",
+            )
+    if variable_unit and consumption and columns.get("variable_fee"):
+        _set_cell_value(
+            sheet[f"{variable_unit}{variable_row}"],
+            f"={columns['variable_fee']}{variable_row}/{consumption}{variable_row}",
+        )
+    if fixed_unit and columns.get("fixed_fee"):
+        _set_cell_value(
+            sheet[f"{fixed_unit}{fixed_row}"],
+            f"={columns['fixed_fee']}{fixed_row}/'DATOS'!$D$4",
+        )
 
 
 def _write_workbook(
@@ -559,7 +608,7 @@ def _write_workbook(
         for key, value in metadata_values.items():
             if key in metadata:
                 sheet_name, address = metadata[key]
-                workbook[sheet_name][address] = value
+                _set_cell_value(workbook[sheet_name][address], value)
 
         tables = profile.workbook_layout["tables"]
         for module in profile.active_modules:
@@ -585,7 +634,7 @@ def _write_workbook(
         for key, binding in profile.workbook_layout["parameter_cells"].items():
             if key in parameters and parameters[key] is not None:
                 sheet_name, address = binding
-                workbook[sheet_name][address] = float(parameters[key])
+                _set_cell_value(workbook[sheet_name][address], float(parameters[key]))
         workbook.save(path)
     finally:
         workbook.close()
@@ -606,11 +655,7 @@ def _restore_missing_ooxml_parts(template: Path, generated: Path) -> None:
         "xl/charts/", "xl/drawings/", "xl/media/", "customXml/",
         "xl/theme/", "xl/printerSettings/",
     )
-    # openpyxl conserva y reemite los estilos de celda; reemplazar styles.xml
-    # después de escribir fechas puede dejar referencias a estilos nuevos sin
-    # definir. La huella verifica que ningún estilo fuera de los rangos
-    # mutables cambie.
-    design_exact = {"[Content_Types].xml", "_rels/.rels"}
+    design_exact = {"xl/styles.xml", "[Content_Types].xml", "_rels/.rels"}
     restore = {
         name: data
         for name, data in source_parts.items()

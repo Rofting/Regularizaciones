@@ -98,11 +98,16 @@ PROFILE_DATA = {
                 "columns": {"date": "D", "description": "E", "amount": "F"},
             },
             "ACS": {
-                "sheet": "LECTURAS ACS M3", "start_row": 8, "end_row": 26,
+                "sheet": "LECTURAS ACS M3", "start_row": 8, "end_row": 25,
                 "input_columns": {
-                    "owner_code": "A", "unit": "B", "initial": "C", "final": "E",
+                    "charge_date": "B", "final_date": "C", "final": "D",
+                    "initial_date": "E", "initial": "F", "variable_fee": "H",
+                    "fixed_fee": "I",
                 },
-                "derived_columns": {"consumption": "G"},
+                "derived_columns": {
+                    "consumption": "G", "total": "J", "variable_unit": "L",
+                    "fixed_unit": "M",
+                },
             },
         },
         "parameter_cells": {
@@ -122,7 +127,7 @@ PROFILE_DATA = {
             "invoice_component:AGUA:fixed": ["AGUA", "U10:U21"],
             "invoice_component:AGUA:variable": ["AGUA", "T10:T21"],
             "parameter:extraordinary_expense_actual": ["OTROS GASTOS", "F13:F23"],
-            "reading_total:ACS": ["LECTURAS ACS M3", "G8:G26"],
+            "reading_total:ACS": ["LECTURAS ACS M3", "G8:G25"],
             "parameter:acs_fixed_actual": ["ANALISIS", "H64"],
             "parameter:acs_variable_actual": ["ANALISIS", "J64"],
             "parameter:acs_fixed_billed": ["ANALISIS", "H66"],
@@ -154,12 +159,19 @@ def _make_template(path: Path) -> Path:
     workbook["ELECTRICIDAD"]["H23"] = "=SUM(H10:H21)"
     workbook["AGUA"]["R10"] = "=T10+U10"
     workbook["AGUA"]["R23"] = "=SUM(R10:R21)"
-    workbook["LECTURAS ACS M3"]["G8"] = "=E8-C8"
-    workbook["LECTURAS ACS M3"]["G27"] = "=SUM(G8:G26)"
+    workbook["LECTURAS ACS M3"]["G8"] = "=D8-F8"
+    workbook["LECTURAS ACS M3"]["J8"] = "=SUM(H8:I8)"
+    workbook["LECTURAS ACS M3"]["L8"] = "=H8/G8"
+    workbook["LECTURAS ACS M3"]["J9"] = "=SUM(H9:I9)"
+    workbook["LECTURAS ACS M3"]["M9"] = "=I9/'DATOS'!$D$4"
+    for column in ("G", "H", "I", "J"):
+        workbook["LECTURAS ACS M3"][f"{column}27"] = f"=SUM({column}8:{column}25)"
     for sheet_name, columns, first, last in (
         ("GAS", ("B", "D"), 10, 30),
         ("ELECTRICIDAD", ("B", "C", "D"), 10, 21),
         ("AGUA", ("B", "D"), 10, 21),
+        ("OTROS GASTOS", ("D",), 13, 23),
+        ("LECTURAS ACS M3", ("B", "C", "E"), 8, 25),
     ):
         for column in columns:
             for row in range(first, last + 1):
@@ -341,10 +353,15 @@ class ExcelExportServiceTest(unittest.TestCase):
         self.assertEqual("=SUM(M10:M30)", workbook["GAS"]["M31"].value)
         self.assertIsNone(workbook["GAS"]["B32"].value)
         self.assertEqual("=SUM(H1:H22)", workbook["ANALISIS"]["H23"].value)
-        self.assertEqual("P1-A", workbook["LECTURAS ACS M3"]["A8"].value)
-        self.assertEqual("m3", workbook["LECTURAS ACS M3"]["B8"].value)
-        self.assertEqual("=E8-C8", workbook["LECTURAS ACS M3"]["G8"].value)
-        self.assertEqual("=SUM(G8:G26)", workbook["LECTURAS ACS M3"]["G27"].value)
+        self.assertIsInstance(workbook["LECTURAS ACS M3"]["B8"].value, date)
+        self.assertIsNone(workbook["LECTURAS ACS M3"]["A8"].value)
+        self.assertEqual("=D8-F8", workbook["LECTURAS ACS M3"]["G8"].value)
+        self.assertEqual(182, workbook["LECTURAS ACS M3"]["H8"].value)
+        self.assertEqual(78, workbook["LECTURAS ACS M3"]["I9"].value)
+        self.assertEqual("=SUM(H8:I8)", workbook["LECTURAS ACS M3"]["J8"].value)
+        self.assertEqual("=H8/G8", workbook["LECTURAS ACS M3"]["L8"].value)
+        self.assertEqual("=I9/'DATOS'!$D$4", workbook["LECTURAS ACS M3"]["M9"].value)
+        self.assertEqual("=SUM(G8:G25)", workbook["LECTURAS ACS M3"]["G27"].value)
         self.assertEqual("NO TOCAR", workbook["ANALISIS"]["B2"].value)
         self.assertEqual("00D9EAF7", workbook["ANALISIS"]["B2"].fill.fgColor.rgb)
         self.assertEqual("'ANALISIS'!$A$1:$X$40", str(workbook["ANALISIS"].print_area))
@@ -354,6 +371,10 @@ class ExcelExportServiceTest(unittest.TestCase):
         workbook.close()
         with ZipFile(result.output_path) as archive:
             self.assertEqual(b"<audit>preservar</audit>", archive.read("customXml/item1.xml"))
+            with ZipFile(self.template) as template_archive:
+                self.assertEqual(
+                    template_archive.read("xl/styles.xml"), archive.read("xl/styles.xml")
+                )
 
     def test_open_issue_blocks_export_without_replacing_predecessor(self):
         self.official_output.parent.mkdir(parents=True)
@@ -553,6 +574,32 @@ class ExcelExportServiceTest(unittest.TestCase):
         workbook.close()
         from excel_profiles import load_profile
         with self.assertRaisesRegex(WorkbookValidationError, "combinadas"):
+            validate_workbook(
+                result.output_path, load_profile("658_acs_v1", self.project_root),
+                self._expected_totals(), expected_fingerprint=expected,
+            )
+
+    def test_validator_rejects_style_definition_change_without_changing_style_ids(self):
+        result = generate_official_excel(
+            self.connection, id_case=self.case_id,
+            project_root=self.project_root, output_root=self.output_root,
+            recalculator=DeterministicRecalculator(),
+        )
+        expected = workbook_fingerprint(self.template, _profile_for_community(
+            self.connection, self.project_root, "658", self.community_id
+        ))
+        with ZipFile(result.output_path, "r") as archive:
+            parts = {name: archive.read(name) for name in archive.namelist()}
+        parts["xl/styles.xml"] = parts["xl/styles.xml"].replace(
+            b"00D9EAF7", b"00FFFFFF", 1
+        )
+        altered = result.output_path.with_name("estilo-alterado.xlsx")
+        with ZipFile(altered, "w", ZIP_DEFLATED) as archive:
+            for name, content in parts.items():
+                archive.writestr(name, content)
+        altered.replace(result.output_path)
+        from excel_profiles import load_profile
+        with self.assertRaisesRegex(WorkbookValidationError, "OOXML de diseño"):
             validate_workbook(
                 result.output_path, load_profile("658_acs_v1", self.project_root),
                 self._expected_totals(), expected_fingerprint=expected,
