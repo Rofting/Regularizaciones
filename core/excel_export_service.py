@@ -408,7 +408,7 @@ def _set_cell_value(cell, value: Any) -> None:
 
 def _clear_table(sheet, table: Mapping[str, Any]) -> None:
     for row in range(int(table["start_row"]), int(table["end_row"]) + 1):
-        for column in _input_columns(table).values():
+        for column in (*_input_columns(table).values(), *_derived_columns(table).values()):
             cell = sheet[f"{column}{row}"]
             cell.value = None
 

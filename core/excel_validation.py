@@ -35,6 +35,7 @@ class WorkbookFingerprint:
     view_and_print_settings: tuple[tuple[str, str, str, str, str], ...]
     drawings: tuple[tuple[str, int, tuple[str, ...], int, tuple[str, ...]], ...]
     immutable_cells: tuple[tuple[str, str, object, int, str], ...]
+    mutable_cell_styles: tuple[tuple[str, str, tuple], ...]
     ooxml_design_parts: tuple[tuple[str, str], ...]
 
 
@@ -85,6 +86,19 @@ def _anchor_signature(anchor) -> str:
     return f"{type(anchor).__name__}:{marker(start)}:{marker(end)}"
 
 
+def _cell_style_signature(cell) -> tuple:
+    """Firma estable de la presentación efectiva, también en entradas."""
+    return (
+        cell.style_id,
+        str(cell.font),
+        str(cell.fill),
+        str(cell.border),
+        str(cell.alignment),
+        cell.number_format,
+        str(cell.protection),
+    )
+
+
 def _design_part_hashes(path: Path) -> tuple[tuple[str, str], ...]:
     prefixes = ("xl/charts/", "xl/drawings/", "xl/media/", "customXml/", "xl/theme/", "xl/printerSettings/")
     with ZipFile(path, "r") as archive:
@@ -112,6 +126,7 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
         dimensions = []
         views = []
         drawings = []
+        mutable_styles = []
         for sheet in workbook.worksheets:
             merges.append((sheet.title, tuple(sorted(str(value) for value in sheet.merged_cells.ranges))))
             dimensions.append((
@@ -128,6 +143,10 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
                 len(sheet._images),
                 tuple(_anchor_signature(image.anchor) for image in sheet._images),
             ))
+            for address in sorted(mutable.get(sheet.title, set())):
+                mutable_styles.append((
+                    sheet.title, address, _cell_style_signature(sheet[address]),
+                ))
             for cell in sheet._cells.values():
                 if cell.coordinate in mutable.get(sheet.title, set()):
                     continue
@@ -148,6 +167,7 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
             view_and_print_settings=tuple(views),
             drawings=tuple(drawings),
             immutable_cells=tuple(sorted(immutable_cells)),
+            mutable_cell_styles=tuple(sorted(mutable_styles)),
             ooxml_design_parts=_design_part_hashes(path),
         )
     finally:
@@ -298,5 +318,7 @@ def validate_workbook(
             raise WorkbookValidationError("Los gráficos, imágenes o sus anclas cambiaron")
         if actual_fingerprint.immutable_cells != expected_fingerprint.immutable_cells:
             raise WorkbookValidationError("Una celda o estilo fuera de las entradas cambió")
+        if actual_fingerprint.mutable_cell_styles != expected_fingerprint.mutable_cell_styles:
+            raise WorkbookValidationError("El estilo de una entrada o fórmula mutable cambió")
         if actual_fingerprint.ooxml_design_parts != expected_fingerprint.ooxml_design_parts:
             raise WorkbookValidationError("Las partes OOXML de diseño cambiaron")

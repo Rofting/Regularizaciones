@@ -3,6 +3,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from copy import copy
 from contextlib import redirect_stdout
 from datetime import date
 from io import StringIO
@@ -164,6 +165,10 @@ def _make_template(path: Path) -> Path:
     workbook["LECTURAS ACS M3"]["L8"] = "=H8/G8"
     workbook["LECTURAS ACS M3"]["J9"] = "=SUM(H9:I9)"
     workbook["LECTURAS ACS M3"]["M9"] = "=I9/'DATOS'!$D$4"
+    workbook["LECTURAS ACS M3"]["G15"] = 999
+    workbook["LECTURAS ACS M3"]["J15"] = "=SUM(H15:I15)"
+    workbook["LECTURAS ACS M3"]["L15"] = 999
+    workbook["LECTURAS ACS M3"]["M15"] = 999
     for column in ("G", "H", "I", "J"):
         workbook["LECTURAS ACS M3"][f"{column}27"] = f"=SUM({column}8:{column}25)"
     for sheet_name, columns, first, last in (
@@ -362,6 +367,8 @@ class ExcelExportServiceTest(unittest.TestCase):
         self.assertEqual("=H8/G8", workbook["LECTURAS ACS M3"]["L8"].value)
         self.assertEqual("=I9/'DATOS'!$D$4", workbook["LECTURAS ACS M3"]["M9"].value)
         self.assertEqual("=SUM(G8:G25)", workbook["LECTURAS ACS M3"]["G27"].value)
+        for column in ("G", "J", "L", "M"):
+            self.assertIsNone(workbook["LECTURAS ACS M3"][f"{column}15"].value)
         self.assertEqual("NO TOCAR", workbook["ANALISIS"]["B2"].value)
         self.assertEqual("00D9EAF7", workbook["ANALISIS"]["B2"].fill.fgColor.rgb)
         self.assertEqual("'ANALISIS'!$A$1:$X$40", str(workbook["ANALISIS"].print_area))
@@ -600,6 +607,26 @@ class ExcelExportServiceTest(unittest.TestCase):
         altered.replace(result.output_path)
         from excel_profiles import load_profile
         with self.assertRaisesRegex(WorkbookValidationError, "OOXML de diseño"):
+            validate_workbook(
+                result.output_path, load_profile("658_acs_v1", self.project_root),
+                self._expected_totals(), expected_fingerprint=expected,
+            )
+
+    def test_validator_rejects_style_change_inside_mutable_input_cell(self):
+        result = generate_official_excel(
+            self.connection, id_case=self.case_id,
+            project_root=self.project_root, output_root=self.output_root,
+            recalculator=DeterministicRecalculator(),
+        )
+        expected = workbook_fingerprint(self.template, _profile_for_community(
+            self.connection, self.project_root, "658", self.community_id
+        ))
+        workbook = load_workbook(result.output_path)
+        workbook["LECTURAS ACS M3"]["B8"]._style = copy(workbook["ANALISIS"]["B2"]._style)
+        workbook.save(result.output_path)
+        workbook.close()
+        from excel_profiles import load_profile
+        with self.assertRaisesRegex(WorkbookValidationError, "estilo de una entrada"):
             validate_workbook(
                 result.output_path, load_profile("658_acs_v1", self.project_root),
                 self._expected_totals(), expected_fingerprint=expected,
