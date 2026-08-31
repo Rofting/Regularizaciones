@@ -249,6 +249,61 @@ class CaseLetterServiceTest(unittest.TestCase):
             ).fetchone()[0],
         )
 
+    def test_failed_write_removes_partial_destination_and_temporary_file(self):
+        from case_letter_service import generate_case_letters
+
+        def write_partial_then_fail(datos, ruta_plantilla, ruta_salida):
+            Path(ruta_salida).write_bytes(b"DOCUMENTO-PARCIAL")
+            if datos["vecino"]["nombre"] == "Bruno Vecino":
+                raise OSError("fallo tras escribir el documento")
+            return str(ruta_salida)
+
+        with patch("case_letter_service.generar_carta", side_effect=write_partial_then_fail):
+            result = generate_case_letters(
+                self.database_path, id_case=self.case_id, project_root=self.root
+            )
+
+        failed = next(row for row in self._run_rows(result.id_letter_run) if row["status"] == "failed")
+        self.assertIsNone(failed["output_path"])
+        self.assertFalse((result.output_path / "CARTA_B-2_BRUNO_VECINO.docx").exists())
+        self.assertEqual([], list(result.output_path.glob("*.tmp")))
+
+    def test_completed_identical_run_is_reused_without_writing_or_auditing_again(self):
+        from case_letter_service import generate_case_letters
+
+        first = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root
+        )
+        before_runs = self.connection.execute("SELECT COUNT(*) FROM letter_generation_runs").fetchone()[0]
+        before_letters = self.connection.execute("SELECT COUNT(*) FROM generated_letters").fetchone()[0]
+
+        with patch("case_letter_service.generar_carta", side_effect=AssertionError("no debe reescribir")):
+            second = generate_case_letters(
+                self.database_path, id_case=self.case_id, project_root=self.root
+            )
+
+        self.assertEqual(first.id_letter_run, second.id_letter_run)
+        self.assertEqual(first.output_path, second.output_path)
+        self.assertEqual(first.generated_count, second.generated_count)
+        self.assertEqual((), second.failures)
+        self.assertEqual(before_runs, self.connection.execute("SELECT COUNT(*) FROM letter_generation_runs").fetchone()[0])
+        self.assertEqual(before_letters, self.connection.execute("SELECT COUNT(*) FROM generated_letters").fetchone()[0])
+
+    def test_missing_file_prevents_reuse_and_starts_new_batch(self):
+        from case_letter_service import generate_case_letters
+
+        first = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root
+        )
+        next(first.output_path.glob("*.docx")).unlink()
+
+        second = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root
+        )
+
+        self.assertNotEqual(first.id_letter_run, second.id_letter_run)
+        self.assertEqual(2, second.generated_count)
+
 
 if __name__ == "__main__":
     unittest.main()

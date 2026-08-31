@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -260,6 +262,72 @@ def _write_run_status(
     connection.commit()
 
 
+def _is_safe_generated_path(raw_path: object, output_directory: Path) -> bool:
+    """Acepta únicamente archivos existentes bajo el directorio de esta salida."""
+    if not raw_path:
+        return False
+    root = output_directory.resolve()
+    candidate = Path(str(raw_path)).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return candidate.is_file()
+
+
+def _reusable_completed_run(
+    connection: sqlite3.Connection,
+    *,
+    case: sqlite3.Row,
+    export: sqlite3.Row,
+    input_hash: str,
+    template_hash: str,
+    output_directory: Path,
+    expected_owner_ids: set[int],
+) -> LetterBatchResult | None:
+    """Devuelve sólo un lote completo cuya auditoría y archivos siguen íntegros."""
+    runs = connection.execute(
+        """SELECT id_letter_run,output_path FROM letter_generation_runs
+           WHERE id_case=? AND id_periodo=? AND id_export_run=?
+             AND input_sha256=? AND template_sha256=? AND status='completed'
+           ORDER BY completed_at DESC,id_letter_run DESC""",
+        (
+            case["id_case"], case["id_periodo"], export["id_export_run"],
+            input_hash, template_hash,
+        ),
+    ).fetchall()
+    expected_directory = output_directory.resolve()
+    for run in runs:
+        try:
+            if Path(run["output_path"]).resolve() != expected_directory:
+                continue
+        except (OSError, TypeError):
+            continue
+        rows = connection.execute(
+            """SELECT id_propietario,status,output_path FROM generated_letters
+               WHERE id_letter_run=? ORDER BY id_propietario""",
+            (run["id_letter_run"],),
+        ).fetchall()
+        if {int(row["id_propietario"]) for row in rows} != expected_owner_ids:
+            continue
+        if len(rows) != len(expected_owner_ids):
+            continue
+        if all(
+            row["status"] == "generated"
+            and _is_safe_generated_path(row["output_path"], expected_directory)
+            for row in rows
+        ):
+            return LetterBatchResult(
+                int(run["id_letter_run"]), output_directory, len(rows), ()
+            )
+    return None
+
+
+def _temporary_destination(destination: Path) -> Path:
+    """Reserva un nombre hermano no visible como carta final."""
+    return destination.with_name(f".{destination.stem}.{uuid.uuid4().hex}.tmp")
+
+
 def generate_case_letters(
     database_path: str | Path,
     *,
@@ -298,6 +366,19 @@ def generate_case_letters(
             })
         graphs = _consumption_graphs(connection, case, list(owner_data.values()))
 
+        reusable = _reusable_completed_run(
+            connection,
+            case=case,
+            export=export,
+            input_hash=input_hash,
+            template_hash=template_hash,
+            output_directory=output_path,
+            expected_owner_ids=set(by_owner),
+        )
+        if reusable is not None:
+            _emit(progress, "reused", id_letter_run=reusable.id_letter_run)
+            return reusable
+
         _emit(progress, "prepare_output", output_path=str(output_path))
         output_path.mkdir(parents=True, exist_ok=True)
         cursor = connection.execute(
@@ -333,6 +414,7 @@ def generate_case_letters(
                 _safe_file_part(owner["nombre"], fallback=f"P{owner_id}"),
             )
             destination = output_path / filename
+            temporary_destination = _temporary_destination(destination)
             generated_row = connection.execute(
                 """INSERT INTO generated_letters
                    (id_letter_run,id_propietario,input_sha256,template_sha256,status)
@@ -353,7 +435,8 @@ def generate_case_letters(
                 },
             }
             try:
-                generar_carta(letter_data, str(template), str(destination))
+                generar_carta(letter_data, str(template), str(temporary_destination))
+                os.replace(temporary_destination, destination)
                 connection.execute(
                     """UPDATE generated_letters SET status='generated',output_path=?,error_message=NULL,
                            updated_at=datetime('now') WHERE id_generated_letter=?""",
@@ -362,6 +445,10 @@ def generate_case_letters(
                 connection.commit()
                 generated += 1
             except Exception as error:
+                try:
+                    temporary_destination.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 message = f"{owner['nombre']}: {type(error).__name__}: {error}"
                 failures.append(message)
                 connection.execute(
