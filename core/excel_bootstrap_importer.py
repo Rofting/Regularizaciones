@@ -24,6 +24,7 @@ from typing import Any, Iterable
 import xlrd
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import column_index_from_string
 
 from document_review import create_review_issue
 from excel_profiles import ExcelProfile
@@ -581,6 +582,62 @@ def _is_invoice_summary(value: Any) -> bool:
     return label.startswith("SUMA") or label.startswith("TOTAL") or label.startswith("SUBTOTAL")
 
 
+def _layout_invoice_columns(profile: ExcelProfile, service: str) -> tuple[int, int, dict[str, Any]] | None:
+    """Convierte una tabla declarada del perfil en el contrato del importador.
+
+    Las tablas de libro maestro no deben depender de rótulos de Office: éstos
+    cambian con facilidad entre versiones, mientras que el perfil versionado
+    describe las celdas que el despacho ha validado para esa comunidad.
+    """
+    table = profile.workbook_layout.get("tables", {}).get(service)
+    if not table:
+        return None
+    inputs = table.get("input_columns", table.get("columns", {}))
+    derived = table.get("derived_columns", {})
+
+    def column(key: str) -> int | None:
+        letter = inputs.get(key, derived.get(key))
+        return column_index_from_string(str(letter)) if letter else None
+
+    columns: dict[str, Any] = {
+        "date": column("invoice_date"),
+        "start": column("start_date"),
+        "end": column("end_date"),
+        "consumption": tuple(item for item in (column("consumption"),) if item is not None),
+        "fixed": column("fixed"),
+        "variable": column("variable"),
+        "total": column("total"),
+        "notes": column("provider"),
+    }
+    required = ("date", "start", "end", "fixed", "variable", "total")
+    if any(columns[key] is None for key in required) or not columns["consumption"]:
+        raise ValueError(f"El perfil no declara todas las columnas de factura de {service}")
+    return int(table["start_row"]), int(table["end_row"]), columns
+
+
+def _layout_has_declared_rows(sheet, layout: tuple[int, int, dict[str, Any]]) -> bool:
+    """Distingue una tabla declarada de una plantilla heredada de pruebas.
+
+    Una coincidencia de cabeceras antiguas no debe desplazar una tabla real que
+    el perfil ya conoce. En cambio, mientras haya una hoja con el formato
+    genérico completo, se mantiene la compatibilidad de perfiles anteriores.
+    """
+    start_row, end_row, columns = layout
+    for row in range(start_row, end_row + 1):
+        date_column = columns["date"]
+        start_column = columns["start"]
+        fixed_column = columns["fixed"]
+        variable_column = columns["variable"]
+        if (
+            _cell_has_value(sheet.cell(row, int(date_column)))
+            and _cell_has_value(sheet.cell(row, int(start_column)))
+            and _cell_has_value(sheet.cell(row, int(fixed_column)))
+            and _cell_has_value(sheet.cell(row, int(variable_column)))
+        ):
+            return True
+    return False
+
+
 def _parse_invoice_sheets(
     connection: sqlite3.Connection,
     *,
@@ -592,22 +649,32 @@ def _parse_invoice_sheets(
     period_id: int,
     case,
     archived_path: str,
+    profile: ExcelProfile | None = None,
 ) -> int:
     inserted = 0
     for sheet_name, schema in _INVOICE_SCHEMAS.items():
         if sheet_name not in workbook.sheetnames:
             continue
         sheet = workbook[sheet_name]
+        layout = _layout_invoice_columns(profile, sheet_name) if profile else None
         found = _find_invoice_header(sheet, schema)
-        if found is None:
-            _issue(
-                connection, id_case=id_case, id_document=id_document,
-                code="UNRECOGNIZED_HEADER", field_name=f"{sheet_name}.headers",
-                message=f"No se reconocen las cabeceras de {sheet_name}",
-            )
-            continue
-        header_row, columns = found
-        for row in range(header_row + 1, sheet.max_row + 1):
+        if layout is None or not _layout_has_declared_rows(sheet, layout):
+            if found is None:
+                _issue(
+                    connection, id_case=id_case, id_document=id_document,
+                    code="UNRECOGNIZED_HEADER", field_name=f"{sheet_name}.headers",
+                    message=f"No se reconocen las cabeceras de {sheet_name}",
+                )
+                continue
+            header_row, columns = found
+            data_rows = range(header_row + 1, sheet.max_row + 1)
+        else:
+            start_row, end_row, columns = layout
+            # En los perfiles vigentes la cabecera inmediatamente superior a
+            # la etiqueta de ejercicio conserva la unidad del consumo.
+            header_row = max(1, start_row - 2)
+            data_rows = range(start_row, end_row + 1)
+        for row in data_rows:
             date_cell = sheet.cell(row, int(columns["date"]))
             start_cell = sheet.cell(row, int(columns["start"])) if columns["start"] else None
             end_cell = sheet.cell(row, int(columns["end"])) if columns["end"] else None
@@ -745,12 +812,10 @@ def _parse_invoice_sheets(
                     start_date.isoformat() if start_date else None,
                     end_date.isoformat() if end_date else None,
                     consumption or 0.0,
-                    (
-                        "m3"
-                        if consumption_cell is not None
+                    "m3" if (
+                        consumption_cell is not None
                         and _header(sheet.cell(header_row, consumption_cell.column).value) == "M3"
-                        else "kWh"
-                    ),
+                    ) else "kWh",
                     fixed or 0.0, variable or 0.0, total,
                     str(archived_path), provider,
                 ),
@@ -834,17 +899,15 @@ def _parse_reference_parameters(
     community_id: int,
     period_id: int,
     case,
-) -> None:
+) -> bool:
     try:
         reference = parse_reference_workbook(path)
     except (ReferenceValidationError, ValueError, TypeError) as error:
-        _issue(
-            connection, id_case=id_case, id_document=id_document,
-            code="UNRECOGNIZED_HEADER", field_name="ANALISIS.reference",
-            message="No se puede interpretar el bloque económico del análisis",
-            detected_value=error,
-        )
-        return
+        # El llamador puede continuar con parameter_cells, que es la fuente
+        # declarada y versionada del mismo libro. No se abre una incidencia
+        # por un rótulo libre cuando la celda económica es inequívoca.
+        del error
+        return False
     if reference.start_date != case.start_date or reference.end_date != case.end_date:
         _issue(
             connection, id_case=id_case, id_document=id_document,
@@ -882,6 +945,70 @@ def _parse_reference_parameters(
         for source in reference.source_values
     )
     _store_sources(connection, id_batch, sources)
+    return True
+
+
+def _parse_profile_parameters(
+    connection: sqlite3.Connection,
+    *,
+    values_workbook,
+    formula_workbook,
+    profile: ExcelProfile,
+    id_case: int,
+    id_document: int,
+    id_batch: int,
+    community_id: int,
+    period_id: int,
+) -> None:
+    """Importa importes económicos desde parameter_cells con trazabilidad doble.
+
+    ``data_only`` conserva el resultado que se usará en reparto; el libro con
+    fórmulas conserva la expresión o valor originalmente declarado. Ambos se
+    registran aunque sean idénticos, pues su procedencia no lo es.
+    """
+    parameter_cells = profile.workbook_layout.get("parameter_cells", {})
+    for key, binding in parameter_cells.items():
+        if not isinstance(binding, (tuple, list)) or len(binding) != 2:
+            raise ValueError(f"La celda de parámetro {key} no es válida en el perfil")
+        sheet_name, address = (str(binding[0]), str(binding[1]))
+        if sheet_name not in values_workbook.sheetnames or sheet_name not in formula_workbook.sheetnames:
+            _issue(
+                connection, id_case=id_case, id_document=id_document,
+                code="MISSING_SHEET", field_name=f"parameter.{key}",
+                message="Falta la hoja declarada para un parámetro económico",
+            )
+            continue
+        value_cell = values_workbook[sheet_name][address]
+        formula_cell = formula_workbook[sheet_name][address]
+        value = _number(value_cell.value)
+        if value is None:
+            missing = not _cell_has_value(value_cell) and not _cell_has_value(formula_cell)
+            _issue(
+                connection, id_case=id_case, id_document=id_document,
+                code="MISSING_REQUIRED_FIELD" if missing else "UNRECOGNIZED_VALUE",
+                field_name=f"parameter.{key}",
+                message=(
+                    "Falta el parámetro económico declarado en el perfil"
+                    if missing else "El parámetro económico declarado no tiene valor numérico"
+                ),
+                detected_value=value_cell.value if _cell_has_value(value_cell) else formula_cell.value,
+            )
+            continue
+        _store_parameter(
+            connection, community_id=community_id, period_id=period_id,
+            key=str(key), value=value, unit="EUR", source_sheet=sheet_name,
+            source_cell=address,
+        )
+        _store_sources(connection, id_batch, (
+            _Source(
+                "period_parameter", str(key), f"parameter:{key}:value",
+                sheet_name, address, value_cell.value, value,
+            ),
+            _Source(
+                "period_parameter", str(key), f"parameter:{key}:formula",
+                sheet_name, address, formula_cell.value, formula_cell.value,
+            ),
+        ))
 
 
 def _validate_reused_master_period(
@@ -1076,13 +1203,19 @@ def import_master_excel(
             connection, workbook=values_book, id_case=id_case,
             id_document=document.id_document, id_batch=batch_id,
             community_id=case.community_id, period_id=period_id, case=case,
-            archived_path=document.archived_path,
+            archived_path=document.archived_path, profile=profile,
         )
-        _parse_reference_parameters(
+        parsed_reference = _parse_reference_parameters(
             connection, path=archived_path, id_case=id_case,
             id_document=document.id_document, id_batch=batch_id,
             community_id=case.community_id, period_id=period_id, case=case,
         )
+        if not parsed_reference:
+            _parse_profile_parameters(
+                connection, values_workbook=values_book, formula_workbook=formula_book,
+                profile=profile, id_case=id_case, id_document=document.id_document,
+                id_batch=batch_id, community_id=case.community_id, period_id=period_id,
+            )
         _parse_other_expenses(
             connection, workbook=values_book, id_batch=batch_id,
             community_id=case.community_id, period_id=period_id,
@@ -1256,6 +1389,10 @@ _MONTH_NUMBERS = {
 }
 
 
+def _previous_month(year: int, month: int) -> tuple[int, int]:
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
 def _period_header_date(value: Any) -> tuple[int, int] | None:
     text = _clean(value).lower()
     numeric = re.fullmatch(r"(\d{1,2})/(\d{2,4})", text)
@@ -1355,20 +1492,33 @@ def _import_reading_source(
         }
         inserted = 0
         if period_columns:
-            initial_column = next(
-                (
+            initial_matches = [
+                column for column, header_date in dated_columns
+                if header_date == (case.start_date.year, case.start_date.month)
+            ]
+            final_matches = [
+                column for column, header_date in dated_columns
+                if header_date == (case.end_date.year, case.end_date.month)
+            ]
+            initial_column = initial_matches[0] if len(initial_matches) == 1 else None
+            final_column = final_matches[0] if len(final_matches) == 1 else None
+            used_previous_month = False
+            if (
+                initial_column is None
+                and not initial_matches
+                and case.start_date.day == 1
+                and final_column is not None
+            ):
+                expected_previous = _previous_month(
+                    case.start_date.year, case.start_date.month
+                )
+                previous_matches = [
                     column for column, header_date in dated_columns
-                    if header_date == (case.start_date.year, case.start_date.month)
-                ),
-                None,
-            )
-            final_column = next(
-                (
-                    column for column, header_date in dated_columns
-                    if header_date == (case.end_date.year, case.end_date.month)
-                ),
-                None,
-            )
+                    if header_date == expected_previous
+                ]
+                if len(previous_matches) == 1:
+                    initial_column = previous_matches[0]
+                    used_previous_month = True
             if initial_column is None or final_column is None:
                 code = (
                     "INCOMPATIBLE_DATE"
@@ -1381,6 +1531,15 @@ def _import_reading_source(
                     message="Las columnas de lectura no corresponden al rango del expediente",
                     detected_value=", ".join(str(row[column]) for column in period_columns),
                 )
+            elif used_previous_month:
+                header_address = f"{get_column_letter(initial_column + 1)}{header_row + 1}"
+                _store_sources(connection, batch_id, (
+                    _Source(
+                        "reading_header", f"{service}:initial_period_base",
+                        "initial_period_base", sheet_name, header_address,
+                        rows[header_row][initial_column], case.start_date,
+                    ),
+                ))
         if period_columns and initial_column is not None and final_column is not None:
             for row_number, row in enumerate(rows[header_row + 1:], start=header_row + 2):
                 property_code = _clean(row[property_column] if property_column < len(row) else None)

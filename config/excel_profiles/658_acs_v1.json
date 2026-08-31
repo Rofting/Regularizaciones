@@ -34,7 +34,7 @@
         "start_row": 10,
         "end_row": 30,
         "input_columns": {
-          "invoice_date": "B", "end_date": "D", "consumption": "J",
+          "invoice_date": "B", "end_date": "D", "start_date": "G", "consumption": "J",
           "fixed": "K", "variable": "L", "provider": "O"
         },
         "derived_columns": {"total": "M"}
@@ -55,7 +55,7 @@
         "start_row": 10,
         "end_row": 21,
         "input_columns": {
-          "invoice_date": "B", "end_date": "D", "consumption": "I",
+          "invoice_date": "B", "end_date": "D", "start_date": "F", "consumption": "I",
           "variable": "T", "fixed": "U"
         },
         "derived_columns": {"total": "R"}

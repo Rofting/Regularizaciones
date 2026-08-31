@@ -140,6 +140,50 @@ def _make_master(path: Path, *, missing_water_fixed: bool = False) -> Path:
     return path
 
 
+def _make_profile_layout_master(path: Path) -> Path:
+    """Libro saneado que usa únicamente las coordenadas del perfil declarativo.
+
+    Las cabeceras deliberadamente no son alias del importador heredado: si la
+    prueba pasa, la importación ha seguido el ``workbook_layout`` y no ha
+    vuelto a depender de una etiqueta concreta.
+    """
+    workbook_path = _make_master(path)
+    workbook = load_workbook(workbook_path)
+
+    gas = workbook["GAS"]
+    for cell, value in {
+        "B8": "Fecha documento", "D8": "Cierre suministro",
+        "G8": "Inicio suministro", "J8": "Consumo declarado",
+        "K8": "Cargo estable", "L8": "Cargo uso",
+        "M8": "Importe TOTAL con IVA", "O8": "Emisor",
+        "B10": date(2025, 10, 5), "D10": date(2025, 9, 30),
+        "G10": date(2025, 9, 1), "J10": 110,
+        "K10": 20, "L10": 80, "M10": 100, "O10": "Gas sintético",
+    }.items():
+        gas[cell] = value
+
+    electricity = workbook["ELECTRICIDAD"]
+    electricity["H8"] = "Importe TOTAL con IVA"
+
+    water = workbook["AGUA"]
+    for cell, value in {
+        "B12": "Fecha documento", "D12": "Cierre suministro",
+        "F12": "Inicio suministro", "I12": "Consumo declarado",
+        "R12": "Importe TOTAL con IVA", "T12": "Cargo uso",
+        "U12": "Cargo estable", "B14": date(2025, 10, 9),
+        "D14": date(2025, 9, 30), "F14": date(2025, 9, 1),
+        "I14": 15, "R14": 60, "T14": 40, "U14": 20,
+    }.items():
+        water[cell] = value
+
+    # Fuerza el uso de parameter_cells; el análisis por rótulos no debe ser
+    # condición para conservar los importes económicos declarados en perfil.
+    workbook["ANALISIS"]["G54"] = "BLOQUE ECONOMICO NO ETIQUETADO"
+    workbook["ANALISIS"]["H64"] = 0
+    workbook.save(workbook_path)
+    return workbook_path
+
+
 def _append_gas_invoice(source: Path, target: Path) -> Path:
     workbook = load_workbook(source)
     gas = workbook["GAS"]
@@ -271,6 +315,42 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
         self.assertTrue(Path(document["archived_path"]).is_file())
         self.assertNotEqual(workbook.resolve(), Path(document["archived_path"]).resolve())
         self.assertEqual(64, len(document["sha256"]))
+
+    def test_profile_layout_imports_descriptive_headers_endpoints_and_parameters(self):
+        workbook = _make_profile_layout_master(self.root / "modelo_por_perfil.xlsx")
+
+        result = import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=workbook, profile=self.profile, actor="Prueba",
+        )
+
+        self.assertEqual(3, result.imported_invoice_count)
+        endpoints = {
+            row["tipo_suministro"]: (row["fecha_inicio"], row["fecha_fin"])
+            for row in self.connection.execute(
+                "SELECT tipo_suministro,fecha_inicio,fecha_fin FROM facturas"
+            )
+        }
+        self.assertEqual(("2025-09-01", "2025-09-30"), endpoints["GAS"])
+        self.assertEqual(("2025-09-01", "2025-09-30"), endpoints["AGUA"])
+        parameter_values = {
+            row["parameter_key"]: row["numeric_value"]
+            for row in self.connection.execute(
+                "SELECT parameter_key,numeric_value FROM period_parameters"
+            )
+        }
+        self.assertEqual(0, parameter_values["acs_fixed_actual"])
+        self.assertEqual(168, parameter_values["acs_variable_billed"])
+        sources = self.connection.execute(
+            """SELECT COUNT(*) FROM source_values
+               WHERE entity_type='period_parameter'
+                 AND field_name LIKE 'parameter:%'"""
+        ).fetchone()[0]
+        self.assertEqual(8, sources)
+        self.assertEqual(0, self.connection.execute(
+            """SELECT COUNT(*) FROM review_issues
+               WHERE code='UNRECOGNIZED_HEADER' AND field_name='ANALISIS.reference'"""
+        ).fetchone()[0])
 
     def test_bootstrap_installs_verified_private_template_and_registers_it(self):
         project = self.root / "proyecto_portable"
@@ -587,6 +667,30 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
             """SELECT COUNT(*) FROM review_issues
                WHERE code='INCOMPATIBLE_DATE' AND status='open'"""
         ).fetchone()[0])
+
+    def test_previous_month_header_is_accepted_only_as_initial_period_reading(self):
+        owners = _make_owners(self.root / "propietarios_previos.csv")
+        readings = _make_readings(
+            self.root / "lecturas_mes_anterior.xlsx", initial_header="08/2025"
+        )
+
+        result = import_companion_sources(
+            self.connection, id_case=self.case.id_case,
+            owner_list_path=owners, readings_path=readings,
+            profile=self.profile, actor="Prueba",
+        )
+
+        self.assertEqual(4, result.imported_reading_count)
+        self.assertEqual(0, self.connection.execute(
+            """SELECT COUNT(*) FROM review_issues
+               WHERE code IN ('INCOMPATIBLE_DATE','MISSING_READING_RANGE')"""
+        ).fetchone()[0])
+        initial_sources = self.connection.execute(
+            """SELECT cell_address FROM source_values
+               WHERE entity_type='reading' AND field_name='initial'
+               ORDER BY id_source_value"""
+        ).fetchall()
+        self.assertEqual(["C2", "C3"], [row["cell_address"] for row in initial_sources])
 
     def test_missing_invoice_values_are_not_replaced_with_zero(self):
         workbook_path = _make_master(self.root / "factura_incompleta.xlsx")
