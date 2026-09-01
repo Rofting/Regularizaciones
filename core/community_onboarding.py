@@ -17,7 +17,11 @@ from openpyxl import load_workbook
 import excel_generator
 import expedient_service
 import gestor_bd
-from excel_profiles import MODULE_REQUIRED_SHEETS, validate_profile_payload
+from excel_profiles import (
+    MODULE_REQUIRED_SHEETS,
+    runtime_profile_path,
+    validate_profile_payload,
+)
 from lector_pdf import extraer_texto
 
 
@@ -126,7 +130,7 @@ def confirm_onboarding(
     payload = build_profile_payload(draft, answers)
     _verify_source_fingerprints(draft.sources)
     key = str(payload["key"])
-    profile_path = root / "config" / "excel_profiles" / f"{key}.json"
+    profile_path = runtime_profile_path(key, root)
     template_path = root / str(payload["template_relative_path"])
     if profile_path.exists():
         raise FileExistsError(f"Ya existe el perfil {profile_path}")
@@ -213,6 +217,7 @@ def confirm_onboarding(
             period_id = expedient_service.link_case_to_period(connection, case_id)
             period_created = period_id not in period_ids_before
             for source in draft.sources:
+                document_ids_before = _source_document_ids(connection, case_id)
                 try:
                     document, created = expedient_service.register_source_document(
                         connection,
@@ -222,10 +227,9 @@ def confirm_onboarding(
                         document_kind=source.kind,
                     )
                 except Exception:
-                    recovered = _registered_source_row(
-                        connection, case_id, source.sha256
-                    )
-                    if recovered is not None and int(recovered[0]) not in document_ids:
+                    for recovered in _new_source_document_rows(
+                        connection, case_id, document_ids_before
+                    ):
                         document_ids.append(int(recovered[0]))
                         archived_paths.append(Path(recovered[1]))
                     raise
@@ -334,14 +338,27 @@ def _publish_exclusive(source: Path, destination: Path) -> None:
     os.link(source, destination)
 
 
-def _registered_source_row(
-    connection: sqlite3.Connection, case_id: int, sha256: str
+def _source_document_ids(
+    connection: sqlite3.Connection, case_id: int
+) -> frozenset[int]:
+    return frozenset(
+        int(row[0]) for row in connection.execute(
+            "SELECT id_document FROM source_documents WHERE id_case=?", (case_id,)
+        )
+    )
+
+
+def _new_source_document_rows(
+    connection: sqlite3.Connection, case_id: int, ids_before: frozenset[int]
 ):
-    return connection.execute(
-        """SELECT id_document, archived_path FROM source_documents
-           WHERE id_case=? AND sha256=?""",
-        (case_id, sha256),
-    ).fetchone()
+    return tuple(
+        row for row in connection.execute(
+            """SELECT id_document, archived_path FROM source_documents
+               WHERE id_case=?""",
+            (case_id,),
+        )
+        if int(row[0]) not in ids_before
+    )
 
 
 def _remove_empty_parents(directory: Path, boundary: Path) -> None:

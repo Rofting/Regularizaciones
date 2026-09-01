@@ -18,7 +18,12 @@ import document_review
 import excel_bootstrap_importer
 import excel_export_service
 import expedient_service
-from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
+from excel_profiles import (
+    ExcelProfile,
+    calculate_profile_sha256,
+    configured_profile_paths,
+    load_profile,
+)
 
 
 class WorkflowBlockedError(ValueError):
@@ -68,19 +73,17 @@ def resolve_case_profile(
     row = rows[0]
     if not row["profile_key"]:
         root = Path(project_root)
-        directory = root / "config" / "excel_profiles"
         candidates: list[ExcelProfile] = []
-        if directory.is_dir():
-            for path in sorted(directory.glob("*.json")):
-                try:
-                    configured = load_profile(path.stem, root)
-                except (LookupError, ValueError):
-                    continue
-                if (
-                    configured.community_code == str(row["codigo"])
-                    and configured.workbook_layout
-                ):
-                    candidates.append(configured)
+        for path in configured_profile_paths(root):
+            try:
+                configured = load_profile(path.stem, root)
+            except (LookupError, ValueError):
+                continue
+            if (
+                configured.community_code == str(row["codigo"])
+                and configured.workbook_layout
+            ):
+                candidates.append(configured)
         if not candidates:
             raise WorkflowBlockedError(
                 "No hay un perfil Excel de configuración compatible para esta comunidad"

@@ -7,7 +7,8 @@ exige fechas completas o ninguna, verifica que las fuentes no hayan cambiado
 desde el análisis, genera y valida perfil y plantilla antes de persistir la
 comunidad, y crea período/expediente mediante los servicios existentes.
 
-El JSON se escribe primero en un temporal hermano, se vuelve a leer y se
+El JSON runtime se instala en `config/excel_profiles/runtime/`, se escribe
+primero en un temporal hermano, se vuelve a leer y se
 valida antes de publicarlo. Perfil y plantilla se publican mediante creación
 atómica exclusiva: un destino aparecido concurrentemente provoca conflicto y
 nunca se sustituye. La plantilla canónica se genera desde
@@ -22,6 +23,11 @@ plantilla, temporales y directorios locales vacíos creados por el alta. No se
 borra recursivamente el expediente: una ruta se elimina sólo si procede de una
 fila registrada por la fuente en curso.
 
+Si la fuente cambia después de la verificación inicial, cada registro toma una
+instantánea de IDs del expediente. Un error posterior recupera las filas nuevas
+por `id_case` y diferencia de IDs, por lo que limpia la ruta y el SHA realmente
+registrados sin depender del SHA anterior del borrador.
+
 ## TDD
 
 - RED inicial: 3 errores esperados por ausencia de `confirm_onboarding`.
@@ -35,20 +41,28 @@ fila registrada por la fuente en curso.
   `os.replace`; ambos sentinels sobreviven ahora al conflicto exclusivo.
 - RED de rollback selectivo: un sentinel ajeno dentro del archivo del
   expediente era eliminado por `rmtree`; ahora sobrevive intacto.
-- GREEN final focal: 23 pruebas de onboarding y expediente correctas.
+- RED de fuente intercalada: cambiar los bytes entre la verificación y
+  `register_source_document` dejaba el archivo del SHA nuevo; ahora no quedan
+  filas ni archivos propios.
+- RED de perfiles runtime generales: el patrón Git sólo cubría tres dígitos;
+  el subdirectorio runtime admite cualquier código validado y mantiene la
+  carga, resolución del expediente y selección del exportador.
+- GREEN final focal ampliado: 60 pruebas de los consumidores modificados.
 
 ## Privacidad y alcance
 
 Las pruebas crean únicamente comunidad 900 y fuentes sintéticas temporales.
 No se han leído fuentes reales ni modificado el perfil o flujo de 658. El
-`.gitignore` ignora sólo la forma runtime de tres dígitos `<NNN>_v1.json`;
-perfiles públicos descriptivos como `658_acs_v1.json` y nuevas variantes no
-coinciden con el patrón.
+`.gitignore` ignora únicamente `config/excel_profiles/runtime/`, de modo que
+perfiles runtime de códigos como `1234` o `ABC` quedan locales y cualquier
+perfil público colocado en `config/excel_profiles/` sigue visible para Git.
+`load_profile` prioriza el perfil público y usa runtime como fallback, sin
+cambiar la clave `<codigo>_v1`.
 
 ## Verificación
 
-- Focales: 23 pruebas correctas.
-- Suite completa: 171 pruebas correctas.
+- Focales ampliadas: 60 pruebas correctas.
+- Suite completa: 172 pruebas correctas.
 - Compilación: `python -m compileall -q core tests` correcta.
 - `git diff --check`: correcto.
 

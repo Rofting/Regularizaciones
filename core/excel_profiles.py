@@ -295,11 +295,43 @@ def validate_profile_payload(payload: Mapping[str, Any], project_root: Path) -> 
     )
 
 
+def runtime_profile_path(profile_key: str, project_root: Path) -> Path:
+    """Return the ignored local path reserved for onboarding runtime profiles."""
+    if not profile_key or Path(profile_key).name != profile_key:
+        raise ValueError("Clave de perfil no válida")
+    return (
+        Path(project_root) / "config" / "excel_profiles" / "runtime"
+        / f"{profile_key}.json"
+    )
+
+
+def configured_profile_paths(project_root: Path) -> tuple[Path, ...]:
+    """List public profiles plus non-shadowed local runtime profiles."""
+    directory = Path(project_root) / "config" / "excel_profiles"
+    public = sorted(directory.glob("*.json"))
+    public_keys = {path.stem for path in public}
+    runtime = [
+        path for path in sorted((directory / "runtime").glob("*.json"))
+        if path.stem not in public_keys
+    ]
+    return tuple((*public, *runtime))
+
+
+def _profile_source_path(profile_key: str, project_root: Path) -> Path:
+    public = Path(project_root) / "config" / "excel_profiles" / f"{profile_key}.json"
+    if public.is_file():
+        return public
+    runtime = runtime_profile_path(profile_key, project_root)
+    if runtime.is_file():
+        return runtime
+    return public
+
+
 def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
     """Carga y valida un perfil versionado sin salir del directorio de configuración."""
     if not profile_key or Path(profile_key).name != profile_key:
         raise ValueError("Clave de perfil no válida")
-    path = Path(project_root) / "config" / "excel_profiles" / f"{profile_key}.json"
+    path = _profile_source_path(profile_key, project_root)
     try:
         source_bytes = path.read_bytes()
         data = json.loads(source_bytes.decode("utf-8"))
@@ -328,7 +360,7 @@ def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
 
 def calculate_profile_sha256(profile: ExcelProfile, project_root: Path) -> str:
     """Calcula la huella actual de los bytes del JSON que define el perfil."""
-    path = Path(project_root).resolve() / "config" / "excel_profiles" / f"{profile.key}.json"
+    path = _profile_source_path(profile.key, Path(project_root).resolve())
     if path.is_file():
         return hashlib.sha256(path.read_bytes()).hexdigest()
     if profile.source_sha256:

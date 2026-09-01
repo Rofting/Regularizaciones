@@ -17,7 +17,12 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import load_workbook
 
-from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
+from excel_profiles import (
+    ExcelProfile,
+    calculate_profile_sha256,
+    configured_profile_paths,
+    load_profile,
+)
 from excel_validation import validate_workbook, workbook_fingerprint
 from office_recalculation import LibreOfficeRecalculator, WorkbookRecalculator
 
@@ -105,9 +110,8 @@ def _profile_for_community(
             raise ExportBlockedError("El perfil activo no corresponde a la comunidad")
         return profile
 
-    config_directory = project_root / "config" / "excel_profiles"
     matches: list[ExcelProfile] = []
-    for path in sorted(config_directory.glob("*.json")):
+    for path in configured_profile_paths(project_root):
         try:
             profile = load_profile(path.stem, project_root)
         except (LookupError, ValueError):

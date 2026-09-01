@@ -19,7 +19,9 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import community_onboarding
+import case_workflow_actions
 import expedient_service
+import excel_profiles
 import gestor_bd
 
 
@@ -165,7 +167,7 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.assertEqual(("owner_list", "meter_reading_excel", "invoice_pdf"),
                          tuple(item.kind for item in draft.sources))
         self.assertEqual(0, self._row_count())
-        self.assertFalse((self.project_root / "config/excel_profiles/900_v1.json").exists())
+        self.assertFalse((self.project_root / "config/excel_profiles/runtime/900_v1.json").exists())
 
     def test_analyse_sources_accepts_pdf_readings_as_an_alternative(self):
         draft = community_onboarding.analyse_sources(
@@ -278,7 +280,7 @@ class CommunityOnboardingTest(unittest.TestCase):
             self.connection, **self._confirmation_arguments()
         )
 
-        profile_path = self.project_root / "config/excel_profiles/900_v1.json"
+        profile_path = self.project_root / "config/excel_profiles/runtime/900_v1.json"
         template_path = self.project_root / "plantillas/comunidades/900/900_v1.xlsx"
         self.assertIsNotNone(result.case_id)
         self.assertTrue(profile_path.is_file())
@@ -293,6 +295,15 @@ class CommunityOnboardingTest(unittest.TestCase):
         finally:
             workbook.close()
         self.assertEqual("LECTURAS ACS M3", payload["workbook_layout"]["tables"]["ACS"]["sheet"])
+        self.assertEqual("900_v1", excel_profiles.load_profile(
+            "900_v1", self.project_root
+        ).key)
+        self.assertEqual("900_v1", case_workflow_actions.resolve_case_profile(
+            self.connection,
+            id_case=result.case_id,
+            active_community_id=result.community_id,
+            project_root=self.project_root,
+        ).key)
 
     def test_confirm_onboarding_rolls_back_json_database_template_and_archives_after_error(self):
         real_register = expedient_service.register_source_document
@@ -321,7 +332,7 @@ class CommunityOnboardingTest(unittest.TestCase):
                     self.connection, **self._confirmation_arguments()
                 )
 
-        self.assertFalse((self.project_root / "config/excel_profiles/900_v1.json").exists())
+        self.assertFalse((self.project_root / "config/excel_profiles/runtime/900_v1.json").exists())
         self.assertFalse((self.project_root / "plantillas/comunidades/900/900_v1.xlsx").exists())
         self.assertFalse((self.project_root / "config/excel_profiles").exists())
         self.assertFalse((self.project_root / "plantillas/comunidades/900").exists())
@@ -352,11 +363,11 @@ class CommunityOnboardingTest(unittest.TestCase):
                 )
 
         self.assertEqual(sentinel, template_path.read_bytes())
-        self.assertFalse((self.project_root / "config/excel_profiles/900_v1.json").exists())
+        self.assertFalse((self.project_root / "config/excel_profiles/runtime/900_v1.json").exists())
         self.assertEqual(0, self._community_count())
 
     def test_confirm_onboarding_never_replaces_a_concurrent_profile(self):
-        profile_path = self.project_root / "config/excel_profiles/900_v1.json"
+        profile_path = self.project_root / "config/excel_profiles/runtime/900_v1.json"
         template_path = self.project_root / "plantillas/comunidades/900/900_v1.xlsx"
         sentinel = b'{"propietario":"ajeno"}'
         real_link = os.link
@@ -389,7 +400,32 @@ class CommunityOnboardingTest(unittest.TestCase):
             community_onboarding.confirm_onboarding(self.connection, **arguments)
 
         self.assertEqual(0, self._community_count())
-        self.assertFalse((self.project_root / "config/excel_profiles/900_v1.json").exists())
+        self.assertFalse((self.project_root / "config/excel_profiles/runtime/900_v1.json").exists())
+
+    def test_confirm_onboarding_cleans_the_actual_source_when_it_changes_during_registration(self):
+        real_register = expedient_service.register_source_document
+        changed_source = self.owners_csv
+
+        def change_then_fail(*args, **kwargs):
+            changed_source.write_bytes(b"fuente cambiada durante el registro")
+            result = real_register(*args, **kwargs)
+            raise OSError("fallo posterior al registro cambiado")
+
+        with patch(
+            "community_onboarding.expedient_service.register_source_document",
+            side_effect=change_then_fail,
+        ):
+            with self.assertRaisesRegex(OSError, "registro cambiado"):
+                community_onboarding.confirm_onboarding(
+                    self.connection, **self._confirmation_arguments()
+                )
+
+        self.assertEqual(0, self._registered_source_count())
+        self.assertEqual(
+            [], [path for path in self.archive_root.rglob("*") if path.is_file()]
+            if self.archive_root.exists() else [],
+        )
+        self.assertEqual(0, self._community_count())
 
 
 if __name__ == "__main__":
