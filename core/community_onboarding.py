@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import tempfile
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Mapping
 
 from openpyxl import load_workbook
 
-from excel_profiles import MODULE_REQUIRED_SHEETS
+import excel_generator
+import expedient_service
+import gestor_bd
+from excel_profiles import MODULE_REQUIRED_SHEETS, validate_profile_payload
 from lector_pdf import extraer_texto
 
 
@@ -53,6 +62,16 @@ class OnboardingDraft:
     questions: tuple[OnboardingQuestion, ...]
 
 
+@dataclass(frozen=True)
+class OnboardingResult:
+    community_id: int
+    period_id: int | None
+    case_id: int | None
+    profile_path: Path
+    template_path: Path
+    source_document_ids: tuple[int, ...]
+
+
 def build_profile_payload(
     draft: OnboardingDraft, answers: Mapping[str, str | bool]
 ) -> dict[str, object]:
@@ -65,7 +84,7 @@ def build_profile_payload(
     _validate_community_code(draft.community_code)
     key = f"{draft.community_code}_v1"
 
-    required_sheets = [
+    required_sheets = ["DATOS"] + [
         sheet
         for module in active_modules
         for sheet in MODULE_REQUIRED_SHEETS[module]
@@ -74,12 +93,278 @@ def build_profile_payload(
         "key": key,
         "version": "1",
         "community_code": draft.community_code,
-        "template_relative_path": f"plantillas/comunidades/{key}.xlsx",
+        "template_relative_path": (
+            f"plantillas/comunidades/{draft.community_code}/{key}.xlsx"
+        ),
         "active_modules": active_modules,
         "required_sheets": required_sheets,
         "required_formula_cells": [],
         "concepts": [_concept_for(module) for module in active_modules],
     }
+
+
+def confirm_onboarding(
+    connection: sqlite3.Connection,
+    *,
+    draft: OnboardingDraft,
+    answers: Mapping[str, str | bool],
+    project_root: Path,
+    archive_root: Path,
+    period_name: str | None,
+    start_date: date | None,
+    end_date: date | None,
+    actor: str,
+) -> OnboardingResult:
+    """Publish one onboarding or compensate every artifact created by it."""
+    _validate_period(period_name, start_date, end_date)
+    if connection.in_transaction:
+        raise RuntimeError("No confirme un alta dentro de una transacción externa")
+    if not isinstance(actor, str) or not actor.strip():
+        raise ValueError("Debe indicarse quién confirma el alta")
+
+    root = Path(project_root).resolve()
+    archives = Path(archive_root).resolve()
+    archive_root_existed = archives.exists()
+    payload = build_profile_payload(draft, answers)
+    _verify_source_fingerprints(draft.sources)
+    key = str(payload["key"])
+    profile_path = root / "config" / "excel_profiles" / f"{key}.json"
+    template_path = root / str(payload["template_relative_path"])
+    if profile_path.exists():
+        raise FileExistsError(f"Ya existe el perfil {profile_path}")
+    if template_path.exists():
+        raise FileExistsError(f"Ya existe la plantilla {template_path}")
+
+    profile_temporary: Path | None = None
+    template_temporary: Path | None = None
+    profile_created = False
+    template_created = False
+    community_created = False
+    case_id: int | None = None
+    period_id: int | None = None
+    period_created = False
+    document_ids: list[int] = []
+    archived_paths: list[Path] = []
+    created_directories: list[Path] = []
+    existing_community = connection.execute(
+        "SELECT id_comunidad FROM comunidades WHERE codigo=?",
+        (draft.community_code,),
+    ).fetchone()
+    community_id: int | None = (
+        int(existing_community[0]) if existing_community is not None else None
+    )
+    period_ids_before: set[int] = set()
+    if community_id is not None:
+        period_ids_before = {
+            int(row[0]) for row in connection.execute(
+                "SELECT id_periodo FROM periodos WHERE id_comunidad=?", (community_id,)
+            )
+        }
+
+    try:
+        created_directories.extend(_ensure_directory(profile_path.parent, root))
+        created_directories.extend(_ensure_directory(template_path.parent, root))
+        with tempfile.NamedTemporaryFile(
+            dir=template_path.parent, prefix=f".{template_path.name}.",
+            suffix=".tmp.xlsx", delete=False,
+        ) as temporary:
+            template_temporary = Path(temporary.name)
+        layout = excel_generator.create_canonical_community_template(
+            template_temporary,
+            community_code=draft.community_code,
+            community_name=draft.community_name,
+            active_modules=tuple(payload["active_modules"]),
+        )
+        payload["workbook_layout"] = layout
+        profile = validate_profile_payload(payload, root)
+        _validate_generated_template(template_temporary, profile)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\n",
+            dir=profile_path.parent, prefix=f".{profile_path.name}.",
+            suffix=".tmp", delete=False,
+        ) as temporary:
+            json.dump(payload, temporary, ensure_ascii=False, indent=2)
+            temporary.write("\n")
+            profile_temporary = Path(temporary.name)
+        reloaded_payload = json.loads(profile_temporary.read_text(encoding="utf-8"))
+        validate_profile_payload(reloaded_payload, root)
+
+        os.replace(template_temporary, template_path)
+        template_temporary = None
+        template_created = True
+        os.replace(profile_temporary, profile_path)
+        profile_temporary = None
+        profile_created = True
+
+        community_id = gestor_bd.obtener_o_crear_comunidad(
+            connection, draft.community_code, draft.community_name
+        )
+        community_created = existing_community is None
+        if start_date is not None and end_date is not None:
+            case = expedient_service.create_case(
+                connection,
+                community_id,
+                name=str(period_name),
+                start_date=start_date,
+                end_date=end_date,
+            )
+            case_id = case.id_case
+            period_id = expedient_service.link_case_to_period(connection, case_id)
+            period_created = period_id not in period_ids_before
+            for source in draft.sources:
+                document, created = expedient_service.register_source_document(
+                    connection,
+                    case_id,
+                    source_path=source.path,
+                    archive_root=archives,
+                    document_kind=source.kind,
+                )
+                if created:
+                    document_ids.append(document.id_document)
+                    archived_paths.append(document.archived_path)
+
+        return OnboardingResult(
+            community_id=community_id,
+            period_id=period_id,
+            case_id=case_id,
+            profile_path=profile_path,
+            template_path=template_path,
+            source_document_ids=tuple(document_ids),
+        )
+    except Exception:
+        _compensate_onboarding(
+            connection,
+            community_id=community_id if community_created else None,
+            period_id=period_id if period_created else None,
+            case_id=case_id,
+            document_ids=tuple(document_ids),
+        )
+        for archived_path in reversed(archived_paths):
+            _unlink_created_file(archived_path)
+            _remove_empty_parents(archived_path.parent, archives)
+        if case_id is not None:
+            _remove_case_archive(archives, case_id)
+            if not archive_root_existed:
+                _remove_empty_parents(archives, archives)
+        if profile_created:
+            _unlink_created_file(profile_path)
+        if template_created:
+            _unlink_created_file(template_path)
+        _remove_created_directories(created_directories)
+        raise
+    finally:
+        if profile_temporary is not None:
+            _unlink_created_file(profile_temporary)
+        if template_temporary is not None:
+            _unlink_created_file(template_temporary)
+
+
+def _validate_period(
+    period_name: str | None, start_date: date | None, end_date: date | None
+) -> None:
+    supplied_dates = (start_date is not None, end_date is not None)
+    if any(supplied_dates) and not all(supplied_dates):
+        raise ValueError("Las fechas del período deben estar completas o no indicarse")
+    if all(supplied_dates) and (not isinstance(period_name, str) or not period_name.strip()):
+        raise ValueError("Debe indicarse el nombre del período cuando hay fechas")
+
+
+def _verify_source_fingerprints(sources: tuple[SourceCandidate, ...]) -> None:
+    for source in sources:
+        if _sha256(source.path) != source.sha256:
+            raise ValueError(f"La fuente cambió desde el análisis: {source.path.name}")
+
+
+def _validate_generated_template(path: Path, profile) -> None:
+    workbook = load_workbook(path, read_only=False, data_only=False)
+    try:
+        if workbook.sheetnames != list(profile.required_sheets):
+            raise ValueError("La plantilla canónica no coincide con las hojas del perfil")
+        for module, table in profile.workbook_layout["tables"].items():
+            if module not in profile.active_modules or table["sheet"] not in workbook.sheetnames:
+                raise ValueError("El layout de la plantilla no coincide con sus módulos")
+    finally:
+        workbook.close()
+
+
+def _compensate_onboarding(
+    connection: sqlite3.Connection,
+    *,
+    community_id: int | None,
+    period_id: int | None,
+    case_id: int | None,
+    document_ids: tuple[int, ...],
+) -> None:
+    connection.rollback()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        if document_ids:
+            placeholders = ",".join("?" for _ in document_ids)
+            connection.execute(
+                f"DELETE FROM source_documents WHERE id_document IN ({placeholders})",
+                document_ids,
+            )
+        if case_id is not None:
+            connection.execute("DELETE FROM regularization_cases WHERE id_case=?", (case_id,))
+        if period_id is not None:
+            connection.execute("DELETE FROM periodos WHERE id_periodo=?", (period_id,))
+        if community_id is not None:
+            connection.execute("DELETE FROM comunidades WHERE id_comunidad=?", (community_id,))
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _unlink_created_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _remove_case_archive(archive_root: Path, case_id: int) -> None:
+    case_archive = (archive_root / str(case_id)).resolve()
+    try:
+        case_archive.relative_to(archive_root.resolve())
+    except ValueError:
+        raise RuntimeError("La ruta compensada del expediente queda fuera del archivo") from None
+    shutil.rmtree(case_archive, ignore_errors=True)
+
+
+def _remove_empty_parents(directory: Path, boundary: Path) -> None:
+    boundary = boundary.resolve()
+    current = directory.resolve()
+    while current == boundary or boundary in current.parents:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        if current == boundary:
+            break
+        current = current.parent
+
+
+def _ensure_directory(directory: Path, boundary: Path) -> tuple[Path, ...]:
+    missing: list[Path] = []
+    current = directory
+    boundary = boundary.resolve()
+    while not current.exists() and current != boundary:
+        missing.append(current)
+        current = current.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    return tuple(missing)
+
+
+def _remove_created_directories(directories: list[Path]) -> None:
+    for directory in directories:
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
 
 
 def _require_answers(

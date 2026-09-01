@@ -28,6 +28,10 @@ Excels_Maestros_backup*/
 # Plantillas privadas instaladas desde los maestros de cada comunidad
 plantillas/comunidades/
 
+# Perfiles locales creados por el alta guiada (658 sigue siendo público)
+config/excel_profiles/*.json
+!config/excel_profiles/658_acs_v1.json
+
 # Archivos temporales de Office
 ~$*.xlsx
 ~$*.xls

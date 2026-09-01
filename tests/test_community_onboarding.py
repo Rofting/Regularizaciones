@@ -1,10 +1,15 @@
+import json
 import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from datetime import date
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +18,8 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import community_onboarding
+import expedient_service
+import gestor_bd
 
 
 def make_readings_workbook(path: Path, headers: tuple[str, ...]) -> Path:
@@ -56,9 +63,14 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.project_root = Path(self.directory.name) / "project"
         self.project_root.mkdir()
         self.database = self.project_root / "gestion.db"
+        with redirect_stdout(StringIO()):
+            gestor_bd.crear_bd(str(self.database))
         self.connection = sqlite3.connect(self.database)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("CREATE TABLE audit (id INTEGER PRIMARY KEY)")
         self.connection.commit()
+        self.archive_root = self.project_root / "expedientes"
         self.owners_csv = self.project_root / "owners.csv"
         self.owners_csv.write_text(
             "Codigo;Nombre;Fdenominacion\n1;VECINO SINTETICO;A-01\n",
@@ -92,6 +104,27 @@ class CommunityOnboardingTest(unittest.TestCase):
             detected_modules=("ACS", "CALEFACCION"),
             questions=(),
         )
+        self.valid_draft = community_onboarding.OnboardingDraft(
+            community_code="900",
+            community_name="Comunidad prueba",
+            sources=(
+                community_onboarding.SourceCandidate(
+                    self.owners_csv, "owner_list",
+                    community_onboarding._sha256(self.owners_csv),
+                ),
+                community_onboarding.SourceCandidate(
+                    self.readings_xlsx, "meter_reading_excel",
+                    community_onboarding._sha256(self.readings_xlsx),
+                ),
+                community_onboarding.SourceCandidate(
+                    self.invoice_pdf, "invoice_pdf",
+                    community_onboarding._sha256(self.invoice_pdf),
+                ),
+            ),
+            detected_modules=("ACS",),
+            questions=(),
+        )
+        self.answers = {"module:ACS": True}
 
     def tearDown(self):
         self.connection.close()
@@ -99,6 +132,28 @@ class CommunityOnboardingTest(unittest.TestCase):
 
     def _row_count(self):
         return self.connection.execute("SELECT COUNT(*) FROM audit").fetchone()[0]
+
+    def _community_count(self):
+        return self.connection.execute(
+            "SELECT COUNT(*) FROM comunidades WHERE codigo='900'"
+        ).fetchone()[0]
+
+    def _registered_source_count(self):
+        return self.connection.execute(
+            "SELECT COUNT(*) FROM source_documents"
+        ).fetchone()[0]
+
+    def _confirmation_arguments(self):
+        return {
+            "draft": self.valid_draft,
+            "answers": self.answers,
+            "project_root": self.project_root,
+            "archive_root": self.archive_root,
+            "period_name": "2026",
+            "start_date": date(2026, 1, 1),
+            "end_date": date(2026, 12, 31),
+            "actor": "Prueba",
+        }
 
     def test_analyse_sources_classifies_owner_list_excel_readings_and_pdf_invoice_without_writes(self):
         draft = community_onboarding.analyse_sources(
@@ -216,6 +271,66 @@ class CommunityOnboardingTest(unittest.TestCase):
             with self.subTest(community_code=community_code):
                 with self.assertRaisesRegex(ValueError, "código de comunidad"):
                     community_onboarding.build_profile_payload(draft, answers={})
+
+    def test_confirm_onboarding_writes_profile_template_archives_sources_and_creates_case(self):
+        result = community_onboarding.confirm_onboarding(
+            self.connection, **self._confirmation_arguments()
+        )
+
+        profile_path = self.project_root / "config/excel_profiles/900_v1.json"
+        template_path = self.project_root / "plantillas/comunidades/900/900_v1.xlsx"
+        self.assertIsNotNone(result.case_id)
+        self.assertTrue(profile_path.is_file())
+        self.assertTrue(template_path.is_file())
+        self.assertEqual(3, self._registered_source_count())
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        workbook = load_workbook(template_path, read_only=True)
+        try:
+            self.assertEqual(
+                ["DATOS", "LECTURAS ACS M3", "ANALISIS"], workbook.sheetnames
+            )
+        finally:
+            workbook.close()
+        self.assertEqual("LECTURAS ACS M3", payload["workbook_layout"]["tables"]["ACS"]["sheet"])
+
+    def test_confirm_onboarding_rolls_back_json_database_template_and_archives_after_error(self):
+        real_register = expedient_service.register_source_document
+        calls = 0
+
+        def fail_after_two_real_registrations(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            result = real_register(*args, **kwargs)
+            if calls == 3:
+                raise OSError("fallo sintético tardío")
+            return result
+
+        with patch(
+            "community_onboarding.expedient_service.register_source_document",
+            side_effect=fail_after_two_real_registrations,
+        ):
+            with self.assertRaisesRegex(OSError, "sintético tardío"):
+                community_onboarding.confirm_onboarding(
+                    self.connection, **self._confirmation_arguments()
+                )
+
+        self.assertFalse((self.project_root / "config/excel_profiles/900_v1.json").exists())
+        self.assertFalse((self.project_root / "plantillas/comunidades/900/900_v1.xlsx").exists())
+        self.assertFalse((self.project_root / "config/excel_profiles").exists())
+        self.assertFalse((self.project_root / "plantillas/comunidades/900").exists())
+        self.assertEqual(0, self._community_count())
+        self.assertEqual(0, self._registered_source_count())
+        self.assertEqual([], list(self.archive_root.rglob("*")) if self.archive_root.exists() else [])
+
+    def test_confirm_onboarding_rejects_partial_period_dates_without_side_effects(self):
+        arguments = self._confirmation_arguments()
+        arguments["end_date"] = None
+
+        with self.assertRaisesRegex(ValueError, "fechas.*completas"):
+            community_onboarding.confirm_onboarding(self.connection, **arguments)
+
+        self.assertEqual(0, self._community_count())
+        self.assertFalse((self.project_root / "config/excel_profiles/900_v1.json").exists())
 
 
 if __name__ == "__main__":
