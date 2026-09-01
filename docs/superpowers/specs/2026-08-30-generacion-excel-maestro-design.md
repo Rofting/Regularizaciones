@@ -12,8 +12,8 @@ El primer resultado debe reproducir el libro de referencia de la comunidad 658, 
 
 ## Material de referencia
 
-- Modelo oficial de 658: C:\Users\Jose\Proyectos\Soporte\Soporte\658 Regularizacion 2025 2026\658 ESTUDIO 2025-2026  ACS.xlsx.
-- Modelo de comparación de 644: C:\Users\Jose\Proyectos\Flujo para cartas\03_Excels_Maestros\Comunidad_644_LIQUIDADO.xlsx.
+- Modelo oficial de 658: <private-658-master-workbook>.
+- Modelo de comparación de 644: <private-644-master-workbook>.
 
 La 658 contiene las hojas DATOS, GAS, ELECTRICIDAD, AGUA, OTROS GASTOS, LECTURAS ACS M3 y ANALISIS. La 644 comparte ese núcleo y añade LECTURAS CALEF KWH, varios análisis anuales y RESUMEN.
 

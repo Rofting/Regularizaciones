@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -49,6 +50,7 @@ class ExcelProfile:
     workbook_layout: Mapping[str, Any] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    source_sha256: str = ""
 
 
 _PROFILE_FIELDS = {
@@ -246,7 +248,8 @@ def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
         raise ValueError("Clave de perfil no válida")
     path = Path(project_root) / "config" / "excel_profiles" / f"{profile_key}.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        source_bytes = path.read_bytes()
+        data = json.loads(source_bytes.decode("utf-8"))
     except FileNotFoundError:
         raise LookupError(f"Perfil Excel no encontrado: {profile_key}") from None
     except json.JSONDecodeError as error:
@@ -296,4 +299,15 @@ def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
         required_formula_cells=formula_cells,
         concepts=_concepts(data["concepts"]),
         workbook_layout=_workbook_layout(data.get("workbook_layout")),
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
     )
+
+
+def calculate_profile_sha256(profile: ExcelProfile, project_root: Path) -> str:
+    """Calcula la huella actual de los bytes del JSON que define el perfil."""
+    path = Path(project_root).resolve() / "config" / "excel_profiles" / f"{profile.key}.json"
+    if path.is_file():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    if profile.source_sha256:
+        return profile.source_sha256
+    raise LookupError(f"Perfil Excel no encontrado: {profile.key}")

@@ -52,6 +52,14 @@ nueva y vacía, acotada bajo Temp o una zona privada (nunca una unidad ni la
 carpeta de usuario). El informe resultante no muestra propietarios,
 direcciones, importes individuales ni nombres de archivos fuente.
 
+Si el comprobador termina por incidencias abiertas, resuélvelas en la misma
+base privada y reanuda esa ejecución sin reimportar ni crear otra base:
+
+  python core/private_658_validation.py --resume "<carpeta-validacion_*>"
+
+La reanudación rechaza carpetas inseguras y no vuelve a generar salidas que ya
+estén completadas y auditadas.
+
 CONTROLES IMPORTANTES
 ─────────────────────
 • Una incidencia abierta bloquea Excel, reparto y cartas.

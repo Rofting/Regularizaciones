@@ -1,5 +1,8 @@
 import sqlite3
+import hashlib
+import shutil
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -50,8 +53,14 @@ class CaseDistributionTest(unittest.TestCase):
             """INSERT INTO excel_template_profiles
                (id_comunidad,profile_key,profile_version,template_relative_path,
                 template_sha256,profile_sha256,status)
-               VALUES (?,'658_acs_v1','1',?,'template-hash','profile-hash','active')""",
-            (self.community_id, "plantillas/comunidades/658/658_acs_v1.xlsx"),
+               VALUES (?,'658_acs_v1','1',?,'template-hash',?,'active')""",
+            (
+                self.community_id,
+                "plantillas/comunidades/658/658_acs_v1.xlsx",
+                hashlib.sha256(
+                    (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+                ).hexdigest(),
+            ),
         ).lastrowid
         self.connection.execute(
             """INSERT INTO excel_export_runs
@@ -237,6 +246,10 @@ class CaseDistributionTest(unittest.TestCase):
                     billed_source="period_parameters.heating_variable_billed", required=True,
                 ),
             ),
+            source_sha256=self.connection.execute(
+                "SELECT profile_sha256 FROM excel_template_profiles WHERE id_template_profile=?",
+                (self.profile_id,),
+            ).fetchone()[0],
         )
         self._set_parameter("heating_fixed_actual", "20.00")
         self._set_parameter("heating_fixed_billed", "10.00")
@@ -358,6 +371,54 @@ class CaseDistributionTest(unittest.TestCase):
 
         self.assertEqual(6, result.owner_result_count)
 
+    def test_rejects_validated_export_when_profile_bytes_changed_without_version_bump(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            root = Path(directory)
+            profile_path = root / "config" / "excel_profiles" / "658_acs_v1.json"
+            profile_path.parent.mkdir(parents=True)
+            shutil.copy2(
+                PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json",
+                profile_path,
+            )
+            registered_hash = hashlib.sha256(profile_path.read_bytes()).hexdigest()
+            self.connection.execute(
+                "UPDATE excel_template_profiles SET profile_sha256=? WHERE id_template_profile=?",
+                (registered_hash, self.profile_id),
+            )
+            input_hash = calculate_case_input_hash(
+                self.connection, id_case=self.case_id, project_root=root
+            )
+            self.connection.execute(
+                """INSERT INTO excel_export_runs
+                   (id_case,id_periodo,id_template_profile,input_sha256,template_sha256,status)
+                   VALUES (?,?,?,?,?,'validated')""",
+                (self.case_id, self.period_id, self.profile_id, input_hash, "template-hash"),
+            )
+            profile_path.write_bytes(profile_path.read_bytes() + b"\n")
+            self.connection.commit()
+
+            with self.assertRaisesRegex(DistributionBlockedError, "huella"):
+                calculate_case_distribution(
+                    self.connection, id_case=self.case_id, project_root=root
+                )
+
+    def test_accepts_zero_consumption_as_a_zero_weight(self):
+        self.connection.execute(
+            """UPDATE lecturas_vecino SET valor_acumulado=10
+               WHERE id_propietario=? AND fecha_lectura='2026-08-31'""",
+            (self.owner_one,),
+        )
+        self.connection.commit()
+        self._refresh_validated_export()
+
+        result = calculate_case_distribution(self.connection, id_case=self.case_id)
+
+        variable_rows = [tuple(row) for row in self._rows("acs_variable")]
+        self.assertEqual(6, result.owner_result_count)
+        self.assertEqual(0.0, variable_rows[0][4])
+        self.assertEqual(0, variable_rows[0][2])
+        self.assertEqual(30000, variable_rows[1][2])
+
     def test_fixed_only_profile_still_blocks_unapproved_final_counter_reading(self):
         fixed_only = ExcelProfile(
             key="synthetic_fixed_only_v1",
@@ -374,6 +435,7 @@ class CaseDistributionTest(unittest.TestCase):
                     billed_source="period_parameters.acs_fixed_billed", required=True,
                 ),
             ),
+            source_sha256="profile-fixed",
         )
         profile_id = self.connection.execute(
             """INSERT INTO excel_template_profiles

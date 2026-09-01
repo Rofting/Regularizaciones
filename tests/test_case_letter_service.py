@@ -1,4 +1,5 @@
 import shutil
+import hashlib
 import sqlite3
 import sys
 import tempfile
@@ -143,7 +144,9 @@ class CaseLetterServiceTest(unittest.TestCase):
             (
                 self.community_id, "658_acs_v1", "1",
                 "plantillas/comunidades/658/658_acs_v1.xlsx",
-                "excel-template", "profile",
+                "excel-template", hashlib.sha256(
+                    (self.root / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+                ).hexdigest(),
             ),
         ).lastrowid
         input_hash = calculate_case_input_hash(
@@ -316,6 +319,96 @@ class CaseLetterServiceTest(unittest.TestCase):
         self.assertEqual((), second.failures)
         self.assertEqual(before_runs, self.connection.execute("SELECT COUNT(*) FROM letter_generation_runs").fetchone()[0])
         self.assertEqual(before_letters, self.connection.execute("SELECT COUNT(*) FROM generated_letters").fetchone()[0])
+
+    def test_different_concept_selection_starts_a_new_batch(self):
+        from case_letter_service import generate_case_letters
+
+        first = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root,
+            selected_concepts=("acs_fixed",),
+        )
+        second = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root,
+            selected_concepts=("acs_variable",),
+        )
+
+        self.assertNotEqual(first.id_letter_run, second.id_letter_run)
+
+    def test_rejects_letters_when_validated_profile_bytes_changed_without_version_bump(self):
+        from case_letter_service import LetterGenerationBlockedError, generate_case_letters
+
+        profile_path = self.root / "config" / "excel_profiles" / "658_acs_v1.json"
+        profile_path.write_bytes(profile_path.read_bytes() + b"\n")
+
+        with self.assertRaisesRegex(LetterGenerationBlockedError, "huella"):
+            generate_case_letters(
+                self.database_path, id_case=self.case_id, project_root=self.root
+            )
+
+    def test_changed_historical_graph_input_starts_a_new_batch(self):
+        from case_letter_service import generate_case_letters
+
+        historical_period = self.connection.execute(
+            """INSERT INTO periodos(id_comunidad,nombre,fecha_inicio,fecha_fin)
+               VALUES (?, '2024-2025', '2024-09-01', '2025-08-31')""",
+            (self.community_id,),
+        ).lastrowid
+        self.connection.executemany(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado)
+               VALUES (?,?,'ACS',?,?,'real')""",
+            [
+                (self.owner_one, historical_period, "2024-09-01", 50),
+                (self.owner_one, historical_period, "2025-08-31", 60),
+            ],
+        )
+        self.connection.commit()
+        first = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root
+        )
+        self.connection.execute(
+            """UPDATE lecturas_vecino SET valor_acumulado=65
+               WHERE id_propietario=? AND id_periodo=? AND fecha_lectura='2025-08-31'""",
+            (self.owner_one, historical_period),
+        )
+        self.connection.commit()
+
+        second = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root
+        )
+
+        self.assertNotEqual(first.id_letter_run, second.id_letter_run)
+
+    def test_negative_historical_consumption_is_omitted_not_replaced_with_zero(self):
+        from case_letter_service import _consumption_graphs
+
+        historical_period = self.connection.execute(
+            """INSERT INTO periodos(id_comunidad,nombre,fecha_inicio,fecha_fin)
+               VALUES (?, 'reinicio', '2024-09-01', '2025-08-31')""",
+            (self.community_id,),
+        ).lastrowid
+        self.connection.executemany(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado)
+               VALUES (?,?,'ACS',?,?,'real')""",
+            [
+                (self.owner_one, historical_period, "2024-09-01", 90),
+                (self.owner_one, historical_period, "2025-08-31", 10),
+            ],
+        )
+        self.connection.commit()
+        case = self.connection.execute(
+            """SELECT c.*,co.codigo,co.nombre AS community_name,per.nombre AS period_name
+               FROM regularization_cases c JOIN comunidades co ON co.id_comunidad=c.id_comunidad
+               JOIN periodos per ON per.id_periodo=c.id_periodo WHERE c.id_case=?""",
+            (self.case_id,),
+        ).fetchone()
+
+        graphs = _consumption_graphs(
+            self.connection, case, [{"id_propietario": self.owner_one}]
+        )
+
+        self.assertEqual([], graphs[self.owner_one]["history"])
 
     def test_missing_file_prevents_reuse_and_starts_new_batch(self):
         from case_letter_service import generate_case_letters

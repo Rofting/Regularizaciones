@@ -17,7 +17,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import load_workbook
 
-from excel_profiles import ExcelProfile, load_profile
+from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
 from excel_validation import validate_workbook, workbook_fingerprint
 from office_recalculation import LibreOfficeRecalculator, WorkbookRecalculator
 
@@ -78,7 +78,7 @@ def _profile_for_community(
     puede escoger el único perfil compatible disponible.
     """
     active = connection.execute(
-        """SELECT profile_key,profile_version FROM excel_template_profiles
+        """SELECT profile_key,profile_version,profile_sha256 FROM excel_template_profiles
            WHERE id_comunidad=? AND status='active'
            ORDER BY id_template_profile""",
         (community_id,),
@@ -97,6 +97,10 @@ def _profile_for_community(
             ) from error
         if profile.version != row["profile_version"]:
             raise ExportBlockedError("La versión del perfil activo no coincide con su registro")
+        if calculate_profile_sha256(profile, project_root) != row["profile_sha256"]:
+            raise ExportBlockedError(
+                "La huella del perfil activo no coincide con su registro; reimporte y revalide"
+            )
         if profile.community_code != str(community_code):
             raise ExportBlockedError("El perfil activo no corresponde a la comunidad")
         return profile
@@ -195,7 +199,8 @@ def calculate_case_input_hash(
     )
     if selected_profile.community_code != str(case["codigo"]):
         raise ExportBlockedError("El perfil no corresponde a la comunidad del expediente")
-    return _input_hash(connection, case, selected_profile)
+    profile_hash = calculate_profile_sha256(selected_profile, root)
+    return _input_hash(connection, case, selected_profile, profile_hash)
 
 
 def _required_parameter_keys(profile: ExcelProfile) -> set[str]:
@@ -312,7 +317,7 @@ def _template_registration(
     template_hash = _sha256(template)
     active = connection.execute(
         """SELECT id_template_profile,profile_key,profile_version,
-                  template_relative_path,template_sha256
+                  template_relative_path,template_sha256,profile_sha256
            FROM excel_template_profiles
            WHERE id_comunidad=? AND status='active'
            ORDER BY id_template_profile DESC""",
@@ -333,10 +338,12 @@ def _template_registration(
             raise ExportBlockedError(
                 "La plantilla cambió respecto del hash registrado; registra una nueva versión"
             )
+        if row["profile_sha256"] != calculate_profile_sha256(profile, project_root):
+            raise ExportBlockedError(
+                "La huella del perfil cambió respecto del registro; reimporte y revalide"
+            )
         return int(row["id_template_profile"]), template, template_hash
-    profile_hash = hashlib.sha256(
-        (project_root / "config" / "excel_profiles" / f"{profile.key}.json").read_bytes()
-    ).hexdigest()
+    profile_hash = calculate_profile_sha256(profile, project_root)
     cursor = connection.execute(
         """INSERT INTO excel_template_profiles
            (id_comunidad,profile_key,profile_version,template_relative_path,
@@ -376,7 +383,15 @@ def _profile_reading_types(profile: ExcelProfile) -> tuple[str, ...]:
     return tuple(sorted(types))
 
 
-def _input_hash(connection: sqlite3.Connection, case: sqlite3.Row, profile: ExcelProfile) -> str:
+def _input_hash(
+    connection: sqlite3.Connection,
+    case: sqlite3.Row,
+    profile: ExcelProfile,
+    profile_hash: str | None = None,
+) -> str:
+    profile_hash = profile_hash or profile.source_sha256
+    if not profile_hash:
+        raise ExportBlockedError("No se puede determinar la huella del perfil")
     period_id = int(case["id_periodo"])
     reading_types = _profile_reading_types(profile)
     reading_rows = []
@@ -396,7 +411,7 @@ def _input_hash(connection: sqlite3.Connection, case: sqlite3.Row, profile: Exce
             "id_case", "id_comunidad", "codigo", "comunidad_nombre", "nombre",
             "fecha_inicio", "fecha_fin", "id_periodo"
         )},
-        "profile": [profile.key, profile.version],
+        "profile": [profile.key, profile.version, profile_hash],
         "invoices": _query_dicts(
             connection,
             """SELECT id_factura,tipo_suministro,proveedor,num_factura,fecha_factura,

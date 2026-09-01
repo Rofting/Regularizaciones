@@ -404,6 +404,59 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
         ).fetchone()
         self.assertNotEqual(template.resolve(), Path(document["archived_path"]).resolve())
 
+    def test_invalid_bootstrap_does_not_install_template_before_valid_retry(self):
+        project = self.root / "proyecto_reintento"
+        profile_dir = project / "config" / "excel_profiles"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "658_acs_v1.json").write_text(
+            (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        profile = excel_profiles.load_profile("658_acs_v1", project)
+        invalid = self.root / "modelo_invalido.xlsx"
+        invalid.write_bytes(b"no-es-un-libro-xlsx")
+
+        with self.assertRaises(Exception):
+            import_master_excel(
+                self.connection, id_case=self.case.id_case,
+                workbook_path=invalid, profile=profile, actor="Prueba",
+                project_root=project,
+            )
+
+        template = project / profile.template_relative_path
+        self.assertFalse(template.exists())
+        self.assertEqual(
+            0,
+            self.connection.execute(
+                "SELECT COUNT(*) FROM excel_template_profiles WHERE id_comunidad=?",
+                (self.community_id,),
+            ).fetchone()[0],
+        )
+        archived_invalid = self.connection.execute(
+            """SELECT archived_path FROM source_documents
+               WHERE original_name='modelo_invalido.xlsx'"""
+        ).fetchone()
+        self.assertTrue(Path(archived_invalid["archived_path"]).is_file())
+
+        valid = _make_master(self.root / "modelo_valido.xlsx")
+        result = import_master_excel(
+            self.connection, id_case=self.case.id_case,
+            workbook_path=valid, profile=profile, actor="Prueba",
+            project_root=project,
+        )
+
+        self.assertEqual(template, result.installed_template_path)
+        self.assertTrue(template.is_file())
+        self.assertEqual(
+            1,
+            self.connection.execute(
+                "SELECT COUNT(*) FROM excel_template_profiles WHERE id_comunidad=?",
+                (self.community_id,),
+            ).fetchone()[0],
+        )
+
     def test_different_master_hash_creates_template_conflict_without_overwriting(self):
         project = self.root / "proyecto_conflicto"
         profile_dir = project / "config" / "excel_profiles"

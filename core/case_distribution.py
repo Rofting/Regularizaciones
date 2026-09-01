@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import document_review
-from excel_profiles import ConceptRule, ExcelProfile, load_profile
+from excel_profiles import ConceptRule, ExcelProfile, calculate_profile_sha256, load_profile
 from excel_export_service import calculate_case_input_hash
 from reconciliation import reconcile_declared_totals
 
@@ -55,8 +55,8 @@ def allocate_concept_cents(
     if not owner_weights:
         raise DistributionBlockedError("No hay propietarios con peso para repartir")
     normalized = {int(owner_id): Decimal(str(weight)) for owner_id, weight in owner_weights.items()}
-    if any(weight <= 0 for weight in normalized.values()):
-        raise DistributionBlockedError("Hay un peso nulo o inválido para repartir")
+    if any(weight < 0 for weight in normalized.values()):
+        raise DistributionBlockedError("Hay un peso negativo o inválido para repartir")
     weight_total = sum(normalized.values(), Decimal(0))
     if weight_total <= 0:
         raise DistributionBlockedError("La suma de pesos debe ser positiva")
@@ -105,7 +105,11 @@ def _transaction(connection: sqlite3.Connection):
         connection.commit()
 
 
-def _case_and_profile(connection: sqlite3.Connection, id_case: int) -> tuple[sqlite3.Row, ExcelProfile]:
+def _case_and_profile(
+    connection: sqlite3.Connection,
+    id_case: int,
+    project_root: Path,
+) -> tuple[sqlite3.Row, ExcelProfile]:
     case = connection.execute(
         """SELECT c.id_case,c.id_comunidad,c.id_periodo,c.estado,c.fecha_inicio,c.fecha_fin,
                   co.codigo
@@ -143,7 +147,8 @@ def _case_and_profile(connection: sqlite3.Connection, id_case: int) -> tuple[sql
         raise DistributionBlockedError(str(error)) from error
 
     latest_export = connection.execute(
-        """SELECT e.status,e.id_periodo,e.input_sha256,t.profile_key,t.profile_version
+        """SELECT e.status,e.id_periodo,e.input_sha256,t.profile_key,t.profile_version,
+                  t.profile_sha256
            FROM excel_export_runs e
            JOIN excel_template_profiles t ON t.id_template_profile=e.id_template_profile
            WHERE e.id_case=?
@@ -155,20 +160,22 @@ def _case_and_profile(connection: sqlite3.Connection, id_case: int) -> tuple[sql
     if int(latest_export["id_periodo"]) != int(case["id_periodo"]):
         raise DistributionBlockedError("El Excel validado pertenece a otro período")
     try:
-        profile = load_profile(
-            latest_export["profile_key"], Path(__file__).resolve().parents[1]
-        )
+        profile = load_profile(latest_export["profile_key"], project_root)
     except (LookupError, ValueError) as error:
         raise DistributionBlockedError(f"No se puede cargar el perfil del Excel validado: {error}") from error
     if profile.version != latest_export["profile_version"]:
         raise DistributionBlockedError("La versión del perfil no coincide con el Excel validado")
+    if calculate_profile_sha256(profile, project_root) != latest_export["profile_sha256"]:
+        raise DistributionBlockedError(
+            "La huella del perfil no coincide con el Excel validado; debe reimportar y revalidar"
+        )
     if profile.community_code != str(case["codigo"]):
         raise DistributionBlockedError("El perfil del Excel no corresponde a la comunidad")
     try:
         current_input_hash = calculate_case_input_hash(
             connection,
             id_case=id_case,
-            project_root=Path(__file__).resolve().parents[1],
+            project_root=project_root,
             profile=profile,
         )
     except ValueError as error:
@@ -316,8 +323,6 @@ def _consumption_weights(
         consumption = Decimal(str(final["valor_acumulado"])) - Decimal(str(initial["valor_acumulado"]))
         if consumption < 0:
             raise DistributionBlockedError("El contador se reinició y no tiene una estimación aprobada")
-        if consumption == 0:
-            raise DistributionBlockedError("Hay un peso nulo de consumo pendiente de revisión")
         result[owner_id] = consumption
     return result
 
@@ -446,12 +451,14 @@ def calculate_case_distribution(
     connection: sqlite3.Connection,
     *,
     id_case: int,
+    project_root: Path | None = None,
     progress: ProgressCallback | None = None,
 ) -> DistributionResult:
     """Calcula todos los conceptos activos de un expediente sin reparto parcial."""
     _emit(progress, "validate_export", id_case=id_case)
+    root = Path(project_root or Path(__file__).resolve().parents[1]).resolve()
     with _transaction(connection):
-        case, profile = _case_and_profile(connection, id_case)
+        case, profile = _case_and_profile(connection, id_case, root)
         owners = _owners(connection, int(case["id_comunidad"]))
         owner_ids = [int(owner["id_propietario"]) for owner in owners]
         source_batch_id = _source_batch_id(connection, case)

@@ -56,6 +56,22 @@ ejecución aislada.
 Tras un resultado correcto, abra en Windows el Excel publicado y la carta
 renderizada para una revisión visual. El envío de correo sigue siendo manual.
 
+## Reanudar tras resolver incidencias
+
+Conserve la subcarpeta `validacion_*` que produjo el primer intento y resuelva
+sus incidencias sobre la misma `data/gestion.db`. Después ejecute, desde el
+proyecto:
+
+```powershell
+python core/private_658_validation.py --resume "<carpeta-validacion_*>"
+```
+
+Esta opción no lee de nuevo las fuentes ni crea otra base de datos. Rechaza
+rutas amplias, carpetas del proyecto y carpetas que no tengan la estructura de
+una ejecución aislada. Si aún hay incidencias sólo actualiza el informe; si ya
+no existen, reutiliza el Excel o lote de cartas completado y genera únicamente
+las etapas pendientes, sin duplicar salidas.
+
 ## Seguridad y limpieza
 
 El runner rechaza la raíz si es una unidad, la carpeta de usuario o su padre,

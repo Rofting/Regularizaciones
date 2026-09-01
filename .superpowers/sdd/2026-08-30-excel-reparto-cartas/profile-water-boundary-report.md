@@ -76,7 +76,7 @@ LF/CRLF de Git).
 Comando exacto ejecutado desde el worktree, con UTF-8:
 
 ```text
-PYTHONUTF8=1 C:\\Users\\Jose\\Proyectos\\Soporte\\Soporte\\Flujo calculo regularizaciones\\.venv-fase1\\Scripts\\python.exe -m unittest discover -s tests -t . -q
+PYTHONUTF8=1 <project-root>\\.venv-fase1\\Scripts\\python.exe -m unittest discover -s tests -t . -q
 ```
 
 Resultado:

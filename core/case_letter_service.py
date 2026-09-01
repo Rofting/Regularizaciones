@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from carta_writer import generar_carta
 from excel_export_service import ExportBlockedError, calculate_case_input_hash
-from excel_profiles import ExcelProfile, load_profile
+from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
 from letter_settings import LetterIdentity, load_community_letter_identity
 
 
@@ -94,7 +94,7 @@ def _validated_export(
 ) -> tuple[sqlite3.Row, ExcelProfile]:
     export = connection.execute(
         """SELECT e.id_export_run,e.id_periodo,e.input_sha256,e.template_sha256,e.status,
-                  t.profile_key,t.profile_version
+                  t.profile_key,t.profile_version,t.profile_sha256
            FROM excel_export_runs e
            JOIN excel_template_profiles t ON t.id_template_profile=e.id_template_profile
            WHERE e.id_case=? ORDER BY e.created_at DESC,e.id_export_run DESC LIMIT 1""",
@@ -110,6 +110,10 @@ def _validated_export(
         raise LetterGenerationBlockedError(f"No se puede cargar el perfil del Excel: {error}") from error
     if profile.version != export["profile_version"]:
         raise LetterGenerationBlockedError("La versión del perfil no coincide con el Excel validado")
+    if calculate_profile_sha256(profile, project_root) != export["profile_sha256"]:
+        raise LetterGenerationBlockedError(
+            "La huella del perfil no coincide con el Excel validado; debe reimportar y revalidar"
+        )
     if profile.community_code != str(case["codigo"]):
         raise LetterGenerationBlockedError("El perfil del Excel no corresponde a la comunidad")
     try:
@@ -215,9 +219,10 @@ def _consumption_graphs(
             reading["valor_acumulado"]
         )
     consumption = {
-        owner_id: max(0.0, value[case["fecha_fin"]] - value[case["fecha_inicio"]])
+        owner_id: value[case["fecha_fin"]] - value[case["fecha_inicio"]]
         for owner_id, value in values.items()
         if case["fecha_inicio"] in value and case["fecha_fin"] in value
+        and value[case["fecha_fin"]] >= value[case["fecha_inicio"]]
     }
     neighbors = list(consumption.values())
     graphs: dict[int, dict[str, Any]] = {}
@@ -237,8 +242,9 @@ def _consumption_graphs(
             "owner_consumption": consumption.get(owner_id, 0.0),
             "neighbor_consumptions": neighbors,
             "history": [
-                (row["nombre"], max(0.0, float(row["final_value"]) - float(row["initial_value"])))
+                (row["nombre"], float(row["final_value"]) - float(row["initial_value"]))
                 for row in historical
+                if float(row["final_value"]) >= float(row["initial_value"])
             ],
             "unit": "m³",
         }
@@ -246,19 +252,37 @@ def _consumption_graphs(
 
 
 def _letter_input_hash(
-    export: sqlite3.Row, identity: LetterIdentity, rows: list[sqlite3.Row]
+    export: sqlite3.Row,
+    identity: LetterIdentity,
+    rows: list[sqlite3.Row],
+    active_keys: tuple[str, ...],
+    graphs: dict[int, dict[str, Any]],
 ) -> str:
     canonical_rows = [
         [
             int(row["id_propietario"]), row["concept_key"], row["consumption"],
             int(row["billed_cents"]), int(row["actual_cents"]), int(row["difference_cents"]),
+            row["label"], row["service"], row["unit"], int(row["display_order"]),
         ]
-        for row in rows
+        for row in rows if row["concept_key"] in active_keys
     ]
     identity_payload = asdict(identity)
     identity_payload["logo_path"] = str(identity.logo_path) if identity.logo_path else None
+    identity_payload["logo_sha256"] = (
+        _sha256(identity.logo_path) if identity.logo_path is not None else None
+    )
+    graph_payload = [
+        [owner_id, graphs[owner_id]] for owner_id in sorted(graphs)
+    ]
     payload = json.dumps(
-        {"excel_input": export["input_sha256"], "rows": canonical_rows, "identity": identity_payload},
+        {
+            "excel_input": export["input_sha256"],
+            "profile_sha256": export["profile_sha256"],
+            "selected_concepts": list(active_keys),
+            "rows": canonical_rows,
+            "identity": identity_payload,
+            "graphs": graph_payload,
+        },
         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -382,7 +406,6 @@ def generate_case_letters(
         output_path = root / "salidas" / "cartas" / _safe_file_part(case["codigo"], fallback="COMUNIDAD") / _safe_file_part(
             case["period_name"], fallback="PERIODO"
         )
-        input_hash = _letter_input_hash(export, identity, rows)
         template_hash = _sha256(template)
         by_owner: dict[int, list[sqlite3.Row]] = {}
         owner_data: dict[int, dict[str, Any]] = {}
@@ -396,6 +419,7 @@ def generate_case_letters(
                 "coeficiente": row["coeficiente"],
             })
         graphs = _consumption_graphs(connection, case, list(owner_data.values()))
+        input_hash = _letter_input_hash(export, identity, rows, active_keys, graphs)
 
         reusable = _reusable_completed_run(
             connection,

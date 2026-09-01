@@ -186,7 +186,7 @@ def test_658_profile_declares_only_its_active_modules(tmp_path):
 
 Run:
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_db_migrations tests.test_excel_profiles -v
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_db_migrations tests.test_excel_profiles -v
 ```
 
 Expected: profile import fails and the migration assertions show that version 3 tables or the id_periodo column do not exist.
@@ -237,7 +237,7 @@ Add link_case_to_period so it reads the case name/dates, finds an existing perio
 Run the Task 1 tests again and then:
 
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest discover -s tests -t . -q
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest discover -s tests -t . -q
 ```
 
 Expected: all tests pass; migration is idempotent; profile has exactly the five 658 modules; case-to-period linking preserves dates.
@@ -294,7 +294,7 @@ def test_missing_required_component_creates_issue_and_blocks_case(self):
 
 Run:
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_excel_bootstrap_importer -v
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_excel_bootstrap_importer -v
 ```
 
 Expected: ModuleNotFoundError for excel_bootstrap_importer or missing import_master_excel.
@@ -387,7 +387,7 @@ Add a test that makes the recalculator report a formula error and assert no offi
 
 Run:
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_excel_export_service -v
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_excel_export_service -v
 ```
 
 Expected: ModuleNotFoundError or missing generation function.
@@ -423,8 +423,8 @@ Adapt the legacy regenerar_excel_comunidad entry point to call the new service w
 Run export tests, then:
 
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest discover -s tests -t . -q
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m py_compile core\office_recalculation.py core\excel_validation.py core\excel_export_service.py core\excel_generator.py
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest discover -s tests -t . -q
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m py_compile core\office_recalculation.py core\excel_validation.py core\excel_export_service.py core\excel_generator.py
 ```
 
 Expected: all workbook data are numeric/date typed, a failing workbook cannot replace official output, and a valid replacement produces a backup.
@@ -472,7 +472,7 @@ Add tests for zero total weights, one inactive owner, owner ordering that exerci
 
 Run:
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_case_distribution -v
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_case_distribution -v
 ```
 
 Expected: ModuleNotFoundError for case_distribution or missing calculate_case_distribution.
@@ -554,7 +554,7 @@ Add a test with ACS fixed/variable and credit but no heating, asserting the outp
 
 Run:
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_case_letter_service -v
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_case_letter_service -v
 ```
 
 Expected: ModuleNotFoundError for case_letter_service or missing generate_case_letters.
@@ -630,7 +630,7 @@ def test_distribution_action_does_not_run_when_export_is_not_validated(self):
 
 Run:
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_case_workflow_actions -v
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_case_workflow_actions -v
 ```
 
 Expected: action controller functions do not yet exist.
@@ -690,7 +690,7 @@ def test_private_validation_requires_explicit_source_environment(self):
 
 def test_real_source_paths_are_not_tracked_by_git(self):
     tracked = subprocess.check_output(["git", "ls-files"], text=True)
-    self.assertNotIn("658 ESTUDIO", tracked)
+    self.assertNotIn("<private-master-name>", tracked)
     self.assertNotIn("Listado propietarios", tracked)
 ```
 
@@ -698,7 +698,7 @@ def test_real_source_paths_are_not_tracked_by_git(self):
 
 Run:
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_private_658_validation -v
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_private_658_validation -v
 ```
 
 Expected: private validation helper or documented environment contract does not exist.
@@ -725,8 +725,8 @@ The guide must distinguish this initial bootstrap from later PDF-driven runs. It
 Run:
 
 ```powershell
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest discover -s tests -t . -q
-$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m py_compile core\app.py core\excel_profiles.py core\excel_bootstrap_importer.py core\office_recalculation.py core\excel_validation.py core\excel_export_service.py core\case_distribution.py core\case_letter_service.py
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest discover -s tests -t . -q
+$env:PYTHONUTF8='1'; & '<project-root>\.venv-fase1\Scripts\python.exe' -m py_compile core\app.py core\excel_profiles.py core\excel_bootstrap_importer.py core\office_recalculation.py core\excel_validation.py core\excel_export_service.py core\case_distribution.py core\case_letter_service.py
 git diff --check
 ```
 

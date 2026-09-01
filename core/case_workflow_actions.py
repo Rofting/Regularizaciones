@@ -18,7 +18,7 @@ import document_review
 import excel_bootstrap_importer
 import excel_export_service
 import expedient_service
-from excel_profiles import ExcelProfile, load_profile
+from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
 
 
 class WorkflowBlockedError(ValueError):
@@ -54,7 +54,8 @@ def resolve_case_profile(
     except LookupError as error:
         raise WorkflowBlockedError(str(error)) from error
     rows = connection.execute(
-        """SELECT co.codigo,profiles.profile_key,profiles.profile_version
+        """SELECT co.codigo,profiles.profile_key,profiles.profile_version,
+                  profiles.profile_sha256
            FROM comunidades co
            LEFT JOIN excel_template_profiles profiles
              ON profiles.id_comunidad=co.id_comunidad AND profiles.status='active'
@@ -99,6 +100,10 @@ def resolve_case_profile(
         raise WorkflowBlockedError("El perfil Excel activo no corresponde a la comunidad")
     if profile.version != str(row["profile_version"]):
         raise WorkflowBlockedError("La versión del perfil Excel activo no coincide con su registro")
+    if calculate_profile_sha256(profile, Path(project_root)) != str(row["profile_sha256"]):
+        raise WorkflowBlockedError(
+            "La huella del perfil Excel activo no coincide con su registro; reimporte y revalide"
+        )
     return profile
 
 
@@ -219,6 +224,7 @@ def run_calculate_distribution(
         _emit(progress, "calcular_reparto", id_case=id_case)
         result = calculate_case_distribution(
             connection, id_case=id_case,
+            project_root=Path(project_root),
             progress=_forward_progress(progress, "calcular_reparto"),
         )
         case = expedient_service.get_case(connection, id_case)

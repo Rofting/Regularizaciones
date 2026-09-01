@@ -27,7 +27,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import column_index_from_string
 
 from document_review import create_review_issue
-from excel_profiles import ExcelProfile
+from excel_profiles import ExcelProfile, calculate_profile_sha256
 from expedient_service import (
     get_case,
     link_case_to_period,
@@ -238,7 +238,7 @@ def _profile_sha256(project_root: Path, profile: ExcelProfile) -> str:
         raise TemplateInstallationError(
             f"No existe el perfil configurado para instalar la plantilla: {config_path}"
         )
-    return _sha256(config_path)
+    return calculate_profile_sha256(profile, project_root)
 
 
 def _record_template_conflict(
@@ -1123,8 +1123,18 @@ def import_master_excel(
     archived_path = _verified_archived_path(document)
     installed_template_path: Path | None = None
     installed_template_sha256: str | None = None
-    if project_root is not None:
-        installed_template_path, installed_template_sha256 = _install_private_template(
+
+    def install_validated_template() -> tuple[Path | None, str | None]:
+        if project_root is None:
+            return None, None
+        open_for_document = connection.execute(
+            """SELECT COUNT(*) FROM review_issues
+               WHERE id_document=? AND status='open'""",
+            (document.id_document,),
+        ).fetchone()[0]
+        if open_for_document:
+            return None, None
+        installed_path, installed_hash = _install_private_template(
             connection,
             id_case=id_case,
             document=document,
@@ -1138,8 +1148,9 @@ def import_master_excel(
             community_id=case.community_id,
             profile=profile,
             project_root=Path(project_root),
-            installed_hash=installed_template_sha256,
+            installed_hash=installed_hash,
         )
+        return installed_path, installed_hash
     source_kind = "excel_master_bootstrap"
     existing = _existing_batch(
         connection, case.community_id, document.sha256, source_kind
@@ -1150,6 +1161,7 @@ def import_master_excel(
             connection, id_case=id_case, id_batch=existing_batch_id,
             id_periodo=period_id, source_kind=source_kind,
         ):
+            installed_template_path, installed_template_sha256 = install_validated_template()
             return BootstrapImportResult(
                 existing_batch_id, period_id, 0, 0, 0,
                 _open_issue_count(connection, id_case), installed_template_path,
@@ -1171,6 +1183,7 @@ def import_master_excel(
         except Exception:
             connection.rollback()
             raise
+        installed_template_path, installed_template_sha256 = install_validated_template()
         return BootstrapImportResult(
             existing_batch_id, period_id, 0, 0, 0,
             _open_issue_count(connection, id_case), installed_template_path,
@@ -1237,6 +1250,7 @@ def import_master_excel(
     finally:
         formula_book.close()
         values_book.close()
+    installed_template_path, installed_template_sha256 = install_validated_template()
     return BootstrapImportResult(
         batch_id, period_id, imported, 0, 0,
         _open_issue_count(connection, id_case), installed_template_path,

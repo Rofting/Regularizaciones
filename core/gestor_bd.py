@@ -269,7 +269,7 @@ def crear_bd(ruta_bd: str) -> None:
             con.execute(sql)
         aplicar_migraciones(con)
         con.commit()
-    print(f"✅ BD lista en: {ruta_bd}")
+    print(f"BD lista en: {ruta_bd}")
 
 
 def aplicar_migraciones(con: sqlite3.Connection) -> int:

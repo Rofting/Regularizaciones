@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -54,8 +55,13 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                 template_sha256,profile_sha256,status)
                VALUES (?, '658_acs_v1', '1',
                        'plantillas/comunidades/658/658_acs_v1.xlsx',
-                       'template', 'profile', 'active')""",
-            (self.community_id,),
+                       'template', ?, 'active')""",
+            (
+                self.community_id,
+                hashlib.sha256(
+                    (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+                ).hexdigest(),
+            ),
         )
         self.connection.commit()
 
@@ -86,6 +92,32 @@ class CaseWorkflowActionsTest(unittest.TestCase):
 
         self.assertEqual("658_acs_v1", profile.key)
         self.assertEqual("658", profile.community_code)
+
+    def test_rejects_profile_bytes_changed_without_version_bump(self):
+        from case_workflow_actions import WorkflowBlockedError, resolve_case_profile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_path = root / "config" / "excel_profiles" / "658_acs_v1.json"
+            profile_path.parent.mkdir(parents=True)
+            profile_path.write_bytes(
+                (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+            )
+            registered_hash = hashlib.sha256(profile_path.read_bytes()).hexdigest()
+            self.connection.execute(
+                "UPDATE excel_template_profiles SET profile_sha256=? WHERE id_comunidad=?",
+                (registered_hash, self.community_id),
+            )
+            self.connection.commit()
+            profile_path.write_bytes(profile_path.read_bytes() + b"\n")
+
+            with self.assertRaisesRegex(WorkflowBlockedError, "huella"):
+                resolve_case_profile(
+                    self.connection,
+                    id_case=self.case_id,
+                    active_community_id=self.community_id,
+                    project_root=root,
+                )
 
     def test_resolves_single_json_profile_before_first_export_registration(self):
         from case_workflow_actions import resolve_case_profile

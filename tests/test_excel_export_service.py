@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sqlite3
 import sys
 import tempfile
@@ -546,8 +547,13 @@ class ExcelExportServiceTest(unittest.TestCase):
                (id_comunidad,profile_key,profile_version,template_relative_path,
                 template_sha256,profile_sha256,status)
                VALUES (?,?,?,?,?,?,'active')""",
-            (self.community_id, "658_acs_v1", "1",
-             PROFILE_DATA["template_relative_path"], "a" * 64, "b" * 64),
+            (
+                self.community_id, "658_acs_v1", "1",
+                PROFILE_DATA["template_relative_path"], "a" * 64,
+                hashlib.sha256(
+                    (self.project_root / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+                ).hexdigest(),
+            ),
         )
         self.connection.commit()
         self.assertEqual(
@@ -564,6 +570,27 @@ class ExcelExportServiceTest(unittest.TestCase):
         )
         self.connection.commit()
         with self.assertRaisesRegex(ExportBlockedError, "varios perfiles activos"):
+            _profile_for_community(self.connection, self.project_root, "658", self.community_id)
+
+    def test_active_profile_rejects_same_version_with_changed_bytes(self):
+        self.connection.execute(
+            """INSERT INTO excel_template_profiles
+               (id_comunidad,profile_key,profile_version,template_relative_path,
+                template_sha256,profile_sha256,status)
+               VALUES (?,?,?,?,?,?,'active')""",
+            (
+                self.community_id, "658_acs_v1", "1",
+                PROFILE_DATA["template_relative_path"], "a" * 64,
+                hashlib.sha256(
+                    (self.project_root / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+                ).hexdigest(),
+            ),
+        )
+        profile_path = self.project_root / "config" / "excel_profiles" / "658_acs_v1.json"
+        profile_path.write_bytes(profile_path.read_bytes() + b"\n")
+        self.connection.commit()
+
+        with self.assertRaisesRegex(ExportBlockedError, "huella"):
             _profile_for_community(self.connection, self.project_root, "658", self.community_id)
 
     def test_validator_rejects_layout_or_chart_design_change(self):
