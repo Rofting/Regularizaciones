@@ -105,7 +105,8 @@ def _validate_community_code(community_code: str) -> None:
         or not community_code
         or community_code[-1] in {".", " "}
         or any(character in _WINDOWS_RESERVED_CHARACTERS for character in community_code)
-        or community_code.upper() in _WINDOWS_RESERVED_NAMES
+        or any(ord(character) <= 0x1F for character in community_code)
+        or community_code.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES
     ):
         raise ValueError("El código de comunidad no permite crear una clave segura")
 

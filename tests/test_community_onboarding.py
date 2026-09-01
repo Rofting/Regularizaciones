@@ -206,7 +206,8 @@ class CommunityOnboardingTest(unittest.TestCase):
         for community_code in (
             "900/archivo", "900\\archivo", "900:", "900*", "900?", "900<",
             "900>", "900|", '900"', "900.", "900 ", "CON", "PRN", "AUX",
-            "NUL", "COM1", "COM9", "LPT1", "LPT9",
+            "NUL", "COM1", "COM9", "LPT1", "LPT9", "CON.txt", "COM1.csv",
+            "LPT9.foo", "900\x00", "900\x1f",
         ):
             draft = community_onboarding.OnboardingDraft(
                 community_code=community_code, community_name="Comunidad prueba",

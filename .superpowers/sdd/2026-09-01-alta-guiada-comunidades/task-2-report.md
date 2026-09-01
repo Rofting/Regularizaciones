@@ -42,3 +42,10 @@ han leído fuentes reales ni creado archivos de perfil o plantilla.
   derivar clave y ruta: rechaza separadores, caracteres reservados, finales con
   punto o espacio y dispositivos reservados. Los códigos normales siguen
   generando claves como `644_v1` y `900_v1`.
+
+## Corrección de revisión 2
+
+- La comprobación de dispositivos reservados usa el componente anterior al
+  primer punto, por lo que también rechaza `CON.txt`, `COM1.csv` y `LPT9.foo`.
+- Se rechazan los caracteres de control U+0000–U+001F en el código de
+  comunidad; se añadieron regresiones para ambos límites.
