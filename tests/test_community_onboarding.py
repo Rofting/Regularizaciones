@@ -113,6 +113,45 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.assertEqual(64, len(reading.sha256))
         self.assertTrue(any(question.required for question in draft.questions))
 
+    def test_analyse_sources_does_not_treat_identical_reading_columns_as_ambiguous(self):
+        second_readings = make_readings_workbook(
+            self.project_root / "same-readings.xlsx", ("Vivienda", "Lectura ACS")
+        )
+        first_readings = make_readings_workbook(
+            self.project_root / "first-readings.xlsx", ("Vivienda", "Lectura ACS")
+        )
+        draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv,
+            reading_paths=(first_readings, second_readings),
+            invoice_paths=(), project_root=self.project_root,
+        )
+        self.assertFalse(any(question.key == "reading_column" for question in draft.questions))
+
+    def test_analyse_sources_prioritizes_acs_over_partial_water_match_but_keeps_real_service_ambiguity(self):
+        acs_readings = make_readings_workbook(
+            self.project_root / "acs.xlsx", ("Vivienda", "Lectura Agua Caliente ACS")
+        )
+        acs_draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv, reading_paths=(acs_readings,),
+            invoice_paths=(), project_root=self.project_root,
+        )
+        self.assertEqual(("ACS",), acs_draft.detected_modules)
+        self.assertFalse(any(question.key == "service" for question in acs_draft.questions))
+
+        ambiguous_readings = make_readings_workbook(
+            self.project_root / "two-services.xlsx", ("Vivienda", "Lectura ACS", "Lectura Calefacción")
+        )
+        ambiguous_draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv, reading_paths=(ambiguous_readings,),
+            invoice_paths=(), project_root=self.project_root,
+        )
+        self.assertEqual(("ACS", "CALEFACCION"), ambiguous_draft.detected_modules)
+        self.assertTrue(any(question.key == "service" and question.required
+                            for question in ambiguous_draft.questions))
+
 
 if __name__ == "__main__":
     unittest.main()

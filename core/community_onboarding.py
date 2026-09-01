@@ -121,15 +121,22 @@ def _detected_modules(readings: tuple[SourceCandidate, ...]) -> tuple[str, ...]:
     material = " ".join(
         " ".join(source.headers) + " " + source.text for source in readings
     ).lower()
-    return tuple(
-        module for module, labels in _SERVICE_LABELS.items()
-        if any(label in material for label in labels)
-    )
+    modules = []
+    acs_labels = _SERVICE_LABELS["ACS"]
+    if any(label in material for label in acs_labels):
+        modules.append("ACS")
+        for label in acs_labels:
+            material = material.replace(label, " ")
+    if any(label in material for label in _SERVICE_LABELS["AGUA"]):
+        modules.append("AGUA")
+    if any(label in material for label in _SERVICE_LABELS["CALEFACCION"]):
+        modules.append("CALEFACCION")
+    return tuple(modules)
 
 
 def _questions(readings: tuple[SourceCandidate, ...]) -> tuple[OnboardingQuestion, ...]:
     questions: list[OnboardingQuestion] = []
-    reading_columns = tuple(
+    reading_columns = _unique_labels(
         header
         for source in readings
         for header in source.headers
@@ -151,3 +158,14 @@ def _questions(readings: tuple[SourceCandidate, ...]) -> tuple[OnboardingQuestio
             required=True,
         ))
     return tuple(questions)
+
+
+def _unique_labels(labels) -> tuple[str, ...]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        normalized = " ".join(label.split()).casefold()
+        if normalized not in seen:
+            seen.add(normalized)
+            unique.append(label)
+    return tuple(unique)
