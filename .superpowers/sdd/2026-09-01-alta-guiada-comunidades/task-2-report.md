@@ -32,3 +32,13 @@ hojas requeridas por módulo, referencias A1 y ruta segura.
 
 Las pruebas usan únicamente borradores y perfiles sintéticos temporales. No se
 han leído fuentes reales ni creado archivos de perfil o plantilla.
+
+## Corrección de revisión 1
+
+- Toda pregunta obligatoria exige una respuesta de texto no vacío; si declara
+  candidatos, la respuesta debe ser uno de ellos. Las respuestas vacías,
+  booleanas y ajenas se rechazan, incluyendo la columna de lectura.
+- El código de comunidad se valida como componente seguro de Windows antes de
+  derivar clave y ruta: rechaza separadores, caracteres reservados, finales con
+  punto o espacio y dispositivos reservados. Los códigos normales siguen
+  generando claves como `644_v1` y `900_v1`.

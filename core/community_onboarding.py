@@ -19,6 +19,12 @@ _SERVICE_LABELS = {
     "AGUA": ("agua",),
     "CALEFACCION": ("calefaccion", "calefacción"),
 }
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+})
+_WINDOWS_RESERVED_CHARACTERS = frozenset('<>:"/\\|?*')
 
 
 @dataclass(frozen=True)
@@ -56,9 +62,8 @@ def build_profile_payload(
         module for module in draft.detected_modules
         if answers.get(f"module:{module}") is True
     ]
+    _validate_community_code(draft.community_code)
     key = f"{draft.community_code}_v1"
-    if not draft.community_code or Path(key).name != key:
-        raise ValueError("El código de comunidad no permite crear una clave segura")
 
     required_sheets = [
         sheet
@@ -81,10 +86,28 @@ def _require_answers(
     questions: tuple[OnboardingQuestion, ...], answers: Mapping[str, str | bool]
 ) -> None:
     for question in questions:
-        if question.required and question.key not in answers:
+        if not question.required:
+            continue
+        answer = answers.get(question.key)
+        if (
+            not isinstance(answer, str)
+            or not answer.strip()
+            or (question.candidates and answer not in question.candidates)
+        ):
             if question.key == "reading_column":
                 raise ValueError("Debe responderse la columna de lectura obligatoria")
             raise ValueError(f"Debe responderse la pregunta obligatoria: {question.prompt}")
+
+
+def _validate_community_code(community_code: str) -> None:
+    if (
+        not isinstance(community_code, str)
+        or not community_code
+        or community_code[-1] in {".", " "}
+        or any(character in _WINDOWS_RESERVED_CHARACTERS for character in community_code)
+        or community_code.upper() in _WINDOWS_RESERVED_NAMES
+    ):
+        raise ValueError("El código de comunidad no permite crear una clave segura")
 
 
 def _concept_for(module: str) -> dict[str, object]:

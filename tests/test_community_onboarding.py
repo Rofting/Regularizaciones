@@ -175,6 +175,14 @@ class CommunityOnboardingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "columna de lectura"):
             community_onboarding.build_profile_payload(self.ambiguous_draft, answers={})
 
+    def test_profile_payload_rejects_empty_false_or_unknown_required_answers(self):
+        for answer in ("", False, "Otra columna"):
+            with self.subTest(answer=answer):
+                with self.assertRaisesRegex(ValueError, "columna de lectura"):
+                    community_onboarding.build_profile_payload(
+                        self.ambiguous_draft, answers={"reading_column": answer}
+                    )
+
     def test_profile_payload_contains_only_confirmed_modules(self):
         payload = community_onboarding.build_profile_payload(
             self.module_draft,
@@ -183,6 +191,30 @@ class CommunityOnboardingTest(unittest.TestCase):
         )
         self.assertIn("ACS", payload["active_modules"])
         self.assertNotIn("CALEFACCION", payload["active_modules"])
+
+    def test_profile_payload_accepts_safe_community_codes(self):
+        draft = community_onboarding.OnboardingDraft(
+            community_code="644", community_name="Comunidad prueba", sources=(),
+            detected_modules=(), questions=(),
+        )
+
+        self.assertEqual("644_v1", community_onboarding.build_profile_payload(
+            draft, answers={}
+        )["key"])
+
+    def test_profile_payload_rejects_unsafe_windows_community_codes(self):
+        for community_code in (
+            "900/archivo", "900\\archivo", "900:", "900*", "900?", "900<",
+            "900>", "900|", '900"', "900.", "900 ", "CON", "PRN", "AUX",
+            "NUL", "COM1", "COM9", "LPT1", "LPT9",
+        ):
+            draft = community_onboarding.OnboardingDraft(
+                community_code=community_code, community_name="Comunidad prueba",
+                sources=(), detected_modules=(), questions=(),
+            )
+            with self.subTest(community_code=community_code):
+                with self.assertRaisesRegex(ValueError, "código de comunidad"):
+                    community_onboarding.build_profile_payload(draft, answers={})
 
 
 if __name__ == "__main__":
