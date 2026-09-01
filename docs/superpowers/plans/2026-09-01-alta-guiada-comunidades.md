@@ -71,7 +71,7 @@ def test_analyse_sources_accepts_pdf_readings_as_an_alternative(self):
 
 - [ ] **Step 2: Run tests to verify RED**
 
-Run: `$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding -q`
+Run: `$env:PYTHONUTF8='1'; & $env:REGULARIZACION_PYTHON -m unittest tests.test_community_onboarding -q`
 
 Expected: FAIL because `community_onboarding` does not exist.
 
@@ -97,7 +97,7 @@ Validate file existence/extensions and calculate SHA-256. Inspect Excel headers 
 
 - [ ] **Step 4: Run tests to verify GREEN**
 
-Run: `$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding -q`
+Run: `$env:PYTHONUTF8='1'; & $env:REGULARIZACION_PYTHON -m unittest tests.test_community_onboarding -q`
 
 Expected: PASS.
 
@@ -136,7 +136,7 @@ def test_profile_payload_contains_only_confirmed_modules(self):
 
 - [ ] **Step 2: Run tests to verify RED**
 
-Run: `$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding tests.test_excel_profiles -q`
+Run: `$env:PYTHONUTF8='1'; & $env:REGULARIZACION_PYTHON -m unittest tests.test_community_onboarding tests.test_excel_profiles -q`
 
 Expected: FAIL because the builder and validator do not exist.
 
@@ -155,7 +155,7 @@ Create `<community_code>_v1`, a safe relative template path and only confirmed m
 
 - [ ] **Step 4: Run tests to verify GREEN**
 
-Run: `$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding tests.test_excel_profiles -q`
+Run: `$env:PYTHONUTF8='1'; & $env:REGULARIZACION_PYTHON -m unittest tests.test_community_onboarding tests.test_excel_profiles -q`
 
 Expected: PASS.
 
@@ -200,7 +200,7 @@ def test_confirm_onboarding_rolls_back_json_database_and_archives_after_error(se
 
 - [ ] **Step 2: Run tests to verify RED**
 
-Run: `$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding -q`
+Run: `$env:PYTHONUTF8='1'; & $env:REGULARIZACION_PYTHON -m unittest tests.test_community_onboarding -q`
 
 Expected: FAIL because `confirm_onboarding` does not exist.
 
@@ -220,7 +220,7 @@ Require both dates or neither. Publish the profile via a same-directory temporar
 
 - [ ] **Step 4: Run tests to verify GREEN**
 
-Run: `$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding tests.test_expedient_service -q`
+Run: `$env:PYTHONUTF8='1'; & $env:REGULARIZACION_PYTHON -m unittest tests.test_community_onboarding tests.test_expedient_service -q`
 
 Expected: PASS.
 
@@ -255,7 +255,7 @@ def test_onboarding_step_route_requires_answers_before_summary(self):
 
 - [ ] **Step 2: Run tests to verify RED**
 
-Run: `$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_expedient_ui -q`
+Run: `$env:PYTHONUTF8='1'; & $env:REGULARIZACION_PYTHON -m unittest tests.test_expedient_ui -q`
 
 Expected: FAIL because the route function does not exist.
 
@@ -275,17 +275,17 @@ Make **+ Comunidad** offer **Registro rápido** and **Alta guiada desde fuentes*
 
 Document the five stages, minimum sources, optional Excel and privacy rule. Run:
 
-Run: `$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_expedient_ui tests.test_community_onboarding -q`
+Run: `$env:PYTHONUTF8='1'; & $env:REGULARIZACION_PYTHON -m unittest tests.test_expedient_ui tests.test_community_onboarding -q`
 
 Expected: PASS.
 
 - [ ] **Step 5: Run complete verification and commit**
 
-Run: `$env:PYTHONUTF8='1'; & 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest discover -s tests -t . -q`
+Run: `$env:PYTHONUTF8='1'; & $env:REGULARIZACION_PYTHON -m unittest discover -s tests -t . -q`
 
 Expected: PASS.
 
-Run: `& 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m compileall -q core tests`
+Run: `& $env:REGULARIZACION_PYTHON -m compileall -q core tests`
 
 Expected: exit 0.
 
