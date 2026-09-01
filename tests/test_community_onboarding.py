@@ -73,6 +73,25 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.invoice_pdf = make_pdf(
             self.project_root / "invoice.pdf", "FACTURA SINTETICA"
         )
+        self.ambiguous_draft = community_onboarding.OnboardingDraft(
+            community_code="900",
+            community_name="Comunidad prueba",
+            sources=(),
+            detected_modules=("ACS",),
+            questions=(community_onboarding.OnboardingQuestion(
+                key="reading_column",
+                prompt="Selecciona la columna de lectura.",
+                candidates=("Lectura inicial", "Lectura final"),
+                required=True,
+            ),),
+        )
+        self.module_draft = community_onboarding.OnboardingDraft(
+            community_code="900",
+            community_name="Comunidad prueba",
+            sources=(),
+            detected_modules=("ACS", "CALEFACCION"),
+            questions=(),
+        )
 
     def tearDown(self):
         self.connection.close()
@@ -151,6 +170,19 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.assertEqual(("ACS", "CALEFACCION"), ambiguous_draft.detected_modules)
         self.assertTrue(any(question.key == "service" and question.required
                             for question in ambiguous_draft.questions))
+
+    def test_profile_payload_requires_an_answer_for_ambiguous_reading_column(self):
+        with self.assertRaisesRegex(ValueError, "columna de lectura"):
+            community_onboarding.build_profile_payload(self.ambiguous_draft, answers={})
+
+    def test_profile_payload_contains_only_confirmed_modules(self):
+        payload = community_onboarding.build_profile_payload(
+            self.module_draft,
+            answers={"reading_column": "Lectura", "module:ACS": True,
+                     "module:CALEFACCION": False},
+        )
+        self.assertIn("ACS", payload["active_modules"])
+        self.assertNotIn("CALEFACCION", payload["active_modules"])
 
 
 if __name__ == "__main__":

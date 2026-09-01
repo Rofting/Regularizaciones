@@ -20,6 +20,30 @@ import gestor_bd
 
 
 class ExcelProfileTest(unittest.TestCase):
+    def test_validate_profile_payload_uses_profile_validations_without_writing_json(self):
+        payload = {
+            "key": "900_v1",
+            "version": "1",
+            "community_code": "900",
+            "template_relative_path": "plantillas/comunidades/900_v1.xlsx",
+            "active_modules": ["ACS"],
+            "required_sheets": ["LECTURAS ACS M3", "ANALISIS"],
+            "required_formula_cells": [["ANALISIS", "H23"]],
+            "concepts": [{
+                "key": "acs",
+                "allocation_method": "consumption",
+                "actual_source": "period_parameters.acs_actual",
+                "billed_source": None,
+                "required": True,
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = excel_profiles.validate_profile_payload(payload, root)
+
+            self.assertEqual("900_v1", profile.key)
+            self.assertFalse((root / "config" / "excel_profiles" / "900_v1.json").exists())
+
     def test_658_profile_declares_only_its_active_modules(self):
         profile = excel_profiles.load_profile("658_acs_v1", PROJECT_ROOT)
 

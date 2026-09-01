@@ -242,23 +242,15 @@ def _workbook_layout(value: Any) -> Mapping[str, Any]:
     return _freeze_json(value)
 
 
-def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
-    """Carga y valida un perfil versionado sin salir del directorio de configuración."""
-    if not profile_key or Path(profile_key).name != profile_key:
-        raise ValueError("Clave de perfil no válida")
-    path = Path(project_root) / "config" / "excel_profiles" / f"{profile_key}.json"
-    try:
-        source_bytes = path.read_bytes()
-        data = json.loads(source_bytes.decode("utf-8"))
-    except FileNotFoundError:
-        raise LookupError(f"Perfil Excel no encontrado: {profile_key}") from None
-    except json.JSONDecodeError as error:
-        raise ValueError(f"JSON de perfil no válido: {error.msg}") from error
-    if not isinstance(data, dict):
+def validate_profile_payload(payload: Mapping[str, Any], project_root: Path) -> ExcelProfile:
+    """Validate an in-memory profile payload without creating any files."""
+    if not isinstance(payload, Mapping):
         raise ValueError("El perfil Excel debe ser un objeto JSON")
+    data = dict(payload)
+    profile_key = data.get("key")
+    if not isinstance(profile_key, str) or not profile_key or Path(profile_key).name != profile_key:
+        raise ValueError("Clave de perfil no válida")
     _require_fields(data, _PROFILE_FIELDS, "perfil")
-    if data["key"] != profile_key:
-        raise ValueError("La clave interna del perfil no coincide con el archivo")
 
     active_modules = _string_tuple(data["active_modules"], "active_modules")
     unsupported_modules = sorted(set(active_modules).difference(MODULE_REQUIRED_SHEETS))
@@ -299,6 +291,37 @@ def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
         required_formula_cells=formula_cells,
         concepts=_concepts(data["concepts"]),
         workbook_layout=_workbook_layout(data.get("workbook_layout")),
+        source_sha256="",
+    )
+
+
+def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
+    """Carga y valida un perfil versionado sin salir del directorio de configuración."""
+    if not profile_key or Path(profile_key).name != profile_key:
+        raise ValueError("Clave de perfil no válida")
+    path = Path(project_root) / "config" / "excel_profiles" / f"{profile_key}.json"
+    try:
+        source_bytes = path.read_bytes()
+        data = json.loads(source_bytes.decode("utf-8"))
+    except FileNotFoundError:
+        raise LookupError(f"Perfil Excel no encontrado: {profile_key}") from None
+    except json.JSONDecodeError as error:
+        raise ValueError(f"JSON de perfil no válido: {error.msg}") from error
+    if not isinstance(data, dict):
+        raise ValueError("El perfil Excel debe ser un objeto JSON")
+    if data.get("key") != profile_key:
+        raise ValueError("La clave interna del perfil no coincide con el archivo")
+    profile = validate_profile_payload(data, project_root)
+    return ExcelProfile(
+        key=profile.key,
+        version=profile.version,
+        community_code=profile.community_code,
+        template_relative_path=profile.template_relative_path,
+        active_modules=profile.active_modules,
+        required_sheets=profile.required_sheets,
+        required_formula_cells=profile.required_formula_cells,
+        concepts=profile.concepts,
+        workbook_layout=profile.workbook_layout,
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
     )
 

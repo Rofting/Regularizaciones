@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 from openpyxl import load_workbook
 
+from excel_profiles import MODULE_REQUIRED_SHEETS
 from lector_pdf import extraer_texto
 
 
@@ -43,6 +45,56 @@ class OnboardingDraft:
     sources: tuple[SourceCandidate, ...]
     detected_modules: tuple[str, ...]
     questions: tuple[OnboardingQuestion, ...]
+
+
+def build_profile_payload(
+    draft: OnboardingDraft, answers: Mapping[str, str | bool]
+) -> dict[str, object]:
+    """Build an in-memory, validated-shape profile from explicit answers."""
+    _require_answers(draft.questions, answers)
+    active_modules = [
+        module for module in draft.detected_modules
+        if answers.get(f"module:{module}") is True
+    ]
+    key = f"{draft.community_code}_v1"
+    if not draft.community_code or Path(key).name != key:
+        raise ValueError("El código de comunidad no permite crear una clave segura")
+
+    required_sheets = [
+        sheet
+        for module in active_modules
+        for sheet in MODULE_REQUIRED_SHEETS[module]
+    ]
+    return {
+        "key": key,
+        "version": "1",
+        "community_code": draft.community_code,
+        "template_relative_path": f"plantillas/comunidades/{key}.xlsx",
+        "active_modules": active_modules,
+        "required_sheets": required_sheets,
+        "required_formula_cells": [],
+        "concepts": [_concept_for(module) for module in active_modules],
+    }
+
+
+def _require_answers(
+    questions: tuple[OnboardingQuestion, ...], answers: Mapping[str, str | bool]
+) -> None:
+    for question in questions:
+        if question.required and question.key not in answers:
+            if question.key == "reading_column":
+                raise ValueError("Debe responderse la columna de lectura obligatoria")
+            raise ValueError(f"Debe responderse la pregunta obligatoria: {question.prompt}")
+
+
+def _concept_for(module: str) -> dict[str, object]:
+    return {
+        "key": module.lower(),
+        "allocation_method": "consumption",
+        "actual_source": f"period_parameters.{module.lower()}_actual",
+        "billed_source": f"period_parameters.{module.lower()}_billed",
+        "required": True,
+    }
 
 
 def analyse_sources(
