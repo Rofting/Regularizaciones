@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -296,10 +297,16 @@ class CommunityOnboardingTest(unittest.TestCase):
     def test_confirm_onboarding_rolls_back_json_database_template_and_archives_after_error(self):
         real_register = expedient_service.register_source_document
         calls = 0
+        sentinel_path = None
 
         def fail_after_two_real_registrations(*args, **kwargs):
-            nonlocal calls
+            nonlocal calls, sentinel_path
             calls += 1
+            if calls == 1:
+                case_id = args[1]
+                sentinel_path = self.archive_root / str(case_id) / "fuentes" / "ajeno.txt"
+                sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+                sentinel_path.write_bytes(b"no pertenece al alta")
             result = real_register(*args, **kwargs)
             if calls == 3:
                 raise OSError("fallo sintético tardío")
@@ -320,7 +327,59 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.assertFalse((self.project_root / "plantillas/comunidades/900").exists())
         self.assertEqual(0, self._community_count())
         self.assertEqual(0, self._registered_source_count())
-        self.assertEqual([], list(self.archive_root.rglob("*")) if self.archive_root.exists() else [])
+        self.assertIsNotNone(sentinel_path)
+        self.assertEqual(b"no pertenece al alta", sentinel_path.read_bytes())
+        self.assertEqual(
+            [sentinel_path],
+            [path for path in self.archive_root.rglob("*") if path.is_file()],
+        )
+
+    def test_confirm_onboarding_never_replaces_a_concurrent_template(self):
+        template_path = self.project_root / "plantillas/comunidades/900/900_v1.xlsx"
+        sentinel = b"plantilla concurrente"
+        real_link = os.link
+
+        def publish_after_concurrent_create(source, destination):
+            destination = Path(destination)
+            if destination == template_path:
+                destination.write_bytes(sentinel)
+            return real_link(source, destination)
+
+        with patch("community_onboarding.os.link", side_effect=publish_after_concurrent_create):
+            with self.assertRaises(FileExistsError):
+                community_onboarding.confirm_onboarding(
+                    self.connection, **self._confirmation_arguments()
+                )
+
+        self.assertEqual(sentinel, template_path.read_bytes())
+        self.assertFalse((self.project_root / "config/excel_profiles/900_v1.json").exists())
+        self.assertEqual(0, self._community_count())
+
+    def test_confirm_onboarding_never_replaces_a_concurrent_profile(self):
+        profile_path = self.project_root / "config/excel_profiles/900_v1.json"
+        template_path = self.project_root / "plantillas/comunidades/900/900_v1.xlsx"
+        sentinel = b'{"propietario":"ajeno"}'
+        real_link = os.link
+        calls = 0
+
+        def publish_after_concurrent_create(source, destination):
+            nonlocal calls
+            calls += 1
+            destination = Path(destination)
+            if calls == 2:
+                self.assertEqual(profile_path, destination)
+                destination.write_bytes(sentinel)
+            return real_link(source, destination)
+
+        with patch("community_onboarding.os.link", side_effect=publish_after_concurrent_create):
+            with self.assertRaises(FileExistsError):
+                community_onboarding.confirm_onboarding(
+                    self.connection, **self._confirmation_arguments()
+                )
+
+        self.assertEqual(sentinel, profile_path.read_bytes())
+        self.assertFalse(template_path.exists())
+        self.assertEqual(0, self._community_count())
 
     def test_confirm_onboarding_rejects_partial_period_dates_without_side_effects(self):
         arguments = self._confirmation_arguments()

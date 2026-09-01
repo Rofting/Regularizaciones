@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 import tempfile
 from dataclasses import dataclass
@@ -124,7 +123,6 @@ def confirm_onboarding(
 
     root = Path(project_root).resolve()
     archives = Path(archive_root).resolve()
-    archive_root_existed = archives.exists()
     payload = build_profile_payload(draft, answers)
     _verify_source_fingerprints(draft.sources)
     key = str(payload["key"])
@@ -190,12 +188,14 @@ def confirm_onboarding(
         reloaded_payload = json.loads(profile_temporary.read_text(encoding="utf-8"))
         validate_profile_payload(reloaded_payload, root)
 
-        os.replace(template_temporary, template_path)
-        template_temporary = None
+        _publish_exclusive(template_temporary, template_path)
         template_created = True
-        os.replace(profile_temporary, profile_path)
-        profile_temporary = None
+        _unlink_created_file(template_temporary)
+        template_temporary = None
+        _publish_exclusive(profile_temporary, profile_path)
         profile_created = True
+        _unlink_created_file(profile_temporary)
+        profile_temporary = None
 
         community_id = gestor_bd.obtener_o_crear_comunidad(
             connection, draft.community_code, draft.community_name
@@ -213,13 +213,22 @@ def confirm_onboarding(
             period_id = expedient_service.link_case_to_period(connection, case_id)
             period_created = period_id not in period_ids_before
             for source in draft.sources:
-                document, created = expedient_service.register_source_document(
-                    connection,
-                    case_id,
-                    source_path=source.path,
-                    archive_root=archives,
-                    document_kind=source.kind,
-                )
+                try:
+                    document, created = expedient_service.register_source_document(
+                        connection,
+                        case_id,
+                        source_path=source.path,
+                        archive_root=archives,
+                        document_kind=source.kind,
+                    )
+                except Exception:
+                    recovered = _registered_source_row(
+                        connection, case_id, source.sha256
+                    )
+                    if recovered is not None and int(recovered[0]) not in document_ids:
+                        document_ids.append(int(recovered[0]))
+                        archived_paths.append(Path(recovered[1]))
+                    raise
                 if created:
                     document_ids.append(document.id_document)
                     archived_paths.append(document.archived_path)
@@ -243,10 +252,6 @@ def confirm_onboarding(
         for archived_path in reversed(archived_paths):
             _unlink_created_file(archived_path)
             _remove_empty_parents(archived_path.parent, archives)
-        if case_id is not None:
-            _remove_case_archive(archives, case_id)
-            if not archive_root_existed:
-                _remove_empty_parents(archives, archives)
         if profile_created:
             _unlink_created_file(profile_path)
         if template_created:
@@ -324,13 +329,19 @@ def _unlink_created_file(path: Path) -> None:
         pass
 
 
-def _remove_case_archive(archive_root: Path, case_id: int) -> None:
-    case_archive = (archive_root / str(case_id)).resolve()
-    try:
-        case_archive.relative_to(archive_root.resolve())
-    except ValueError:
-        raise RuntimeError("La ruta compensada del expediente queda fuera del archivo") from None
-    shutil.rmtree(case_archive, ignore_errors=True)
+def _publish_exclusive(source: Path, destination: Path) -> None:
+    """Publish a same-filesystem temporary without ever replacing a destination."""
+    os.link(source, destination)
+
+
+def _registered_source_row(
+    connection: sqlite3.Connection, case_id: int, sha256: str
+):
+    return connection.execute(
+        """SELECT id_document, archived_path FROM source_documents
+           WHERE id_case=? AND sha256=?""",
+        (case_id, sha256),
+    ).fetchone()
 
 
 def _remove_empty_parents(directory: Path, boundary: Path) -> None:
