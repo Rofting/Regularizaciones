@@ -28,11 +28,13 @@
 | --- | --- |
 | `core/community_onboarding.py` | Borrador, análisis, preguntas, perfil y confirmación atómica. |
 | `core/excel_profiles.py` | Validación pública de un payload antes de publicar JSON. |
+| `core/excel_generator.py` | Generación del libro base canónico para perfiles creados por el asistente. |
 | `core/expedient_ui.py` | Ruta pura y diálogo visual de cinco pasos. |
 | `core/app.py` | Carga del servicio, apertura y refresco de selectores. |
 | `tests/test_community_onboarding.py` | Análisis, perfil, confirmación, fuentes alternativas y rollback. |
 | `tests/test_expedient_ui.py` | Enrutado visual sin controles Tk. |
 | `GUIA_PROCESAR_TODO.txt` | Alta operativa sin Excel maestro manual. |
+| `.gitignore` | Excluir perfiles generados localmente sin ocultar el perfil público 658. |
 
 ### Task 1: Borrador y análisis no destructivo
 
@@ -165,6 +167,8 @@ Commit message: `feat: construye perfiles confirmados de comunidades`
 
 **Files:**
 - Modify: `core/community_onboarding.py`
+- Modify: `core/excel_generator.py`
+- Modify: `.gitignore`
 - Modify: `tests/test_community_onboarding.py`
 
 **Interfaces:**
@@ -183,6 +187,7 @@ def test_confirm_onboarding_writes_profile_archives_sources_and_creates_case(sel
     )
     self.assertIsNotNone(result.case_id)
     self.assertTrue((self.project_root / "config/excel_profiles/900_v1.json").is_file())
+    self.assertTrue((self.project_root / "plantillas/comunidades/900/900_v1.xlsx").is_file())
     self.assertEqual(3, self._registered_source_count())
 
 def test_confirm_onboarding_rolls_back_json_database_and_archives_after_error(self):
@@ -211,7 +216,7 @@ def confirm_onboarding(connection: sqlite3.Connection, *, draft: OnboardingDraft
     return _publish_onboarding(connection, draft, profile, archive_root, actor)
 ```
 
-Require both dates or neither. Publish the profile via a same-directory temporary file after validation. Create community/period/case with existing services and archive every source with SHA. On exception, revert database state and remove only artefacts created by the call.
+Require both dates or neither. Publish the profile via a same-directory temporary file after validation. Use `excel_generator` to create a canonical workbook with only the confirmed module sheets and the matching declarative layout; install it under the private template path before committing success. Create community/period/case with existing services and archive every source with SHA. `register_source_document` owns its SQLite transaction, so compensate explicitly on exception: delete only the source rows/archive paths, JSON and template created by this call. Add `.gitignore` rules for newly generated local profile JSON files while retaining the committed `658_acs_v1.json`.
 
 - [ ] **Step 4: Run tests to verify GREEN**
 
