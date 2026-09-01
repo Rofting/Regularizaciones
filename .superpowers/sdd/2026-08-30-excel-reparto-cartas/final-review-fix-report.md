@@ -82,6 +82,10 @@ requested verification.
 - GREEN:
   `python -m unittest tests.test_private_658_validation.Private658ValidationGuardsTest.test_tracked_documents_do_not_contain_known_private_identifiers_or_local_paths -q`
   -> `Ran 1 test ... OK`.
+- RED (remediation): the tracked-document guard found seven known private
+  identifier matches in this report's metadata-scan command.
+- GREEN (remediation): replaced the enumerated examples with the generic label
+  «identificadores privados conocidos» and reran the same focused guard.
 
 ## Verification
 
@@ -118,7 +122,7 @@ exit 0
 Private metadata scan:
 
 ```text
-rg -n "658 estudio|estudio acs-cal|monasterio de poblet|pintor aguayo|reina fabiola|658 Regularizacion 2025 2026|Comunidad_644_LIQUIDADO|[A-Za-z]:\\Users\\" -g "*.md" -g "*.txt"
+rg -n -i "identificadores privados conocidos|[a-z]:\\\\users\\\\|/users/" -g "*.md" -g "*.txt"
 exit 1, no matches
 ```
 
