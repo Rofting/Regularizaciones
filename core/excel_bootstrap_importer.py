@@ -27,7 +27,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import column_index_from_string
 
 from document_review import create_review_issue
-from excel_profiles import ExcelProfile, calculate_profile_sha256
+from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
 from expedient_service import (
     get_case,
     link_case_to_period,
@@ -233,12 +233,13 @@ def _private_template_path(project_root: Path, profile: ExcelProfile) -> Path:
 
 
 def _profile_sha256(project_root: Path, profile: ExcelProfile) -> str:
-    config_path = Path(project_root).resolve() / "config" / "excel_profiles" / f"{profile.key}.json"
-    if not config_path.is_file():
+    try:
+        resolved_profile = load_profile(profile.key, project_root)
+    except LookupError as error:
         raise TemplateInstallationError(
-            f"No existe el perfil configurado para instalar la plantilla: {config_path}"
-        )
-    return calculate_profile_sha256(profile, project_root)
+            f"No existe el perfil configurado para instalar la plantilla: {profile.key}"
+        ) from error
+    return calculate_profile_sha256(resolved_profile, project_root)
 
 
 def _record_template_conflict(

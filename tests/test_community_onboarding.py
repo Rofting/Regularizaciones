@@ -305,6 +305,33 @@ class CommunityOnboardingTest(unittest.TestCase):
             project_root=self.project_root,
         ).key)
 
+    def test_onboarded_runtime_profile_installs_bootstrap_template_for_long_code(self):
+        draft = community_onboarding.OnboardingDraft(
+            community_code="1234",
+            community_name="Comunidad prueba larga",
+            sources=self.valid_draft.sources,
+            detected_modules=self.valid_draft.detected_modules,
+            questions=self.valid_draft.questions,
+        )
+        result = community_onboarding.confirm_onboarding(
+            self.connection,
+            **{**self._confirmation_arguments(), "draft": draft},
+        )
+        template = self.project_root / "plantillas/comunidades/1234/1234_v1.xlsx"
+
+        bootstrap, companions = case_workflow_actions.run_bootstrap_import(
+            self.database,
+            id_case=result.case_id,
+            active_community_id=result.community_id,
+            project_root=self.project_root,
+            master_path=template,
+            actor="Prueba",
+        )
+
+        self.assertIsNone(companions)
+        self.assertEqual(template, bootstrap.installed_template_path)
+        self.assertTrue(template.is_file())
+
     def test_confirm_onboarding_rolls_back_json_database_template_and_archives_after_error(self):
         real_register = expedient_service.register_source_document
         calls = 0

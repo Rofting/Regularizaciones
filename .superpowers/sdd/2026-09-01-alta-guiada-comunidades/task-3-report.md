@@ -71,3 +71,40 @@ cambiar la clave `<codigo>_v1`.
 La creación exclusiva usa enlaces duros entre temporal y destino en el mismo
 directorio. En un sistema de archivos que no admita enlaces duros, el alta
 abortará sin sustituir ni publicar parcialmente ningún destino.
+
+## Ronda 3 — resolvedor de perfil durante bootstrap
+
+`excel_bootstrap_importer._profile_sha256` reconstruía la ruta pública
+`config/excel_profiles/<key>.json` para comprobar la existencia del perfil.
+Esto contradecía el resolvedor central: una comunidad dada de alta publica su
+perfil local en `config/excel_profiles/runtime/`, que sólo se usa como fallback
+cuando no existe un perfil público con la misma clave. Por tanto,
+`run_bootstrap_import` llegaba a la instalación de plantilla y fallaba con
+`TemplateInstallationError` aunque el perfil runtime ya hubiera sido cargado y
+validado para el expediente.
+
+El importador ahora usa `load_profile(profile.key, project_root)` antes de
+calcular la huella. Así reutiliza exactamente la prioridad público → runtime,
+mantiene la validación del JSON y convierte únicamente la ausencia real del
+perfil en `TemplateInstallationError`; no introduce ninguna ruta duplicada ni
+altera el patrón Git que ignora solamente `runtime/`.
+
+### TDD y verificación de ronda 3
+
+- Las pruebas se ejecutaron con PowerShell y el runtime local de Codex:
+  `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'`.
+- RED: `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_community_onboarding.CommunityOnboardingTest.test_onboarded_runtime_profile_installs_bootstrap_template_for_long_code`
+  falló antes de la corrección con `TemplateInstallationError`: el importador
+  buscaba `config/excel_profiles/1234_v1.json` en lugar del perfil runtime.
+- GREEN de regresión: el mismo comando fue correcto tras la corrección. Cubre
+  una comunidad onboarding `1234`, ejecuta `run_bootstrap_import` contra su
+  plantilla y confirma que la instalación queda disponible sin error.
+- Focales: `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_community_onboarding tests.test_excel_bootstrap_importer` — 43 pruebas correctas.
+- Suite completa: `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest discover -s tests` — 173 pruebas correctas.
+- Compilación: `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m compileall -q core tests` — correcta.
+- `git diff --check` — correcto.
+
+El runtime inicial no incluía `xlrd`, `customtkinter`, `matplotlib` ni `xlwt`,
+dependencias ya declaradas en `requirements.txt`; se instalaron en el runtime
+local de verificación antes de repetir la suite completa. No se modificó ningún
+archivo de dependencias del proyecto.
