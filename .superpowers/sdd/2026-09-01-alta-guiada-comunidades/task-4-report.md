@@ -89,3 +89,64 @@ Las ejecuciones se realizaron con el intérprete del entorno
   el aspecto se revisó contra los componentes y tokens v3 existentes. El
   enrutado, el servicio y la compilación sí quedan cubiertos por pruebas
   automatizadas.
+
+## Ronda 1 de corrección — revisión sobre `18b94ee`
+
+### Hallazgos y cambios
+
+- P1: la devolución del worker establecía `detected`, pero `render("detection")`
+  lo sobrescribía. La etapa real es ahora `detection` y el éxito se representa
+  con `analysis_complete`. El enrutado acepta también el alias `detected`.
+  El botón real de detección alcanza confirmaciones, exige las respuestas
+  obligatorias, llega al resumen y permite publicar.
+- P2: `has_sources` indica solamente que están elegidos propietarios y lecturas.
+  Un análisis completado se distingue mediante `analysis_complete`. Volver a
+  identidad y continuar conduce a fuentes, donde puede iniciarse/reintentarse
+  el análisis; una pantalla de detección sin worker ni borrador válido vuelve
+  a fuentes. Los errores no dejan una pantalla de espera infinita.
+- P2: cada análisis invalida borrador, respuestas y variables anteriores antes
+  de mostrar progreso. Una generación identifica la petición; los cambios de
+  identidad (incluido el período) la invalidan y un callback desfasado no instala
+  resultados. Mientras trabaja, los callbacks de selección, navegación,
+  confirmación y publicación están bloqueados. La publicación captura borrador
+  y respuestas antes de lanzar el worker, sin leer variables Tk desde él.
+- P2: el resumen y el progreso explican que sin período inicial no se archivan
+  fuentes. El mensaje de éxito usa el número real de documentos devueltos por
+  el servicio. El contrato existente se llama `OnboardingResult.source_document_ids`,
+  no `documents_registered`; se utiliza su longitud sin modificar el servicio.
+- P3: `Quitar facturas` vacía la selección opcional, actualiza su etiqueta e
+  invalida el análisis y las respuestas previas.
+- Se conservan el registro rápido, el mecanismo `_en_hilo`/`_estado`, los
+  servicios de dominio y los componentes y tokens visuales v3.
+
+### Pruebas y comandos reales
+
+Las ejecuciones usan `PYTHONUTF8=1` y el intérprete
+`../../.venv-fase1/Scripts/python.exe`, desde este worktree.
+
+- RED: `-m unittest tests.test_expedient_ui -q` ejecutó 12 pruebas y produjo
+  8 fallos (incluidos subcasos): transición real bloqueada, retorno tras error,
+  resultado desfasado, navegación del borrador anterior, fuentes editables,
+  ausencia de retirada de facturas y mensajes de archivado.
+- Tras corregir la transición, la misma orden dejó 6 fallos que confirmaban
+  específicamente los demás problemas, incluidos resumen y mensaje de éxito.
+- Se añadieron 10 pruebas de callbacks del diálogo y una guardia pura. Los
+  dobles sustituyen sólo controles/variables Tk, selectores, servicios y la
+  planificación del worker. Se ejecutan `open_community_onboarding_dialog`,
+  los comandos entregados a sus botones y los callbacks `after` reales.
+  Ninguna prueba crea Tk. Se cubren también reanálisis exitoso con respuestas
+  nuevas, publicación antigua bloqueada, ausencia de preguntas y cambio de
+  período entre la finalización del worker y la devolución a la interfaz.
+- GREEN focal: `-m unittest tests.test_expedient_ui tests.test_community_onboarding -q`
+  ejecutó 33 pruebas correctas en 1,856 s.
+- Suite completa: `-m unittest discover -s tests -t . -q` ejecutó 189 pruebas
+  correctas en 27,066 s.
+- `-m compileall -q core tests`: salida 0.
+- `git diff --check`: salida 0; avisos informativos de normalización LF/CRLF.
+
+### Preocupaciones restantes
+
+- No se abrió una sesión gráfica Tk; los callbacks y el contenido se verifican
+  sin ventanas, y los servicios tienen su batería de integración independiente.
+- El archivado requiere período inicial por contrato del servicio existente;
+  ahora queda explicado antes de crear y el resultado informa lo registrado.

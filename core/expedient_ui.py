@@ -28,13 +28,15 @@ def onboarding_step_route(state: Mapping[str, Any]) -> str:
         return "identity"
     if not state.get("has_sources", False):
         return "sources"
+    if not state.get("analysis_complete", False):
+        return "sources"
 
     step = state.get("step", "identity")
     required_answers_missing = (
         state.get("has_required_questions", False)
         and not state.get("answers_complete", False)
     )
-    if step in {"detected", "confirmations", "summary"}:
+    if step in {"detection", "detected", "confirmations", "summary"}:
         if required_answers_missing:
             return "confirmations"
         if step in {"confirmations", "summary"}:
@@ -70,13 +72,32 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         "step": "identity",
         "identity_valid": False,
         "has_sources": False,
+        "analysis_complete": False,
         "has_required_questions": False,
         "answers_complete": False,
         "draft": None,
         "answers": {},
+        "analysis_generation": 0,
     }
     answer_variables: dict[str, tk.Variable] = {}
     busy = {"active": False}
+
+    def invalidate_analysis():
+        state["analysis_generation"] += 1
+        state["draft"] = None
+        state["analysis_complete"] = False
+        state["has_required_questions"] = False
+        state["answers_complete"] = False
+        state["answers"] = {}
+        answer_variables.clear()
+        state["has_sources"] = bool(selected["owners"] and selected["readings"])
+
+    def identity_changed(*_args):
+        state["identity_valid"] = False
+        invalidate_analysis()
+
+    for variable in identity.values():
+        variable.trace_add("write", identity_changed)
 
     shell = ctk.CTkFrame(
         dialog,
@@ -241,6 +262,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         return values[0], start, end
 
     def validate_identity():
+        if busy["active"]:
+            return
         if not identity["code"].get().strip() or not identity["name"].get().strip():
             messagebox.showwarning(
                 "Identidad incompleta",
@@ -253,18 +276,12 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         except ValueError as exc:
             messagebox.showwarning("Período incompleto", str(exc), parent=dialog)
             return
-        draft = state.get("draft")
-        if draft is not None and (
-            draft.community_code != identity["code"].get().strip()
-            or draft.community_name != identity["name"].get().strip()
-        ):
-            state["draft"] = None
-            state["has_sources"] = False
         state["identity_valid"] = True
-        state["step"] = "identity"
-        render(onboarding_step_route(state))
+        render("sources")
 
     def select_owners():
+        if busy["active"]:
+            return
         path = filedialog.askopenfilename(
             parent=dialog,
             title="Selecciona la lista de propietarios",
@@ -273,10 +290,11 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         if path:
             selected["owners"] = Path(path)
             source_labels["owners"].set(Path(path).name)
-            state["draft"] = None
-            state["has_sources"] = False
+            invalidate_analysis()
 
     def select_readings():
+        if busy["active"]:
+            return
         paths = filedialog.askopenfilenames(
             parent=dialog,
             title="Selecciona una o más lecturas",
@@ -291,10 +309,11 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             source_labels["readings"].set(
                 f"{len(paths)} archivo(s): " + ", ".join(Path(path).name for path in paths)
             )
-            state["draft"] = None
-            state["has_sources"] = False
+            invalidate_analysis()
 
     def select_invoices():
+        if busy["active"]:
+            return
         paths = filedialog.askopenfilenames(
             parent=dialog,
             title="Selecciona facturas PDF opcionales",
@@ -305,8 +324,14 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             source_labels["invoices"].set(
                 f"{len(paths)} archivo(s): " + ", ".join(Path(path).name for path in paths)
             )
-            state["draft"] = None
-            state["has_sources"] = False
+            invalidate_analysis()
+
+    def clear_invoices():
+        if busy["active"]:
+            return
+        selected["invoices"] = []
+        source_labels["invoices"].set("Opcional · ningún archivo")
+        invalidate_analysis()
 
     def source_row(title: str, help_text: str, variable, command, button_text: str):
         row = ctk.CTkFrame(
@@ -349,6 +374,11 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         ).pack(side="right", padx=14)
 
     def begin_analysis():
+        if busy["active"]:
+            return
+        if not state["identity_valid"]:
+            render("identity")
+            return
         state["has_sources"] = bool(selected["owners"] and selected["readings"])
         if not state["has_sources"]:
             messagebox.showwarning(
@@ -362,7 +392,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                 "Espera", "Ya hay una operación en curso.", parent=dialog
             )
             return
-        state["step"] = "detection"
+        invalidate_analysis()
+        generation = state["analysis_generation"]
         busy["active"] = True
         community_code = identity["code"].get().strip()
         community_name = identity["name"].get().strip()
@@ -385,8 +416,9 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             except Exception as exc:
                 def failed(error=exc):
                     busy["active"] = False
-                    state["step"] = "sources"
-                    render("sources")
+                    render("sources" if state["identity_valid"] else "identity")
+                    if generation != state["analysis_generation"]:
+                        return
                     messagebox.showerror(
                         "No se pudieron analizar las fuentes", str(error), parent=dialog
                     )
@@ -395,8 +427,11 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
 
             def analysed():
                 busy["active"] = False
+                if generation != state["analysis_generation"]:
+                    render("sources" if state["identity_valid"] else "identity")
+                    return
                 state["draft"] = draft
-                state["step"] = "detected"
+                state["analysis_complete"] = True
                 state["has_required_questions"] = any(
                     question.required for question in draft.questions
                 )
@@ -414,6 +449,11 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         app._en_hilo(work)
 
     def collect_answers():
+        if busy["active"]:
+            return
+        if not state["analysis_complete"] or state["draft"] is None:
+            render(onboarding_step_route(state))
+            return
         draft = state["draft"]
         answers = {
             key: variable.get() for key, variable in answer_variables.items()
@@ -436,6 +476,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         render(onboarding_step_route(state))
 
     def publish():
+        if busy["active"]:
+            return
         state["step"] = "summary"
         if onboarding_step_route(state) != "summary":
             render(onboarding_step_route(state))
@@ -451,10 +493,13 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             messagebox.showwarning("Período incompleto", str(exc), parent=dialog)
             return
         busy["active"] = True
+        draft = state["draft"]
+        answers = dict(state["answers"])
         clear(footer)
         ctk.CTkLabel(
             footer,
-            text="Creando comunidad y archivando las fuentes…",
+            text=("Creando comunidad y archivando las fuentes…" if period_name
+                  else "Creando comunidad y perfil local…"),
             font=UIM.fuente(11, "bold"),
             text_color=C["primario"],
         ).pack(side="right", pady=10)
@@ -466,8 +511,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                 connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
                 result = community_onboarding.confirm_onboarding(
                     connection,
-                    draft=state["draft"],
-                    answers=dict(state["answers"]),
+                    draft=draft,
+                    answers=answers,
                     project_root=Path(__file__).resolve().parent.parent,
                     archive_root=Path(app.ruta_archivo_expedientes),
                     period_name=period_name,
@@ -490,8 +535,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
 
             def completed():
                 busy["active"] = False
-                code = state["draft"].community_code
-                name = state["draft"].community_name
+                code = draft.community_code
+                name = draft.community_name
                 dialog.destroy()
                 app._cargar_comunidades()
                 option = f"{code} — {name}"
@@ -505,7 +550,10 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                 app.log(f"Comunidad '{code}' creada desde fuentes verificadas", "ok")
                 messagebox.showinfo(
                     "Comunidad creada",
-                    "La comunidad, el perfil local y sus fuentes se han registrado.",
+                    "La comunidad y el perfil local se han registrado. "
+                    + (f"Se han archivado {len(result.source_document_ids)} fuente(s)."
+                       if result.source_document_ids else
+                       "No se han archivado fuentes en un expediente."),
                     parent=app,
                 )
             app.after(0, completed)
@@ -513,6 +561,13 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         app._en_hilo(work)
 
     def render(step: str):
+        if busy["active"] and step != "detection":
+            return
+        if step in {"detection", "confirmations", "summary"} and not busy["active"]:
+            if not state["identity_valid"]:
+                step = "identity"
+            elif not state["analysis_complete"] or state["draft"] is None:
+                step = "sources"
         state["step"] = step
         clear(content)
         clear(footer)
@@ -573,6 +628,11 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                 "Opcionales. Puedes seleccionar varias facturas.",
                 source_labels["invoices"], select_invoices, "Elegir facturas",
             )
+            ctk.CTkButton(
+                content, text="Quitar facturas", command=clear_invoices,
+                height=30, corner_radius=8, fg_color=C["acento_suave"],
+                hover_color=C["acento_suave_hover"], text_color=C["primario"],
+            ).pack(anchor="e", pady=(0, 6))
             footer_buttons(
                 back=lambda: render("identity"),
                 next_text="Analizar fuentes",
@@ -691,11 +751,14 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         period_name, _start, _end = parse_period()
         section_title(
             "Revisa y crea la comunidad",
-            "Al confirmar se guardarán el perfil y la plantilla locales, y se archivarán copias de las fuentes.",
+            "Al confirmar se guardarán el perfil y la plantilla locales. "
+            + ("Se archivarán copias de las fuentes en el expediente inicial."
+               if period_name else
+               "Sin período inicial no se archivarán las fuentes; podrás añadirlas a un expediente después."),
         )
         summary = (
             ("Comunidad", f"{draft.community_code} — {draft.community_name}"),
-            ("Fuentes que se archivarán", str(len(draft.sources))),
+            ("Fuentes que se archivarán", str(len(draft.sources)) if period_name else "0 · sin expediente inicial"),
             ("Servicios confirmados", ", ".join(active_modules) or "Ninguno"),
             ("Expediente inicial", period_name or "No se creará todavía"),
         )
