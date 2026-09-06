@@ -91,17 +91,17 @@ altera el patrón Git que ignora solamente `runtime/`.
 
 ### TDD y verificación de ronda 3
 
-- Las pruebas se ejecutaron con PowerShell y el runtime local de Codex:
-  `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'`.
-- RED: `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_community_onboarding.CommunityOnboardingTest.test_onboarded_runtime_profile_installs_bootstrap_template_for_long_code`
+- Las pruebas se ejecutaron con PowerShell y el intérprete configurado en
+  `$env:REGULARIZACION_PYTHON`.
+- RED: `& $env:REGULARIZACION_PYTHON -m unittest tests.test_community_onboarding.CommunityOnboardingTest.test_onboarded_runtime_profile_installs_bootstrap_template_for_long_code`
   falló antes de la corrección con `TemplateInstallationError`: el importador
   buscaba `config/excel_profiles/1234_v1.json` en lugar del perfil runtime.
 - GREEN de regresión: el mismo comando fue correcto tras la corrección. Cubre
   una comunidad onboarding `1234`, ejecuta `run_bootstrap_import` contra su
   plantilla y confirma que la instalación queda disponible sin error.
-- Focales: `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest tests.test_community_onboarding tests.test_excel_bootstrap_importer` — 43 pruebas correctas.
-- Suite completa: `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m unittest discover -s tests` — 173 pruebas correctas.
-- Compilación: `& 'C:\Users\Jose\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m compileall -q core tests` — correcta.
+- Focales: `& $env:REGULARIZACION_PYTHON -m unittest tests.test_community_onboarding tests.test_excel_bootstrap_importer` — 43 pruebas correctas.
+- Suite completa: `& $env:REGULARIZACION_PYTHON -m unittest discover -s tests` — 173 pruebas correctas.
+- Compilación: `& $env:REGULARIZACION_PYTHON -m compileall -q core tests` — correcta.
 - `git diff --check` — correcto.
 
 El runtime inicial no incluía `xlrd`, `customtkinter`, `matplotlib` ni `xlwt`,

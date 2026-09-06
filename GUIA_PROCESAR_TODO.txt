@@ -26,21 +26,40 @@ USO HABITUAL EN LA APP
 7. Revisa una muestra, adjunta cada carta al correo que corresponda y envíala
    manualmente.
 
-PRIMERA CARGA DE UNA COMUNIDAD (BOOTSTRAP)
-──────────────────────────────────────────
-El botón "Importar Excel maestro" se usa una sola vez al incorporar una
-comunidad. Importa un Excel histórico completo y, si existen, el listado de
-propietarios y lecturas. Conserva una copia archivada y registra la plantilla
-privada del Excel para esa comunidad. No sustituye el maestro ni modifica su
-ubicación original.
+ALTA DE UNA COMUNIDAD
+─────────────────────
+El botón "+ Comunidad" permite elegir entre "Registro rápido" y "Alta guiada
+desde fuentes". El alta guiada no requiere preparar previamente un Excel
+maestro perfecto y recorre cinco etapas visibles:
+
+1. Identidad: indica el código y nombre; el período inicial es opcional.
+2. Fuentes: selecciona una lista de propietarios CSV y una o más lecturas en
+   Excel o PDF. Las facturas PDF son opcionales.
+3. Detección: revisa los servicios y dudas encontrados sin guardar todavía.
+4. Confirmaciones: confirma los servicios y responde todo dato incierto.
+5. Resumen: comprueba qué se creará y publica el alta.
+
+Propietarios y lecturas son las fuentes mínimas. Un Excel manual anterior es
+opcional: el perfil y la plantilla oficiales se generan a partir de las
+confirmaciones. Las fuentes archivadas, la base de datos, los perfiles
+generados y las plantillas instaladas permanecen en el equipo y no se
+versionan en Git.
+
+PRIMERA CARGA HISTÓRICA (BOOTSTRAP OPCIONAL)
+────────────────────────────────────────────
+Si la comunidad ya dispone de un Excel histórico completo, el botón
+"Importar Excel maestro" puede usarse una sola vez. Conserva una copia
+archivada y registra la plantilla privada para esa comunidad. No sustituye el
+maestro ni modifica su ubicación original.
 
 USO POSTERIOR: FACTURAS Y PDF
 ─────────────────────────────
 Después del bootstrap, el trabajo ordinario parte de facturas, gastos y
 lecturas del período seleccionado. El Excel oficial se genera siempre desde
 la base de datos, por lo que puede reproducirse sin depender de ediciones
-manuales. Para otra comunidad se añade su perfil de estructura y se hace su
-bootstrap inicial; no se programa una comunidad concreta en el código.
+manuales. Para otra comunidad se añade su perfil mediante el alta guiada o,
+si existe un histórico adecuado, se hace el bootstrap inicial; no se programa
+una comunidad concreta en el código.
 
 VALIDACIÓN PRIVADA OPCIONAL DE LA 658
 ────────────────────────────────────
