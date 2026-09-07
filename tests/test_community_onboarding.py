@@ -752,7 +752,7 @@ class CommunityOnboardingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "service_decision"):
             excel_profiles.validate_profile_payload(payload, self.project_root)
 
-    def test_profile_validation_accepts_existing_onboarding_configuration(self):
+    def test_profile_validation_rejects_new_configuration_stripped_to_look_historical(self):
         payload = community_onboarding.build_profile_payload(
             self.valid_draft, answers={"service": "ACS"}
         )
@@ -765,13 +765,12 @@ class CommunityOnboardingTest(unittest.TestCase):
             binding.pop("date")
             binding.pop("value")
 
-        profile = excel_profiles.validate_profile_payload(payload, self.project_root)
-
-        self.assertEqual(("ACS",), profile.active_modules)
-        self.assertEqual(
-            "Lectura",
-            profile.onboarding_configuration["reading_bindings"][0]["column"],
-        )
+        self.assertTrue(any(
+            source["kind"] == "invoice_pdf"
+            for source in configuration["sources"]
+        ))
+        with self.assertRaisesRegex(ValueError, "schema_version"):
+            excel_profiles.validate_profile_payload(payload, self.project_root)
 
     def test_profile_validation_rejects_incomplete_new_invoice_configuration(self):
         payload = community_onboarding.build_profile_payload(
