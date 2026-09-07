@@ -825,6 +825,20 @@ class CommunityOnboardingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Binding de lectura"):
             excel_profiles.validate_profile_payload(payload, self.project_root)
 
+    def test_profile_validation_requires_nonempty_layout_for_onboarding(self):
+        for layout in ("missing", "empty"):
+            with self.subTest(layout=layout):
+                payload = community_onboarding.build_profile_payload(
+                    self.valid_draft, answers={"service": "ACS"}
+                )
+                if layout == "empty":
+                    payload["workbook_layout"] = {}
+
+                with self.assertRaisesRegex(
+                    ValueError, "(?=.*onboarding)(?=.*workbook_layout)"
+                ):
+                    excel_profiles.validate_profile_payload(payload, self.project_root)
+
     def test_profile_validation_rejects_cross_module_canonical_concept_source(self):
         payload = self._combined_payload_with_layout()
         heating_variable = next(

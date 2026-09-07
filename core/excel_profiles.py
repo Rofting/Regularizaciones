@@ -471,7 +471,7 @@ def _validate_onboarding_parameter_cells(
     active_modules: tuple[str, ...],
     workbook_layout: Mapping[str, Any],
 ) -> None:
-    if not onboarding_configuration or not workbook_layout:
+    if not onboarding_configuration:
         return
     expected = {
         key: binding
@@ -494,7 +494,7 @@ def _validate_onboarding_bootstrap_marker(
     onboarding_configuration: Mapping[str, Any],
     workbook_layout: Mapping[str, Any],
 ) -> None:
-    if not onboarding_configuration or not workbook_layout:
+    if not onboarding_configuration:
         return
     marker = workbook_layout.get("bootstrap_template")
     if (
@@ -546,10 +546,15 @@ def validate_profile_payload(payload: Mapping[str, Any], project_root: Path) -> 
             raise ValueError(f"{field} debe ser un texto no vacío")
 
     concepts = _concepts(data["concepts"])
-    workbook_layout = _workbook_layout(data.get("workbook_layout"))
     onboarding_configuration = _onboarding_configuration(
         data.get("onboarding_configuration"), active_modules
     )
+    layout_payload = data.get("workbook_layout")
+    if onboarding_configuration and not layout_payload:
+        raise ValueError(
+            "Todo perfil de onboarding debe declarar un workbook_layout canónico no vacío"
+        )
+    workbook_layout = _workbook_layout(layout_payload)
     _validate_onboarding_concepts(
         onboarding_configuration, active_modules, concepts
     )

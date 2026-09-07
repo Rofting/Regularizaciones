@@ -53,6 +53,7 @@ class ExcelProfileTest(unittest.TestCase):
         )
         self.assertNotIn("CALEFACCION", profile.active_modules)
         self.assertIn(("ANALISIS", "H23"), profile.required_formula_cells)
+        self.assertFalse(profile.onboarding_configuration)
 
     def test_658_agua_invoice_table_ends_at_row_20(self):
         profile = excel_profiles.load_profile("658_acs_v1", PROJECT_ROOT)
