@@ -10,6 +10,17 @@ oficial desde datos validados, calcula el reparto y prepara una carta Word por
 propietario. Las cartas se revisan y envían manualmente: la aplicación no
 envía correos.
 
+ARRANQUE
+────────
+1. Abre PowerShell en la carpeta del proyecto y activa su entorno virtual.
+2. Ejecuta:
+
+     python core/app.py
+
+3. Comprueba en "Configurar rutas" que base de datos, archivo de expedientes,
+   salidas y plantilla de cartas apuntan a las carpetas locales correctas.
+   El arranque no sube documentos ni datos a servicios externos.
+
 USO HABITUAL EN LA APP
 ──────────────────────
 1. Selecciona la comunidad y crea un expediente con su fecha de inicio y fin.
@@ -34,23 +45,48 @@ maestro perfecto y recorre cinco etapas visibles:
 
 1. Identidad: indica el código y nombre; el período inicial es opcional.
 2. Fuentes: selecciona una lista de propietarios CSV y una o más lecturas en
-   Excel o PDF. Las facturas PDF son opcionales.
-3. Detección: revisa los servicios y dudas encontrados sin guardar todavía.
-4. Confirmaciones: confirma los servicios y responde todo dato incierto.
-5. Resumen: comprueba qué se creará y publica el alta.
+   Excel, XLS o PDF. Añade, si existen, una o varias facturas PDF.
+3. Detección: revisa por separado lo que proponen las lecturas y las facturas;
+   todavía no se escribe nada.
+4. Confirmaciones: confirma el servicio y responde todos los campos marcados.
+   En lecturas puede pedir módulo/suministro, contador, columna, fecha o valor.
+   En facturas puede pedir proveedor, período, importe o concepto. Una factura
+   no se usa como lectura y una lectura no aporta importes facturados.
+5. Resumen: antes de publicar, comprueba para cada módulo la columna, contador,
+   fecha y valor de lectura, y para cada factura el proveedor, período, importe
+   y concepto. "Crear comunidad" sólo está disponible con las decisiones
+   obligatorias completas.
 
 Propietarios y lecturas son las fuentes mínimas. Un Excel manual anterior es
 opcional: el perfil y la plantilla oficiales se generan a partir de las
-confirmaciones. Las fuentes archivadas, la base de datos, los perfiles
-generados y las plantillas instaladas permanecen en el equipo y no se
-versionan en Git.
+confirmaciones. ACS y calefacción se confirman por separado; pueden usar
+contador o columna distintos. "NO_APLICA" sólo sirve para un módulo inactivo
+y queda registrado como decisión explícita.
 
-PRIMERA CARGA HISTÓRICA (BOOTSTRAP OPCIONAL)
-────────────────────────────────────────────
-Si la comunidad ya dispone de un Excel histórico completo, el botón
-"Importar Excel maestro" puede usarse una sola vez. Conserva una copia
-archivada y registra la plantilla privada para esa comunidad. No sustituye el
-maestro ni modifica su ubicación original.
+Si no indicas período, se crean comunidad, perfil y plantilla, pero las fuentes
+no se archivan aún. Si completas nombre y ambas fechas del período, el alta crea
+también el expediente inicial y archiva allí copias verificadas. Los originales,
+las copias archivadas, la base de datos, los perfiles generados y las plantillas
+instaladas permanecen en el equipo y no se versionan en Git.
+
+MODELO INICIAL Y EXCEL OFICIAL
+──────────────────────────────
+Con la comunidad y el expediente seleccionados, "Importar modelo inicial"
+incorpora una sola vez el maestro histórico, si existe. Se puede acompañar de
+propietarios y lecturas; el sistema conserva una copia y no modifica el archivo
+original. En un alta guiada, usa la plantilla canónica instalada para esa
+comunidad. La excepción de plantilla vacía sólo corresponde a esa copia recién
+creada: un maestro posterior sin importes o parámetros obligatorios se marca
+como incompleto y debe corregirse o confirmarse.
+
+Después de importar las fuentes, abre "Resolver incidencias". Confirma cada
+dato y su motivo hasta que el expediente muestre "Listo para cálculo". Entonces:
+
+1. Pulsa "Generar Excel oficial". El libro se reconstruye desde datos validados.
+2. Abre el resultado y revisa hojas, período, importes y lecturas.
+3. Pulsa "Calcular reparto final" y comprueba que cada concepto cuadra al céntimo.
+4. Pulsa "Generar cartas", revisa conceptos y destinatarios y abre una muestra.
+5. Envía las cartas manualmente; la aplicación nunca las remite por correo.
 
 USO POSTERIOR: FACTURAS Y PDF
 ─────────────────────────────
@@ -82,6 +118,10 @@ estén completadas y auditadas.
 CONTROLES IMPORTANTES
 ─────────────────────
 • Una incidencia abierta bloquea Excel, reparto y cartas.
+• Falta, ambigüedad o contradicción en proveedor, período, importe, concepto,
+  contador, suministro, columna, fecha o lectura exige confirmación manual.
+• El resumen del alta reproduce las decisiones normalizadas que se publican;
+  no vuelve a deducirlas a partir de los documentos.
 • Si un contador baja a cero, el flujo conserva la lectura anterior hasta que
   se revise o estime expresamente el dato; nunca inventa el consumo.
 • Cuota fija, variable, ACS, calefacción, gastos extraordinarios y abonos son

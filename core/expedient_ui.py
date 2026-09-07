@@ -22,6 +22,72 @@ if TYPE_CHECKING:
     from app import AppGestionFincas
 
 
+def onboarding_summary_data(
+    configuration: community_onboarding.OnboardingConfiguration,
+) -> dict[str, object]:
+    """Project the confirmed configuration into a Tk-independent summary."""
+    modules = {
+        binding.module: {
+            "reading_column": binding.column,
+            "meter": binding.meter,
+            "date": binding.date,
+            "value": binding.value,
+            "source_sha256s": tuple(binding.source_sha256s),
+        }
+        for binding in configuration.reading_bindings
+    }
+    invoices = [
+        {
+            "source_sha256": decision.source_sha256,
+            "provider": decision.provider,
+            "period": decision.period,
+            "amount": decision.amount,
+            "concept": decision.concept,
+        }
+        for decision in configuration.invoice_decisions
+    ]
+    active_modules = tuple(configuration.active_modules)
+    bindings_complete = (
+        len(modules) == len(configuration.reading_bindings) == len(active_modules)
+        and set(modules) == set(active_modules)
+        and all(
+            all(str(module_data[field]).strip() for field in (
+                "reading_column", "meter", "date", "value"
+            ))
+            and bool(module_data["source_sha256s"])
+            and all(
+                str(source_sha256).strip()
+                for source_sha256 in module_data["source_sha256s"]
+            )
+            for module_data in modules.values()
+        )
+    )
+    invoice_source_sha256s = tuple(
+        sha256
+        for kind, _name, sha256 in configuration.source_traces
+        if kind == "invoice_pdf"
+    )
+    invoices_complete = (
+        len(invoices) == len(invoice_source_sha256s)
+        and sorted(invoice["source_sha256"] for invoice in invoices)
+        == sorted(invoice_source_sha256s)
+        and all(
+            all(str(invoice[field]).strip() for field in (
+                "source_sha256", "provider", "period", "amount", "concept"
+            ))
+            for invoice in invoices
+        )
+    )
+    return {
+        "service_decision": configuration.service_decision,
+        "modules": modules,
+        "invoices": invoices,
+        "ready_to_publish": bool(configuration.service_decision.strip())
+        and bindings_complete
+        and invoices_complete,
+    }
+
+
 def onboarding_step_route(state: Mapping[str, Any]) -> str:
     """Return the first onboarding stage that is safe to show next."""
     if not state.get("identity_valid", False):
@@ -488,6 +554,15 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                 "Espera", "Ya hay una operación en curso.", parent=dialog
             )
             return
+        if not onboarding_summary_data(state["configuration"])["ready_to_publish"]:
+            state["answers_complete"] = False
+            messagebox.showwarning(
+                "Confirmaciones pendientes",
+                "Completa las decisiones de lectura y factura antes de publicar.",
+                parent=dialog,
+            )
+            render("confirmations")
+            return
         try:
             period_name, start_date, end_date = parse_period()
         except ValueError as exc:
@@ -722,7 +797,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
 
         draft = state["draft"]
         configuration = state["configuration"]
-        active_modules = list(configuration.active_modules)
+        summary_data = onboarding_summary_data(configuration)
+        active_modules = list(summary_data["modules"])
         period_name, _start, _end = parse_period()
         section_title(
             "Revisa y crea la comunidad",
@@ -749,10 +825,75 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             ctk.CTkLabel(
                 row, text=value, font=UIM.fuente(11, "bold"), text_color=C["texto"]
             ).pack(side="right", padx=13, pady=10)
+
+        for module, reading in summary_data["modules"].items():
+            ctk.CTkLabel(
+                content,
+                text=f"Lectura {module}",
+                font=UIM.fuente(13, "bold"),
+                text_color=C["texto"],
+            ).pack(anchor="w", pady=(15, 4))
+            reading_row = ctk.CTkFrame(
+                content, fg_color=C["panel_2"], corner_radius=9,
+                border_width=1, border_color=C["borde"],
+            )
+            reading_row.pack(fill="x", pady=5)
+            reading_text = " · ".join((
+                f"Contador: {reading['meter']}",
+                f"Fecha: {reading['date']}",
+                f"Valor: {reading['value']}",
+                f"Columna: {reading['reading_column']}",
+            ))
+            ctk.CTkLabel(
+                reading_row,
+                text=reading_text,
+                font=UIM.fuente(10, "bold"),
+                text_color=C["texto"],
+                justify="left",
+                wraplength=670,
+            ).pack(anchor="w", padx=13, pady=10)
+
+        if summary_data["invoices"]:
+            ctk.CTkLabel(
+                content,
+                text="Facturas confirmadas",
+                font=UIM.fuente(13, "bold"),
+                text_color=C["texto"],
+            ).pack(anchor="w", pady=(15, 4))
+        for index, invoice in enumerate(summary_data["invoices"], start=1):
+            invoice_row = ctk.CTkFrame(
+                content, fg_color=C["panel_2"], corner_radius=9,
+                border_width=1, border_color=C["borde"],
+            )
+            invoice_row.pack(fill="x", pady=5)
+            invoice_text = " · ".join((
+                f"Factura {index}",
+                f"Proveedor: {invoice['provider']}",
+                f"Período: {invoice['period']}",
+                f"Importe: {invoice['amount']}",
+                f"Concepto: {invoice['concept']}",
+            ))
+            ctk.CTkLabel(
+                invoice_row,
+                text=invoice_text,
+                font=UIM.fuente(10, "bold"),
+                text_color=C["texto"],
+                justify="left",
+                wraplength=670,
+            ).pack(anchor="w", padx=13, pady=10)
+
+        ready_to_publish = summary_data["ready_to_publish"]
+        ctk.CTkLabel(
+            content,
+            text=("Confirmaciones completas" if ready_to_publish
+                  else "Faltan confirmaciones obligatorias"),
+            font=UIM.fuente(11, "bold"),
+            text_color=C["primario"] if ready_to_publish else C["alerta"],
+        ).pack(anchor="w", pady=(12, 2))
         footer_buttons(
             back=lambda: render("confirmations"),
-            next_text="Crear comunidad",
-            next_command=publish,
+            next_text="Crear comunidad" if ready_to_publish else None,
+            next_command=publish if ready_to_publish else None,
         )
 
     render("identity")

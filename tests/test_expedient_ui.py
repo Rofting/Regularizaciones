@@ -1,5 +1,6 @@
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -11,9 +12,12 @@ if str(CORE_DIR) not in sys.path:
 
 import expedient_ui
 from community_onboarding import (
+    InvoiceDecision,
+    OnboardingConfiguration,
     OnboardingDraft,
     OnboardingQuestion,
     OnboardingResult,
+    ReadingBinding,
     ReadingEvidence,
     SourceCandidate,
 )
@@ -68,6 +72,104 @@ class FakeWidget:
         yield self
         for child in self.children:
             yield from child.descendants()
+
+
+class OnboardingSummaryDataTest(unittest.TestCase):
+    def setUp(self):
+        self.configuration = OnboardingConfiguration(
+            service_decision="ACS+CALEFACCION",
+            active_modules=("ACS", "CALEFACCION"),
+            reading_column="",
+            reading_bindings=(
+                ReadingBinding(
+                    module="ACS",
+                    column="Lectura ACS",
+                    source_sha256s=("a" * 64,),
+                    meter="Contador ACS",
+                    date="2026-08-31",
+                    value="125",
+                ),
+                ReadingBinding(
+                    module="CALEFACCION",
+                    column="Lectura Calefacción",
+                    source_sha256s=("b" * 64,),
+                    meter="Contador calefacción",
+                    date="2026-08-31",
+                    value="980",
+                ),
+            ),
+            source_traces=(
+                ("owners", "propietarios.csv", "c" * 64),
+                ("meter_reading_excel", "lecturas.xlsx", "a" * 64),
+                ("meter_reading_pdf", "calefaccion.pdf", "b" * 64),
+                ("invoice_pdf", "factura.pdf", "d" * 64),
+            ),
+            invoice_decisions=(InvoiceDecision(
+                source_sha256="d" * 64,
+                provider="Proveedor Norte",
+                period="01/08/2026 - 31/08/2026",
+                amount="432.10",
+                concept="CALEFACCION",
+            ),),
+        )
+
+    def test_exposes_invoice_and_reading_decisions_per_module(self):
+        summary = expedient_ui.onboarding_summary_data(self.configuration)
+
+        self.assertEqual(
+            {
+                "reading_column": "Lectura ACS",
+                "meter": "Contador ACS",
+                "date": "2026-08-31",
+                "value": "125",
+                "source_sha256s": ("a" * 64,),
+            },
+            summary["modules"]["ACS"],
+        )
+        self.assertEqual(
+            "Lectura Calefacción",
+            summary["modules"]["CALEFACCION"]["reading_column"],
+        )
+        self.assertEqual("Proveedor Norte", summary["invoices"][0]["provider"])
+        self.assertEqual("CALEFACCION", summary["invoices"][0]["concept"])
+        self.assertTrue(summary["ready_to_publish"])
+
+    def test_marks_required_confirmation_before_publication(self):
+        incomplete_binding = ReadingBinding(
+            module="CALEFACCION",
+            column="Lectura Calefacción",
+            source_sha256s=("b" * 64,),
+            meter="Contador calefacción",
+            date="2026-08-31",
+            value="",
+        )
+        incomplete_invoice = replace(
+            self.configuration.invoice_decisions[0], provider=""
+        )
+
+        incomplete_configurations = (
+            replace(
+                self.configuration,
+                reading_bindings=(self.configuration.reading_bindings[0],),
+            ),
+            replace(
+                self.configuration,
+                reading_bindings=(
+                    self.configuration.reading_bindings[0],
+                    incomplete_binding,
+                ),
+            ),
+            replace(
+                self.configuration,
+                invoice_decisions=(incomplete_invoice,),
+            ),
+            replace(self.configuration, invoice_decisions=()),
+        )
+
+        for configuration in incomplete_configurations:
+            with self.subTest(configuration=configuration):
+                summary = expedient_ui.onboarding_summary_data(configuration)
+                self.assertFalse(summary["ready_to_publish"])
 
 
 class CommunityOnboardingDialogTest(unittest.TestCase):
@@ -188,6 +290,12 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
         self.select_sources()
         self.analyse()
         self.summary()
+        summary_text = " ".join(self.texts())
+        self.assertIn("Lectura ACS", self.texts())
+        self.assertIn("Contador: Contador A", summary_text)
+        self.assertIn("Fecha: 2026-01-01", summary_text)
+        self.assertIn("Valor: 100", summary_text)
+        self.assertIn("Columna: Lectura A", summary_text)
         self.confirm.return_value = OnboardingResult(1, None, None, Path("profile"), Path("template"), ())
         self.click("Crear comunidad")
         self.complete_worker()
