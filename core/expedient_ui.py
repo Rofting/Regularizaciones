@@ -77,6 +77,7 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         "answers_complete": False,
         "draft": None,
         "answers": {},
+        "configuration": None,
         "analysis_generation": 0,
     }
     answer_variables: dict[str, tk.Variable] = {}
@@ -89,6 +90,7 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         state["has_required_questions"] = False
         state["answers_complete"] = False
         state["answers"] = {}
+        state["configuration"] = None
         answer_variables.clear()
         state["has_sources"] = bool(selected["owners"] and selected["readings"])
 
@@ -436,10 +438,6 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                     question.required for question in draft.questions
                 )
                 answer_variables.clear()
-                for module in draft.detected_modules:
-                    answer_variables[f"module:{module}"] = tk.BooleanVar(
-                        master=dialog, value=True
-                    )
                 for question in draft.questions:
                     answer_variables[question.key] = tk.StringVar(master=dialog)
                 state["answers_complete"] = not state["has_required_questions"]
@@ -458,21 +456,24 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         answers = {
             key: variable.get() for key, variable in answer_variables.items()
         }
-        missing = [
-            question.prompt
-            for question in draft.questions
-            if question.required and not str(answers.get(question.key, "")).strip()
-        ]
-        state["answers"] = answers
-        state["answers_complete"] = not missing
         state["step"] = "confirmations"
-        if missing:
+        try:
+            configuration = community_onboarding.resolve_onboarding_configuration(
+                draft, answers
+            )
+        except ValueError as error:
+            state["answers"] = {}
+            state["configuration"] = None
+            state["answers_complete"] = False
             messagebox.showwarning(
                 "Confirmaciones pendientes",
-                "Responde todas las preguntas obligatorias antes de continuar.",
+                str(error),
                 parent=dialog,
             )
             return
+        state["answers"] = configuration
+        state["configuration"] = configuration
+        state["answers_complete"] = True
         render(onboarding_step_route(state))
 
     def publish():
@@ -494,7 +495,7 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             return
         busy["active"] = True
         draft = state["draft"]
-        answers = dict(state["answers"])
+        answers = state["configuration"]
         clear(footer)
         ctk.CTkLabel(
             footer,
@@ -684,32 +685,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             draft = state["draft"]
             section_title(
                 "Confirma lo detectado",
-                "Desactiva los servicios que no correspondan y responde cada dato incierto. No se inventa ningún valor.",
+                "Confirma el servicio y cada dato incierto. No se inventa ningún valor.",
             )
-            if draft.detected_modules:
-                ctk.CTkLabel(
-                    content,
-                    text="Servicios que se incluirán",
-                    font=UIM.fuente(11, "bold"),
-                    text_color=C["texto_sec"],
-                ).pack(anchor="w", pady=(2, 6))
-                for module in draft.detected_modules:
-                    ctk.CTkCheckBox(
-                        content,
-                        text=module.title().replace("Calefaccion", "Calefacción"),
-                        variable=answer_variables[f"module:{module}"],
-                        font=UIM.fuente(12),
-                        fg_color=C["primario"],
-                        hover_color=C["primario_hover"],
-                        border_color=C["borde"],
-                    ).pack(anchor="w", pady=4)
-            else:
-                ctk.CTkLabel(
-                    content,
-                    text="No se detectaron servicios. El perfil se creará sin conceptos activos.",
-                    font=UIM.fuente(11),
-                    text_color=C["aviso"],
-                ).pack(anchor="w", pady=(2, 10))
             for question in draft.questions:
                 ctk.CTkLabel(
                     content,
@@ -744,10 +721,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             return
 
         draft = state["draft"]
-        active_modules = [
-            module for module in draft.detected_modules
-            if state["answers"].get(f"module:{module}") is True
-        ]
+        configuration = state["configuration"]
+        active_modules = list(configuration.active_modules)
         period_name, _start, _end = parse_period()
         section_title(
             "Revisa y crea la comunidad",

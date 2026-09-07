@@ -20,9 +20,13 @@ if str(CORE_DIR) not in sys.path:
 
 import community_onboarding
 import case_workflow_actions
+import document_review
 import expedient_service
 import excel_profiles
 import gestor_bd
+from case_distribution import calculate_case_distribution
+from excel_export_service import generate_official_excel
+from office_recalculation import DeterministicRecalculator
 
 
 def make_readings_workbook(path: Path, headers: tuple[str, ...]) -> Path:
@@ -103,9 +107,18 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.module_draft = community_onboarding.OnboardingDraft(
             community_code="900",
             community_name="Comunidad prueba",
-            sources=(),
+            sources=(community_onboarding.SourceCandidate(
+                self.readings_xlsx, "meter_reading_excel",
+                community_onboarding._sha256(self.readings_xlsx),
+                headers=("Vivienda", "Lectura"),
+            ),),
             detected_modules=("ACS", "CALEFACCION"),
-            questions=(),
+            questions=(community_onboarding.OnboardingQuestion(
+                key="service",
+                prompt="Confirma el servicio de las lecturas.",
+                candidates=("ACS", "CALEFACCION", "ACS+CALEFACCION", "NO_APLICA"),
+                required=True,
+            ),),
         )
         self.valid_draft = community_onboarding.OnboardingDraft(
             community_code="900",
@@ -118,6 +131,7 @@ class CommunityOnboardingTest(unittest.TestCase):
                 community_onboarding.SourceCandidate(
                     self.readings_xlsx, "meter_reading_excel",
                     community_onboarding._sha256(self.readings_xlsx),
+                    headers=("Vivienda", "Lectura"),
                 ),
                 community_onboarding.SourceCandidate(
                     self.invoice_pdf, "invoice_pdf",
@@ -125,9 +139,14 @@ class CommunityOnboardingTest(unittest.TestCase):
                 ),
             ),
             detected_modules=("ACS",),
-            questions=(),
+            questions=(community_onboarding.OnboardingQuestion(
+                key="service",
+                prompt="Confirma el servicio de las lecturas.",
+                candidates=("ACS", "NO_APLICA"),
+                required=True,
+            ),),
         )
-        self.answers = {"module:ACS": True}
+        self.answers = {"service": "ACS"}
 
     def tearDown(self):
         self.connection.close()
@@ -215,7 +234,8 @@ class CommunityOnboardingTest(unittest.TestCase):
             invoice_paths=(), project_root=self.project_root,
         )
         self.assertEqual(("ACS",), acs_draft.detected_modules)
-        self.assertFalse(any(question.key == "service" for question in acs_draft.questions))
+        self.assertTrue(any(question.key == "service" and question.required
+                            for question in acs_draft.questions))
 
         ambiguous_readings = make_readings_workbook(
             self.project_root / "two-services.xlsx", ("Vivienda", "Lectura ACS", "Lectura Calefacción")
@@ -228,6 +248,108 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.assertEqual(("ACS", "CALEFACCION"), ambiguous_draft.detected_modules)
         self.assertTrue(any(question.key == "service" and question.required
                             for question in ambiguous_draft.questions))
+
+    def test_invoice_contributes_service_but_never_supplies_a_reading_column(self):
+        readings = make_readings_workbook(
+            self.project_root / "neutral-readings.xlsx", ("Vivienda", "Consumo")
+        )
+        invoice = make_pdf(
+            self.project_root / "heating-invoice.pdf",
+            "FACTURA CALEFACCION LECTURA CONTADOR",
+        )
+
+        draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv, reading_paths=(readings,),
+            invoice_paths=(invoice,), project_root=self.project_root,
+        )
+
+        self.assertEqual(("CALEFACCION",), draft.detected_modules)
+        self.assertEqual("invoice_pdf", draft.sources[-1].kind)
+        self.assertTrue(any(
+            question.key == "reading_column" and question.required
+            for question in draft.questions
+        ))
+
+    def test_absent_service_and_reading_column_require_explicit_decisions(self):
+        readings = make_readings_workbook(
+            self.project_root / "undetected-readings.xlsx", ("Vivienda", "Consumo")
+        )
+
+        draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv, reading_paths=(readings,),
+            invoice_paths=(), project_root=self.project_root,
+        )
+
+        questions = {question.key: question for question in draft.questions}
+        self.assertTrue(questions["service"].required)
+        self.assertTrue(questions["reading_column"].required)
+        with self.assertRaisesRegex(ValueError, "servicio"):
+            community_onboarding.build_profile_payload(
+                draft, answers={"reading_column": "Consumo"}
+            )
+        payload = community_onboarding.build_profile_payload(
+            draft,
+            answers={"service": "NO_APLICA", "reading_column": "Consumo"},
+        )
+        self.assertEqual([], payload["active_modules"])
+
+    def test_service_and_column_answers_are_the_single_payload_configuration(self):
+        readings = make_readings_workbook(
+            self.project_root / "ambiguous-services.xlsx",
+            ("Vivienda", "Lectura ACS", "Lectura Calefacción"),
+        )
+        draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv, reading_paths=(readings,),
+            invoice_paths=(), project_root=self.project_root,
+        )
+
+        acs = community_onboarding.build_profile_payload(
+            draft, answers={"service": "ACS", "reading_column": "Lectura ACS"}
+        )
+        heating = community_onboarding.build_profile_payload(
+            draft,
+            answers={
+                "service": "CALEFACCION",
+                "reading_column": "Lectura Calefacción",
+            },
+        )
+
+        self.assertEqual(["ACS"], acs["active_modules"])
+        self.assertEqual(["acs_fixed", "acs_variable"], [
+            concept["key"] for concept in acs["concepts"]
+        ])
+        self.assertEqual("Lectura ACS", acs["onboarding_configuration"]["reading_column"])
+        self.assertEqual(["CALEFACCION"], heating["active_modules"])
+        self.assertEqual(["heating_fixed", "heating_variable"], [
+            concept["key"] for concept in heating["concepts"]
+        ])
+        self.assertEqual(
+            "Lectura Calefacción",
+            heating["onboarding_configuration"]["reading_bindings"][0]["column"],
+        )
+
+    def test_a_detected_service_can_be_corrected_before_building_the_profile(self):
+        readings = make_readings_workbook(
+            self.project_root / "detected-acs.xlsx", ("Vivienda", "Lectura ACS")
+        )
+        draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv, reading_paths=(readings,),
+            invoice_paths=(), project_root=self.project_root,
+        )
+
+        payload = community_onboarding.build_profile_payload(
+            draft, answers={"service": "CALEFACCION"}
+        )
+
+        self.assertEqual(["CALEFACCION"], payload["active_modules"])
+        self.assertEqual(
+            ["heating_fixed", "heating_variable"],
+            [concept["key"] for concept in payload["concepts"]],
+        )
 
     def test_profile_payload_requires_an_answer_for_ambiguous_reading_column(self):
         with self.assertRaisesRegex(ValueError, "columna de lectura"):
@@ -244,8 +366,7 @@ class CommunityOnboardingTest(unittest.TestCase):
     def test_profile_payload_contains_only_confirmed_modules(self):
         payload = community_onboarding.build_profile_payload(
             self.module_draft,
-            answers={"reading_column": "Lectura", "module:ACS": True,
-                     "module:CALEFACCION": False},
+            answers={"service": "ACS"},
         )
         self.assertIn("ACS", payload["active_modules"])
         self.assertNotIn("CALEFACCION", payload["active_modules"])
@@ -257,7 +378,7 @@ class CommunityOnboardingTest(unittest.TestCase):
         )
 
         self.assertEqual("644_v1", community_onboarding.build_profile_payload(
-            draft, answers={}
+            draft, answers={"service": "NO_APLICA"}
         )["key"])
 
     def test_profile_payload_rejects_unsafe_windows_community_codes(self):
@@ -273,7 +394,94 @@ class CommunityOnboardingTest(unittest.TestCase):
             )
             with self.subTest(community_code=community_code):
                 with self.assertRaisesRegex(ValueError, "código de comunidad"):
-                    community_onboarding.build_profile_payload(draft, answers={})
+                    community_onboarding.build_profile_payload(
+                        draft, answers={"service": "NO_APLICA"}
+                    )
+
+    def _exercise_meter_service_flow(self, service: str, code: str) -> tuple[str, ...]:
+        reading_label = "Lectura ACS" if service == "ACS" else "Lectura Calefacción"
+        readings = make_readings_workbook(
+            self.project_root / f"{code}-readings.xlsx", ("Vivienda", reading_label)
+        )
+        draft = community_onboarding.analyse_sources(
+            community_code=code, community_name=f"Comunidad {service}",
+            owner_list_path=self.owners_csv, reading_paths=(readings,),
+            invoice_paths=(), project_root=self.project_root,
+        )
+        result = community_onboarding.confirm_onboarding(
+            self.connection,
+            draft=draft,
+            answers={"service": service},
+            project_root=self.project_root,
+            archive_root=self.archive_root,
+            period_name="2026",
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 12, 31),
+            actor="Prueba",
+        )
+        owner = self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario,coeficiente,activo)
+               VALUES (?,?,?,?,1)""",
+            (result.community_id, "A-01", "VECINO SINTETICO", 100),
+        )
+        self.connection.executemany(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado)
+               VALUES (?,?,?,?,?,'real')""",
+            (
+                (owner.lastrowid, result.period_id, service, "2026-01-01", 100),
+                (owner.lastrowid, result.period_id, service, "2026-12-31", 125),
+            ),
+        )
+        prefix = "acs" if service == "ACS" else "heating"
+        persisted = json.loads(result.profile_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {
+                f"{prefix}_fixed_actual", f"{prefix}_fixed_billed",
+                f"{prefix}_variable_actual", f"{prefix}_variable_billed",
+            },
+            set(persisted["workbook_layout"]["parameter_cells"]),
+        )
+        for key, value in (
+            (f"{prefix}_fixed_actual", 20),
+            (f"{prefix}_fixed_billed", 10),
+            (f"{prefix}_variable_actual", 80),
+            (f"{prefix}_variable_billed", 40),
+        ):
+            self.connection.execute(
+                """INSERT INTO period_parameters
+                   (id_comunidad,id_periodo,parameter_key,numeric_value,unit)
+                   VALUES (?,?,?,?, 'EUR')""",
+                (result.community_id, result.period_id, key, value),
+            )
+        self.connection.commit()
+        document_review.validate_case_ready(self.connection, result.case_id)
+
+        exported = generate_official_excel(
+            self.connection,
+            id_case=result.case_id,
+            project_root=self.project_root,
+            output_root=self.project_root / "salidas",
+            recalculator=DeterministicRecalculator(),
+        )
+        self.assertTrue(exported.output_path.is_file())
+        distributed = calculate_case_distribution(
+            self.connection, id_case=result.case_id, project_root=self.project_root
+        )
+        return tuple(distributed.concept_totals_cents)
+
+    def test_acs_onboarding_profile_reaches_canonical_export_and_distribution(self):
+        self.assertEqual(
+            ("acs_fixed", "acs_variable"),
+            self._exercise_meter_service_flow("ACS", "901"),
+        )
+
+    def test_heating_onboarding_profile_reaches_canonical_export_and_distribution(self):
+        self.assertEqual(
+            ("heating_fixed", "heating_variable"),
+            self._exercise_meter_service_flow("CALEFACCION", "902"),
+        )
 
     def test_confirm_onboarding_writes_profile_template_archives_sources_and_creates_case(self):
         result = community_onboarding.confirm_onboarding(
@@ -298,6 +506,12 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.assertEqual("900_v1", excel_profiles.load_profile(
             "900_v1", self.project_root
         ).key)
+        self.assertEqual(
+            "Lectura",
+            excel_profiles.load_profile(
+                "900_v1", self.project_root
+            ).onboarding_configuration["reading_column"],
+        )
         self.assertEqual("900_v1", case_workflow_actions.resolve_case_profile(
             self.connection,
             id_case=result.case_id,

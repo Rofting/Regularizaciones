@@ -283,25 +283,31 @@ def _validate_normalized_inputs(
         raise ExportBlockedError(
             "Faltan parámetros normalizados: " + ", ".join(missing_parameters)
         )
-    if "ACS" in profile.active_modules:
+    for reading_type in ("ACS", "CALEFACCION"):
+        if reading_type not in profile.active_modules:
+            continue
         owners = connection.execute(
             "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND activo=1",
             (case["id_comunidad"],),
         ).fetchall()
         if not owners:
-            raise ExportBlockedError("No hay propietarios activos para las lecturas ACS")
+            raise ExportBlockedError(
+                f"No hay propietarios activos para las lecturas {reading_type}"
+            )
         for owner in owners:
             readings = connection.execute(
                 """SELECT fecha_lectura,valor_acumulado,estado FROM lecturas_vecino
-                   WHERE id_propietario=? AND id_periodo=? AND tipo='ACS'
+                   WHERE id_propietario=? AND id_periodo=? AND tipo=?
                    ORDER BY fecha_lectura""",
-                (owner[0], period_id),
+                (owner[0], period_id, reading_type),
             ).fetchall()
             dates = {reading["fecha_lectura"] for reading in readings}
             if case["fecha_inicio"] not in dates or case["fecha_fin"] not in dates:
-                raise ExportBlockedError("Faltan lecturas ACS de inicio o cierre")
+                raise ExportBlockedError(
+                    f"Faltan lecturas {reading_type} de inicio o cierre"
+                )
             if any(reading["estado"] in ("sin_lectura", "contador_averiado") for reading in readings):
-                raise ExportBlockedError("Hay una lectura ACS sin validar")
+                raise ExportBlockedError(f"Hay una lectura {reading_type} sin validar")
 
 
 def _template_registration(
@@ -572,16 +578,16 @@ def _write_other_expenses(connection, workbook, case, table) -> None:
         _set_cell_value(sheet[f"{columns['amount']}{row_number}"], float(expense[2]))
 
 
-def _write_acs(connection, workbook, case, table) -> None:
+def _write_meter_readings(connection, workbook, case, module, table) -> None:
     sheet = workbook[table["sheet"]]
     available_rows = _available_table_rows(sheet, table)
     _clear_table(sheet, table)
     readings = connection.execute(
         """SELECT p.codigo_vivienda,l.fecha_lectura,l.valor_acumulado
            FROM lecturas_vecino l JOIN propietarios p ON p.id_propietario=l.id_propietario
-           WHERE p.id_comunidad=? AND p.activo=1 AND l.id_periodo=? AND l.tipo='ACS'
+           WHERE p.id_comunidad=? AND p.activo=1 AND l.id_periodo=? AND l.tipo=?
            ORDER BY p.codigo_vivienda,l.fecha_lectura""",
-        (case["id_comunidad"], case["id_periodo"]),
+        (case["id_comunidad"], case["id_periodo"], module),
     ).fetchall()
     by_owner: dict[str, dict[str, float]] = {}
     for reading in readings:
@@ -592,9 +598,9 @@ def _write_acs(connection, workbook, case, table) -> None:
         case["fecha_inicio"] not in values or case["fecha_fin"] not in values
         for values in by_owner.values()
     ):
-        raise ExportBlockedError("Faltan lecturas ACS de inicio o cierre")
+        raise ExportBlockedError(f"Faltan lecturas {module} de inicio o cierre")
     if len(available_rows) < 2:
-        raise ExportBlockedError("La plantilla no tiene filas suficientes para ACS")
+        raise ExportBlockedError(f"La plantilla no tiene filas suficientes para {module}")
     columns = _input_columns(table)
     derived = _derived_columns(table)
     parameters = {
@@ -605,10 +611,11 @@ def _write_acs(connection, workbook, case, table) -> None:
             (case["id_comunidad"], case["id_periodo"]),
         )
     }
-    required = ("acs_variable_actual", "acs_fixed_actual")
+    prefix = "acs" if module == "ACS" else "heating"
+    required = (f"{prefix}_variable_actual", f"{prefix}_fixed_actual")
     missing = [key for key in required if parameters.get(key) is None]
     if missing:
-        raise ExportBlockedError("Faltan parámetros ACS: " + ", ".join(missing))
+        raise ExportBlockedError(f"Faltan parámetros {module}: " + ", ".join(missing))
 
     initial = sum(values[case["fecha_inicio"]] for values in by_owner.values())
     final = sum(values[case["fecha_fin"]] for values in by_owner.values())
@@ -619,11 +626,11 @@ def _write_acs(connection, workbook, case, table) -> None:
         "final": final,
         "initial_date": _safe_date(case["fecha_inicio"]),
         "initial": initial,
-        "variable_fee": float(parameters["acs_variable_actual"]),
+        "variable_fee": float(parameters[f"{prefix}_variable_actual"]),
     }
     fixed_values = {
         "charge_date": _safe_date(case["fecha_fin"]),
-        "fixed_fee": float(parameters["acs_fixed_actual"]),
+        "fixed_fee": float(parameters[f"{prefix}_fixed_actual"]),
     }
     for row, values in ((variable_row, variable_values), (fixed_row, fixed_values)):
         for key, column in columns.items():
@@ -694,8 +701,8 @@ def _write_workbook(
                 _write_invoice_table(connection, workbook, case, module, table)
             elif module == "OTROS_GASTOS":
                 _write_other_expenses(connection, workbook, case, table)
-            elif module == "ACS":
-                _write_acs(connection, workbook, case, table)
+            elif module in ("ACS", "CALEFACCION"):
+                _write_meter_readings(connection, workbook, case, module, table)
 
         parameters = {
             row["parameter_key"]: row["numeric_value"]
@@ -709,6 +716,16 @@ def _write_workbook(
             if key in parameters and parameters[key] is not None:
                 sheet_name, address = binding
                 _set_cell_value(workbook[sheet_name][address], float(parameters[key]))
+        for check, binding in profile.workbook_layout["total_checks"].items():
+            if not check.startswith("parameter:"):
+                continue
+            key = check.split(":", 1)[1]
+            if key in profile.workbook_layout["parameter_cells"]:
+                continue
+            if key in parameters and parameters[key] is not None:
+                sheet_name, address = binding
+                if ":" not in address:
+                    _set_cell_value(workbook[sheet_name][address], float(parameters[key]))
         workbook.save(path)
     finally:
         workbook.close()
@@ -788,17 +805,22 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
                 value = 0
             else:
                 value = row[0]
-        elif key == "reading_total:ACS":
+        elif key.startswith("reading_total:"):
+            reading_type = key.split(":", 1)[1]
+            if reading_type not in {"ACS", "CALEFACCION"}:
+                raise ExportBlockedError(
+                    f"Tipo de lectura no soportado en la conciliación: {reading_type}"
+                )
             rows = connection.execute(
                 """SELECT p.id_propietario,l.fecha_lectura,l.valor_acumulado
                    FROM propietarios p JOIN lecturas_vecino l
                      ON l.id_propietario=p.id_propietario
                    WHERE p.id_comunidad=? AND p.activo=1
-                     AND l.id_periodo=? AND l.tipo='ACS'
+                     AND l.id_periodo=? AND l.tipo=?
                      AND l.fecha_lectura IN (?,?)
                    ORDER BY p.id_propietario,l.fecha_lectura""",
                 (
-                    case["id_comunidad"], case["id_periodo"],
+                    case["id_comunidad"], case["id_periodo"], reading_type,
                     case["fecha_inicio"], case["fecha_fin"],
                 ),
             ).fetchall()

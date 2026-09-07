@@ -114,6 +114,7 @@ def canonical_workbook_layout(active_modules: tuple[str, ...] | list[str]) -> di
     tables = {
         module: deepcopy(_CANONICAL_TABLES[module]) for module in active_modules
     }
+    parameter_cells: dict[str, list[str]] = {}
     total_checks: dict[str, list[str]] = {}
     for module, table in tables.items():
         sheet = table["sheet"]
@@ -129,8 +130,21 @@ def canonical_workbook_layout(active_modules: tuple[str, ...] | list[str]) -> di
             total_checks["parameter:extraordinary_expense_actual"] = [
                 sheet, f"D{start}:D{end}"
             ]
-        elif module == "ACS":
-            total_checks["reading_total:ACS"] = [sheet, f"G{start}:G{end}"]
+        elif module in {"ACS", "CALEFACCION"}:
+            prefix = "acs" if module == "ACS" else "heating"
+            parameter_cells.update({
+                f"{prefix}_variable_actual": [sheet, f"H{start}"],
+                f"{prefix}_fixed_actual": [sheet, f"I{start + 1}"],
+                f"{prefix}_variable_billed": [sheet, "H4"],
+                f"{prefix}_fixed_billed": [sheet, "I4"],
+            })
+            total_checks.update({
+                f"reading_total:{module}": [sheet, f"G{start}:G{end}"],
+                f"parameter:{prefix}_variable_actual": [sheet, f"H{start}"],
+                f"parameter:{prefix}_fixed_actual": [sheet, f"I{start + 1}"],
+                f"parameter:{prefix}_variable_billed": [sheet, "H4"],
+                f"parameter:{prefix}_fixed_billed": [sheet, "I4"],
+            })
     return {
         "metadata_cells": {
             "community_name": ["DATOS", "A1"],
@@ -138,7 +152,7 @@ def canonical_workbook_layout(active_modules: tuple[str, ...] | list[str]) -> di
             "owner_count": ["DATOS", "D4"],
         },
         "tables": tables,
-        "parameter_cells": {},
+        "parameter_cells": parameter_cells,
         "total_checks": total_checks,
     }
 
@@ -193,6 +207,10 @@ def create_canonical_community_template(
         sheet["A2"] = f"{module} — {community_name}"
         sheet["A2"].font = Font(bold=True, color="FFFFFF")
         sheet["A2"].fill = title_fill
+        if module in {"ACS", "CALEFACCION"}:
+            sheet["G3"] = "Importes facturados"
+            sheet["H3"] = "Variable"
+            sheet["I3"] = "Fijo"
         header_row = table["start_row"] - 1
         columns = list(table.get("input_columns", table.get("columns", {})).values())
         columns += list(table.get("derived_columns", {}).values())

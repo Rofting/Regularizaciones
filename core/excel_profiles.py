@@ -51,6 +51,9 @@ class ExcelProfile:
         default_factory=lambda: MappingProxyType({})
     )
     source_sha256: str = ""
+    onboarding_configuration: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 _PROFILE_FIELDS = {
@@ -242,6 +245,66 @@ def _workbook_layout(value: Any) -> Mapping[str, Any]:
     return _freeze_json(value)
 
 
+def _onboarding_configuration(
+    value: Any,
+    active_modules: tuple[str, ...],
+) -> Mapping[str, Any]:
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, dict):
+        raise ValueError("onboarding_configuration debe ser un objeto")
+    _require_fields(
+        value,
+        {
+            "service_decision", "active_modules", "reading_column",
+            "reading_bindings", "sources",
+        },
+        "onboarding_configuration",
+    )
+    configured_modules = _string_tuple(
+        value["active_modules"], "onboarding_configuration.active_modules"
+    )
+    if configured_modules != active_modules:
+        raise ValueError(
+            "onboarding_configuration.active_modules no coincide con el perfil"
+        )
+    if not isinstance(value["service_decision"], str) or not value["service_decision"]:
+        raise ValueError("onboarding_configuration.service_decision no es válido")
+    if not isinstance(value["reading_column"], str):
+        raise ValueError("onboarding_configuration.reading_column no es válido")
+    bindings = value["reading_bindings"]
+    if not isinstance(bindings, list):
+        raise ValueError("onboarding_configuration.reading_bindings debe ser una lista")
+    bound_modules: list[str] = []
+    for index, binding in enumerate(bindings):
+        if not isinstance(binding, dict):
+            raise ValueError(f"El binding de lectura {index} no es un objeto")
+        _require_fields(
+            binding,
+            {"module", "column", "source_sha256s"},
+            f"onboarding_configuration.reading_bindings[{index}]",
+        )
+        if (
+            not isinstance(binding["module"], str)
+            or not isinstance(binding["column"], str)
+            or not binding["column"]
+            or not isinstance(binding["source_sha256s"], list)
+            or not binding["source_sha256s"]
+            or not all(
+                isinstance(item, str) and len(item) == 64
+                for item in binding["source_sha256s"]
+            )
+        ):
+            raise ValueError(f"Binding de lectura no válido para {binding.get('module')}")
+        bound_modules.append(binding["module"])
+    if tuple(bound_modules) != active_modules:
+        raise ValueError("Cada módulo activo debe tener un binding de lectura")
+    sources = value["sources"]
+    if not isinstance(sources, list) or not all(isinstance(item, dict) for item in sources):
+        raise ValueError("onboarding_configuration.sources debe ser una lista de objetos")
+    return _freeze_json(value)
+
+
 def validate_profile_payload(payload: Mapping[str, Any], project_root: Path) -> ExcelProfile:
     """Validate an in-memory profile payload without creating any files."""
     if not isinstance(payload, Mapping):
@@ -292,6 +355,9 @@ def validate_profile_payload(payload: Mapping[str, Any], project_root: Path) -> 
         concepts=_concepts(data["concepts"]),
         workbook_layout=_workbook_layout(data.get("workbook_layout")),
         source_sha256="",
+        onboarding_configuration=_onboarding_configuration(
+            data.get("onboarding_configuration"), active_modules
+        ),
     )
 
 
@@ -355,6 +421,7 @@ def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
         concepts=profile.concepts,
         workbook_layout=profile.workbook_layout,
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        onboarding_configuration=profile.onboarding_configuration,
     )
 
 

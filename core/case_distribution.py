@@ -395,7 +395,9 @@ def _write_results(
                 id_batch=excluded.id_batch,status='calculated'""",
             (
                 owner_id, period_id, concept.key, consumption_value,
-                "m³" if consumption_value is not None else None,
+                (
+                    "kWh" if concept.key.startswith("heating_") else "m³"
+                ) if consumption_value is not None else None,
                 billed, actual, actual - billed, source_batch_id,
             ),
         )

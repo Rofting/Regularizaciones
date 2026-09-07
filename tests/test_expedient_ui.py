@@ -81,7 +81,7 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
             ("UIM.fuente", Mock(return_value="font")),
             *((f"ctk.{kind}", FakeWidget) for kind in (
                 "CTkFrame", "CTkScrollableFrame", "CTkLabel", "CTkEntry",
-                "CTkButton", "CTkCheckBox", "CTkComboBox",
+                "CTkButton", "CTkComboBox",
             )),
         ):
             p = patch(f"expedient_ui.{target}", replacement)
@@ -89,15 +89,27 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
             self.addCleanup(p.stop)
         self.messages = self.patch("messagebox")
         self.files = self.patch("filedialog")
+        self.checkboxes = self.patch("ctk.CTkCheckBox")
         self.analysis = self.patch("community_onboarding.analyse_sources")
         self.confirm = self.patch("community_onboarding.confirm_onboarding")
         self.patch("gestor_bd.conectar")
         self.analysis.return_value = OnboardingDraft(
             "TEST", "Comunidad de prueba", (
                 SourceCandidate(Path("owners.csv"), "owners", "a" * 64),
-                SourceCandidate(Path("readings.pdf"), "reading", "b" * 64),
-            ), ("agua",),
-            (OnboardingQuestion("column", "Elige columna", ("A", "B"), True),),
+                SourceCandidate(
+                    Path("readings.xlsx"), "meter_reading_excel", "b" * 64,
+                    headers=("Vivienda", "Lectura A", "Lectura B"),
+                ),
+            ), ("ACS",),
+            (
+                OnboardingQuestion(
+                    "service", "Confirma el servicio",
+                    ("ACS", "CALEFACCION", "ACS+CALEFACCION", "NO_APLICA"), True
+                ),
+                OnboardingQuestion(
+                    "reading_column", "Elige columna", ("Lectura A", "Lectura B"), True
+                ),
+            ),
         )
         expedient_ui.open_community_onboarding_dialog(self.app)
         entries = self.entries()
@@ -152,8 +164,9 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
         self.assertIn("Confirma lo detectado", self.texts())
         self.click("Preparar resumen")
         self.assertNotIn("Crear comunidad", self.texts())
-        combo = next(w for w in self.dialog.descendants() if "values" in w.options)
-        combo.options["variable"].set("A")
+        for combo in (w for w in self.dialog.descendants() if "values" in w.options):
+            values = combo.options["values"]
+            combo.options["variable"].set("ACS" if "ACS" in values else "Lectura A")
         self.click("Preparar resumen")
         self.assertIn("Crear comunidad", self.texts())
 
@@ -164,8 +177,25 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
         self.confirm.return_value = OnboardingResult(1, None, None, Path("profile"), Path("template"), ())
         self.click("Crear comunidad")
         self.complete_worker()
-        self.assertEqual("A", self.confirm.call_args.kwargs["answers"]["column"])
+        configuration = self.confirm.call_args.kwargs["answers"]
+        self.assertEqual(("ACS",), configuration.active_modules)
+        self.assertEqual("Lectura A", configuration.reading_column)
         self.assertEqual(1, self.app._cargar_comunidades.call_count)
+
+    def test_confirmations_use_the_service_decision_without_module_checkboxes(self):
+        self.select_sources()
+        self.analyse()
+        self.click("Revisar confirmaciones")
+
+        self.assertFalse(self.checkboxes.called)
+        choices = [
+            widget.options["values"]
+            for widget in self.dialog.descendants()
+            if "values" in widget.options
+        ]
+        self.assertIn(
+            ["ACS", "CALEFACCION", "ACS+CALEFACCION", "NO_APLICA"], choices
+        )
 
     def test_analysis_error_back_and_continue_returns_to_sources_then_retries(self):
         self.select_sources()
@@ -194,15 +224,24 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
         self.complete_worker()
         self.summary()  # its first attempt must still require an answer
 
-    def test_detection_without_questions_still_visits_confirmations(self):
+    def test_detection_with_a_service_decision_still_visits_confirmations(self):
         draft = self.analysis.return_value
+        readings = SourceCandidate(
+            Path("readings.xlsx"), "meter_reading_excel", "b" * 64,
+            headers=("Vivienda", "Lectura"),
+        )
         self.analysis.return_value = OnboardingDraft(
-            draft.community_code, draft.community_name, draft.sources, (), (),
+            draft.community_code, draft.community_name, (draft.sources[0], readings), ("ACS",),
+            (OnboardingQuestion(
+                "service", "Confirma el servicio", ("ACS", "NO_APLICA"), True
+            ),),
         )
         self.select_sources()
         self.analyse()
         self.click("Revisar confirmaciones")
         self.assertIn("Confirma lo detectado", self.texts())
+        combo = next(w for w in self.dialog.descendants() if "values" in w.options)
+        combo.options["variable"].set("ACS")
         self.click("Preparar resumen")
         self.assertIn("Crear comunidad", self.texts())
 

@@ -968,6 +968,28 @@ def _parse_profile_parameters(
     registran aunque sean idénticos, pues su procedencia no lo es.
     """
     parameter_cells = profile.workbook_layout.get("parameter_cells", {})
+    if profile.onboarding_configuration and parameter_cells:
+        cells = []
+        for binding in parameter_cells.values():
+            if not isinstance(binding, (tuple, list)) or len(binding) != 2:
+                break
+            sheet_name, address = (str(binding[0]), str(binding[1]))
+            if (
+                sheet_name not in values_workbook.sheetnames
+                or sheet_name not in formula_workbook.sheetnames
+            ):
+                break
+            cells.extend((
+                values_workbook[sheet_name][address],
+                formula_workbook[sheet_name][address],
+            ))
+        else:
+            # Una plantilla recién creada por el alta es un soporte de salida,
+            # no un maestro histórico con importes implícitos. Si todas sus
+            # celdas económicas están vacías, no se inventan ceros ni se crean
+            # incidencias; cualquier valor parcial sí activa el parser normal.
+            if cells and not any(_cell_has_value(cell) for cell in cells):
+                return
     for key, binding in parameter_cells.items():
         if not isinstance(binding, (tuple, list)) or len(binding) != 2:
             raise ValueError(f"La celda de parámetro {key} no es válida en el perfil")

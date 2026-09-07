@@ -26,10 +26,16 @@ from lector_pdf import extraer_texto
 
 
 _EXCEL_SUFFIXES = frozenset({".xls", ".xlsx"})
+_METER_MODULES = ("ACS", "CALEFACCION")
 _SERVICE_LABELS = {
     "ACS": ("acs", "agua caliente"),
-    "AGUA": ("agua",),
     "CALEFACCION": ("calefaccion", "calefacción"),
+}
+_SERVICE_DECISIONS = {
+    "ACS": ("ACS",),
+    "CALEFACCION": ("CALEFACCION",),
+    "ACS+CALEFACCION": ("ACS", "CALEFACCION"),
+    "NO_APLICA": (),
 }
 _WINDOWS_RESERVED_NAMES = frozenset({
     "CON", "PRN", "AUX", "NUL",
@@ -57,6 +63,24 @@ class OnboardingQuestion:
 
 
 @dataclass(frozen=True)
+class ReadingBinding:
+    module: str
+    column: str
+    source_sha256s: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class OnboardingConfiguration:
+    """Única decisión normalizada que comparten resumen, perfil y publicación."""
+
+    service_decision: str
+    active_modules: tuple[str, ...]
+    reading_column: str
+    reading_bindings: tuple[ReadingBinding, ...]
+    source_traces: tuple[tuple[str, str, str], ...]
+
+
+@dataclass(frozen=True)
 class OnboardingDraft:
     community_code: str
     community_name: str
@@ -76,14 +100,16 @@ class OnboardingResult:
 
 
 def build_profile_payload(
-    draft: OnboardingDraft, answers: Mapping[str, str | bool]
+    draft: OnboardingDraft,
+    answers: Mapping[str, str | bool] | OnboardingConfiguration,
 ) -> dict[str, object]:
     """Build an in-memory, validated-shape profile from explicit answers."""
-    _require_answers(draft.questions, answers)
-    active_modules = [
-        module for module in draft.detected_modules
-        if answers.get(f"module:{module}") is True
-    ]
+    configuration = (
+        answers
+        if isinstance(answers, OnboardingConfiguration)
+        else resolve_onboarding_configuration(draft, answers)
+    )
+    active_modules = list(configuration.active_modules)
     _validate_community_code(draft.community_code)
     key = f"{draft.community_code}_v1"
 
@@ -102,7 +128,88 @@ def build_profile_payload(
         "active_modules": active_modules,
         "required_sheets": required_sheets,
         "required_formula_cells": [],
-        "concepts": [_concept_for(module) for module in active_modules],
+        "concepts": [
+            concept
+            for module in active_modules
+            for concept in _concepts_for(module)
+        ],
+        "onboarding_configuration": _configuration_payload(configuration),
+    }
+
+
+def resolve_onboarding_configuration(
+    draft: OnboardingDraft,
+    answers: Mapping[str, str | bool],
+) -> OnboardingConfiguration:
+    """Normaliza respuestas humanas en un contrato único y trazable."""
+    _require_answers(draft.questions, answers)
+    service_answer = answers.get("service")
+    if isinstance(service_answer, str) and service_answer in _SERVICE_DECISIONS:
+        service_decision = service_answer
+        active_modules = _SERVICE_DECISIONS[service_answer]
+    elif len(draft.detected_modules) == 1:
+        # Compatibilidad con borradores construidos antes de que el análisis
+        # incorporase siempre la decisión explícita de servicio.
+        service_decision = draft.detected_modules[0]
+        active_modules = (draft.detected_modules[0],)
+    else:
+        raise ValueError("Debe confirmarse el servicio o indicar que no aplica")
+
+    unsupported = sorted(set(active_modules).difference(_METER_MODULES))
+    if unsupported:
+        raise ValueError("Servicio de contador no soportado: " + ", ".join(unsupported))
+
+    reading_sources = tuple(
+        source for source in draft.sources
+        if source.kind.startswith("meter_reading_")
+    )
+    reading_columns = _reading_columns(reading_sources)
+    selected_column = answers.get("reading_column")
+    if isinstance(selected_column, str) and selected_column.strip():
+        reading_column = selected_column.strip()
+    elif len(reading_columns) == 1:
+        reading_column = reading_columns[0]
+    elif active_modules:
+        raise ValueError("Debe responderse la columna de lectura obligatoria")
+    else:
+        reading_column = ""
+
+    if active_modules and not reading_sources:
+        raise ValueError("Cada servicio activo necesita una fuente de lecturas")
+    fingerprints = tuple(source.sha256 for source in reading_sources)
+    bindings = tuple(
+        ReadingBinding(module, reading_column, fingerprints)
+        for module in active_modules
+    )
+    traces = tuple(
+        (source.kind, source.path.name, source.sha256) for source in draft.sources
+    )
+    return OnboardingConfiguration(
+        service_decision=service_decision,
+        active_modules=active_modules,
+        reading_column=reading_column,
+        reading_bindings=bindings,
+        source_traces=traces,
+    )
+
+
+def _configuration_payload(configuration: OnboardingConfiguration) -> dict[str, object]:
+    return {
+        "service_decision": configuration.service_decision,
+        "active_modules": list(configuration.active_modules),
+        "reading_column": configuration.reading_column,
+        "reading_bindings": [
+            {
+                "module": binding.module,
+                "column": binding.column,
+                "source_sha256s": list(binding.source_sha256s),
+            }
+            for binding in configuration.reading_bindings
+        ],
+        "sources": [
+            {"kind": kind, "name": name, "sha256": sha256}
+            for kind, name, sha256 in configuration.source_traces
+        ],
     }
 
 
@@ -409,6 +516,8 @@ def _require_answers(
         ):
             if question.key == "reading_column":
                 raise ValueError("Debe responderse la columna de lectura obligatoria")
+            if question.key == "service":
+                raise ValueError("Debe responderse el servicio obligatorio")
             raise ValueError(f"Debe responderse la pregunta obligatoria: {question.prompt}")
 
 
@@ -424,14 +533,24 @@ def _validate_community_code(community_code: str) -> None:
         raise ValueError("El código de comunidad no permite crear una clave segura")
 
 
-def _concept_for(module: str) -> dict[str, object]:
-    return {
-        "key": module.lower(),
-        "allocation_method": "consumption",
-        "actual_source": f"period_parameters.{module.lower()}_actual",
-        "billed_source": f"period_parameters.{module.lower()}_billed",
-        "required": True,
-    }
+def _concepts_for(module: str) -> tuple[dict[str, object], ...]:
+    prefix = "acs" if module == "ACS" else "heating"
+    return (
+        {
+            "key": f"{prefix}_fixed",
+            "allocation_method": "equal",
+            "actual_source": f"period_parameters.{prefix}_fixed_actual",
+            "billed_source": f"period_parameters.{prefix}_fixed_billed",
+            "required": True,
+        },
+        {
+            "key": f"{prefix}_variable",
+            "allocation_method": "consumption",
+            "actual_source": f"period_parameters.{prefix}_variable_actual",
+            "billed_source": f"period_parameters.{prefix}_variable_billed",
+            "required": True,
+        },
+    )
 
 
 def analyse_sources(
@@ -458,12 +577,13 @@ def analyse_sources(
         sources.append(_source(path, "invoice_pdf"))
 
     readings = tuple(source for source in sources if source.kind.startswith("meter_reading_"))
+    detected_modules = _detected_modules(tuple(sources))
     return OnboardingDraft(
         community_code=community_code,
         community_name=community_name,
         sources=tuple(sources),
-        detected_modules=_detected_modules(readings),
-        questions=_questions(readings),
+        detected_modules=detected_modules,
+        questions=_questions(readings, detected_modules),
     )
 
 
@@ -516,36 +636,52 @@ def _detected_modules(readings: tuple[SourceCandidate, ...]) -> tuple[str, ...]:
         modules.append("ACS")
         for label in acs_labels:
             material = material.replace(label, " ")
-    if any(label in material for label in _SERVICE_LABELS["AGUA"]):
-        modules.append("AGUA")
     if any(label in material for label in _SERVICE_LABELS["CALEFACCION"]):
         modules.append("CALEFACCION")
     return tuple(modules)
 
 
-def _questions(readings: tuple[SourceCandidate, ...]) -> tuple[OnboardingQuestion, ...]:
-    questions: list[OnboardingQuestion] = []
-    reading_columns = _unique_labels(
+def _reading_columns(readings: tuple[SourceCandidate, ...]) -> tuple[str, ...]:
+    return _unique_labels(
         header
         for source in readings
         for header in source.headers
         if "lectura" in header.lower() or "contador" in header.lower()
     )
-    if len(reading_columns) > 1:
+
+
+def _service_candidates(detected_modules: tuple[str, ...]) -> tuple[str, ...]:
+    candidates = list(detected_modules)
+    candidates.extend(
+        module for module in _METER_MODULES if module not in candidates
+    )
+    candidates.extend(("ACS+CALEFACCION", "NO_APLICA"))
+    return tuple(candidates)
+
+
+def _questions(
+    readings: tuple[SourceCandidate, ...],
+    detected_modules: tuple[str, ...],
+) -> tuple[OnboardingQuestion, ...]:
+    questions: list[OnboardingQuestion] = []
+    reading_columns = _reading_columns(readings)
+    if len(reading_columns) != 1:
         questions.append(OnboardingQuestion(
             key="reading_column",
-            prompt="Selecciona la columna de lectura que se debe usar.",
+            prompt=(
+                "Selecciona la columna de lectura que se debe usar."
+                if reading_columns
+                else "Indica la columna o campo de lectura que se debe usar."
+            ),
             candidates=reading_columns,
             required=True,
         ))
-    modules = _detected_modules(readings)
-    if len(modules) > 1:
-        questions.append(OnboardingQuestion(
-            key="service",
-            prompt="Selecciona el servicio asociado a las lecturas.",
-            candidates=modules,
-            required=True,
-        ))
+    questions.append(OnboardingQuestion(
+        key="service",
+        prompt="Confirma el servicio asociado a las lecturas o indica que no aplica.",
+        candidates=_service_candidates(detected_modules),
+        required=True,
+    ))
     return tuple(questions)
 
 
