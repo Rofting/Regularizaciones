@@ -26,6 +26,12 @@ MODULE_REQUIRED_SHEETS = {
     "ACS": ("LECTURAS ACS M3", "ANALISIS"),
     "CALEFACCION": ("LECTURAS CALEF KWH",),
 }
+_ONBOARDING_SERVICE_MODULES = {
+    "ACS": ("ACS",),
+    "CALEFACCION": ("CALEFACCION",),
+    "ACS+CALEFACCION": ("ACS", "CALEFACCION"),
+    "NO_APLICA": (),
+}
 
 
 @dataclass(frozen=True)
@@ -268,8 +274,24 @@ def _onboarding_configuration(
         raise ValueError(
             "onboarding_configuration.active_modules no coincide con el perfil"
         )
-    if not isinstance(value["service_decision"], str) or not value["service_decision"]:
+    service_decision = value["service_decision"]
+    if not isinstance(service_decision, str) or not service_decision:
         raise ValueError("onboarding_configuration.service_decision no es válido")
+    if _ONBOARDING_SERVICE_MODULES.get(service_decision) != configured_modules:
+        raise ValueError(
+            "onboarding_configuration.service_decision contradice los módulos activos"
+        )
+    not_applicable_modules = _string_tuple(
+        value.get("not_applicable_modules", []),
+        "onboarding_configuration.not_applicable_modules",
+    )
+    if (
+        set(not_applicable_modules).difference({"ACS", "CALEFACCION"})
+        or set(not_applicable_modules).intersection(configured_modules)
+    ):
+        raise ValueError(
+            "onboarding_configuration.not_applicable_modules contiene módulos activos"
+        )
     if not isinstance(value["reading_column"], str):
         raise ValueError("onboarding_configuration.reading_column no es válido")
     bindings = value["reading_bindings"]
@@ -288,6 +310,8 @@ def _onboarding_configuration(
             not isinstance(binding["module"], str)
             or not isinstance(binding["column"], str)
             or not binding["column"]
+            or not isinstance(binding.get("meter", ""), str)
+            or not isinstance(binding.get("date", ""), str)
             or not isinstance(binding["source_sha256s"], list)
             or not binding["source_sha256s"]
             or not all(
@@ -299,9 +323,42 @@ def _onboarding_configuration(
         bound_modules.append(binding["module"])
     if tuple(bound_modules) != active_modules:
         raise ValueError("Cada módulo activo debe tener un binding de lectura")
+    invoice_decisions = value.get("invoice_decisions", [])
+    if not isinstance(invoice_decisions, list):
+        raise ValueError("onboarding_configuration.invoice_decisions debe ser una lista")
+    for index, decision in enumerate(invoice_decisions):
+        if not isinstance(decision, dict):
+            raise ValueError(f"La decisión de factura {index} no es un objeto")
+        _require_fields(
+            decision,
+            {"source_sha256", "provider", "period", "amount", "concept"},
+            f"onboarding_configuration.invoice_decisions[{index}]",
+        )
+        if (
+            not isinstance(decision["source_sha256"], str)
+            or len(decision["source_sha256"]) != 64
+            or not all(
+                isinstance(decision[field], str) and decision[field]
+                for field in ("provider", "period", "amount", "concept")
+            )
+        ):
+            raise ValueError(f"Decisión de factura no válida en posición {index}")
     sources = value["sources"]
     if not isinstance(sources, list) or not all(isinstance(item, dict) for item in sources):
         raise ValueError("onboarding_configuration.sources debe ser una lista de objetos")
+    for index, source in enumerate(sources):
+        _require_fields(source, {"kind", "name", "sha256"}, f"fuente {index}")
+        if (
+            not isinstance(source["kind"], str)
+            or not source["kind"]
+            or not isinstance(source["name"], str)
+            or not source["name"]
+            or "/" in source["name"]
+            or "\\" in source["name"]
+            or not isinstance(source["sha256"], str)
+            or len(source["sha256"]) != 64
+        ):
+            raise ValueError(f"Traza de fuente no válida en posición {index}")
     return _freeze_json(value)
 
 

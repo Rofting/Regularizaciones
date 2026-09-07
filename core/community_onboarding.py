@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from dataclasses import dataclass
@@ -67,6 +68,36 @@ class ReadingBinding:
     module: str
     column: str
     source_sha256s: tuple[str, ...]
+    meter: str = ""
+    date: str = ""
+
+
+@dataclass(frozen=True)
+class InvoiceEvidence:
+    source_sha256: str
+    providers: tuple[str, ...]
+    periods: tuple[str, ...]
+    amounts: tuple[str, ...]
+    concepts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReadingEvidence:
+    source_sha256: str
+    meters: tuple[str, ...]
+    columns: tuple[str, ...]
+    dates: tuple[str, ...]
+    readings: tuple[str, ...]
+    services: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class InvoiceDecision:
+    source_sha256: str
+    provider: str
+    period: str
+    amount: str
+    concept: str
 
 
 @dataclass(frozen=True)
@@ -78,6 +109,8 @@ class OnboardingConfiguration:
     reading_column: str
     reading_bindings: tuple[ReadingBinding, ...]
     source_traces: tuple[tuple[str, str, str], ...]
+    invoice_decisions: tuple[InvoiceDecision, ...] = ()
+    not_applicable_modules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,6 +120,8 @@ class OnboardingDraft:
     sources: tuple[SourceCandidate, ...]
     detected_modules: tuple[str, ...]
     questions: tuple[OnboardingQuestion, ...]
+    invoice_evidence: tuple[InvoiceEvidence, ...] = ()
+    reading_evidence: tuple[ReadingEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -142,7 +177,6 @@ def resolve_onboarding_configuration(
     answers: Mapping[str, str | bool],
 ) -> OnboardingConfiguration:
     """Normaliza respuestas humanas en un contrato único y trazable."""
-    _require_answers(draft.questions, answers)
     service_answer = answers.get("service")
     if isinstance(service_answer, str) and service_answer in _SERVICE_DECISIONS:
         service_decision = service_answer
@@ -159,28 +193,33 @@ def resolve_onboarding_configuration(
     if unsupported:
         raise ValueError("Servicio de contador no soportado: " + ", ".join(unsupported))
 
+    not_applicable_modules = _not_applicable_modules(active_modules, answers)
+    _require_answers(draft.questions, answers, active_modules=active_modules)
     reading_sources = tuple(
         source for source in draft.sources
         if source.kind.startswith("meter_reading_")
     )
-    reading_columns = _reading_columns(reading_sources)
-    selected_column = answers.get("reading_column")
-    if isinstance(selected_column, str) and selected_column.strip():
-        reading_column = selected_column.strip()
-    elif len(reading_columns) == 1:
-        reading_column = reading_columns[0]
-    elif active_modules:
-        raise ValueError("Debe responderse la columna de lectura obligatoria")
-    else:
-        reading_column = ""
-
+    reading_columns = _confirmed_reading_columns(
+        reading_sources, draft.reading_evidence
+    )
     if active_modules and not reading_sources:
         raise ValueError("Cada servicio activo necesita una fuente de lecturas")
-    fingerprints = tuple(source.sha256 for source in reading_sources)
+
     bindings = tuple(
-        ReadingBinding(module, reading_column, fingerprints)
+        _binding_for(
+            module,
+            active_modules=active_modules,
+            reading_sources=reading_sources,
+            reading_evidence=draft.reading_evidence,
+            reading_columns=reading_columns,
+            questions=draft.questions,
+            answers=answers,
+        )
         for module in active_modules
     )
+    distinct_columns = _unique_labels(binding.column for binding in bindings)
+    reading_column = distinct_columns[0] if len(distinct_columns) == 1 else ""
+    invoice_decisions = _invoice_decisions(draft.invoice_evidence, answers)
     traces = tuple(
         (source.kind, source.path.name, source.sha256) for source in draft.sources
     )
@@ -190,6 +229,8 @@ def resolve_onboarding_configuration(
         reading_column=reading_column,
         reading_bindings=bindings,
         source_traces=traces,
+        invoice_decisions=invoice_decisions,
+        not_applicable_modules=not_applicable_modules,
     )
 
 
@@ -202,15 +243,173 @@ def _configuration_payload(configuration: OnboardingConfiguration) -> dict[str, 
             {
                 "module": binding.module,
                 "column": binding.column,
+                "meter": binding.meter,
+                "date": binding.date,
                 "source_sha256s": list(binding.source_sha256s),
             }
             for binding in configuration.reading_bindings
         ],
+        "invoice_decisions": [
+            {
+                "source_sha256": decision.source_sha256,
+                "provider": decision.provider,
+                "period": decision.period,
+                "amount": decision.amount,
+                "concept": decision.concept,
+            }
+            for decision in configuration.invoice_decisions
+        ],
+        "not_applicable_modules": list(configuration.not_applicable_modules),
         "sources": [
             {"kind": kind, "name": name, "sha256": sha256}
             for kind, name, sha256 in configuration.source_traces
         ],
     }
+
+
+def _not_applicable_modules(
+    active_modules: tuple[str, ...],
+    answers: Mapping[str, str | bool],
+) -> tuple[str, ...]:
+    traced: list[str] = []
+    for key, answer in answers.items():
+        if not key.startswith("reading_") or ":" not in key:
+            continue
+        module = key.rsplit(":", 1)[1]
+        if module not in _METER_MODULES:
+            continue
+        if answer == "NO_APLICA":
+            if module in active_modules:
+                raise ValueError(f"NO_APLICA no es válido para el módulo activo {module}")
+            traced.append(module)
+        elif module not in active_modules:
+            raise ValueError(f"Sólo el módulo inactivo {module} admite NO_APLICA")
+    return _unique_labels(traced)
+
+
+def _binding_for(
+    module: str,
+    *,
+    active_modules: tuple[str, ...],
+    reading_sources: tuple[SourceCandidate, ...],
+    reading_evidence: tuple[ReadingEvidence, ...],
+    reading_columns: tuple[str, ...],
+    questions: tuple[OnboardingQuestion, ...],
+    answers: Mapping[str, str | bool],
+) -> ReadingBinding:
+    key = f"reading_column:{module}"
+    selected = answers.get(key)
+    if selected is None and len(active_modules) == 1:
+        # Compatibility is limited to drafts created before per-module questions.
+        selected = answers.get("reading_column")
+    requires_explicit = (
+        len(active_modules) > 1
+        or any(question.key in {key, "reading_column"} for question in questions)
+    )
+    if isinstance(selected, str) and selected.strip():
+        column = selected.strip()
+    elif not requires_explicit and len(reading_columns) == 1:
+        column = reading_columns[0]
+    else:
+        raise ValueError(f"Debe responderse la columna de lectura obligatoria de {module}")
+    if column == "NO_APLICA":
+        raise ValueError(f"NO_APLICA no es válido para el módulo activo {module}")
+    if reading_columns and column not in reading_columns:
+        raise ValueError(f"La columna de lectura de {module} no consta en la evidencia")
+
+    evidence_sha256s = tuple(
+        evidence.source_sha256
+        for evidence in reading_evidence
+        if module in evidence.services
+    )
+    source_sha256s = evidence_sha256s or tuple(
+        source.sha256 for source in reading_sources
+    )
+    return ReadingBinding(
+        module,
+        column,
+        _unique_labels(source_sha256s),
+        meter=_confirmed_reading_detail(
+            "reading_meter", module, reading_evidence, questions, answers
+        ),
+        date=_confirmed_reading_detail(
+            "reading_date", module, reading_evidence, questions, answers
+        ),
+    )
+
+
+def _confirmed_reading_detail(
+    base_key: str,
+    module: str,
+    evidence_items: tuple[ReadingEvidence, ...],
+    questions: tuple[OnboardingQuestion, ...],
+    answers: Mapping[str, str | bool],
+) -> str:
+    attribute = "meters" if base_key == "reading_meter" else "dates"
+    candidates = _unique_labels(
+        value
+        for evidence in evidence_items
+        if not evidence.services or module in evidence.services
+        for value in getattr(evidence, attribute)
+    )
+    key = f"{base_key}:{module}"
+    answer = answers.get(key)
+    if isinstance(answer, str) and answer.strip():
+        value = answer.strip()
+        if value == "NO_APLICA":
+            raise ValueError(f"NO_APLICA no es válido para el módulo activo {module}")
+        if candidates and value not in candidates:
+            raise ValueError(f"La respuesta {key} no consta en la evidencia")
+        return value
+    if len(candidates) == 1:
+        return candidates[0]
+    if any(question.key == key for question in questions):
+        raise ValueError(f"Debe responderse la decisión obligatoria {key}")
+    return ""
+
+
+def _invoice_decisions(
+    evidence_items: tuple[InvoiceEvidence, ...],
+    answers: Mapping[str, str | bool],
+) -> tuple[InvoiceDecision, ...]:
+    decisions: list[InvoiceDecision] = []
+    total = len(evidence_items)
+    for index, evidence in enumerate(evidence_items):
+        decisions.append(InvoiceDecision(
+            source_sha256=evidence.source_sha256,
+            provider=_confirmed_evidence_value(
+                "invoice_provider", evidence.providers, index, total, answers
+            ),
+            period=_confirmed_evidence_value(
+                "invoice_period", evidence.periods, index, total, answers
+            ),
+            amount=_confirmed_evidence_value(
+                "invoice_amount", evidence.amounts, index, total, answers
+            ),
+            concept=_confirmed_evidence_value(
+                "invoice_concept", evidence.concepts, index, total, answers
+            ),
+        ))
+    return tuple(decisions)
+
+
+def _confirmed_evidence_value(
+    base_key: str,
+    candidates: tuple[str, ...],
+    index: int,
+    total: int,
+    answers: Mapping[str, str | bool],
+) -> str:
+    key = _indexed_question_key(base_key, index, total)
+    answer = answers.get(key)
+    if isinstance(answer, str) and answer.strip():
+        value = answer.strip()
+        if candidates and value not in candidates:
+            raise ValueError(f"La respuesta {key} no consta en la evidencia")
+        return value
+    if len(candidates) == 1:
+        return candidates[0]
+    raise ValueError(f"Debe responderse la decisión obligatoria {key}")
 
 
 def confirm_onboarding(
@@ -503,18 +702,31 @@ def _remove_created_directories(directories: list[Path]) -> None:
 
 
 def _require_answers(
-    questions: tuple[OnboardingQuestion, ...], answers: Mapping[str, str | bool]
+    questions: tuple[OnboardingQuestion, ...],
+    answers: Mapping[str, str | bool],
+    *,
+    active_modules: tuple[str, ...],
 ) -> None:
     for question in questions:
         if not question.required:
             continue
+        if ":" in question.key:
+            module = question.key.rsplit(":", 1)[1]
+            if module in _METER_MODULES and module not in active_modules:
+                if answers.get(question.key) == "NO_APLICA":
+                    continue
+                if question.key in answers:
+                    raise ValueError(
+                        f"Sólo el módulo inactivo {module} admite NO_APLICA"
+                    )
+                continue
         answer = answers.get(question.key)
         if (
             not isinstance(answer, str)
             or not answer.strip()
             or (question.candidates and answer not in question.candidates)
         ):
-            if question.key == "reading_column":
+            if question.key == "reading_column" or question.key.startswith("reading_column:"):
                 raise ValueError("Debe responderse la columna de lectura obligatoria")
             if question.key == "service":
                 raise ValueError("Debe responderse el servicio obligatorio")
@@ -577,13 +789,20 @@ def analyse_sources(
         sources.append(_source(path, "invoice_pdf"))
 
     readings = tuple(source for source in sources if source.kind.startswith("meter_reading_"))
-    detected_modules = _detected_modules(tuple(sources))
+    invoices = tuple(source for source in sources if source.kind == "invoice_pdf")
+    invoice_evidence = _invoice_evidence(invoices)
+    reading_evidence = _reading_evidence(readings)
+    detected_modules = _detected_modules(invoice_evidence, reading_evidence)
     return OnboardingDraft(
         community_code=community_code,
         community_name=community_name,
         sources=tuple(sources),
         detected_modules=detected_modules,
-        questions=_questions(readings, detected_modules),
+        questions=_questions(
+            readings, detected_modules, invoice_evidence, reading_evidence
+        ),
+        invoice_evidence=invoice_evidence,
+        reading_evidence=reading_evidence,
     )
 
 
@@ -626,10 +845,8 @@ def _excel_headers(path: Path) -> tuple[str, ...]:
         workbook.close()
 
 
-def _detected_modules(readings: tuple[SourceCandidate, ...]) -> tuple[str, ...]:
-    material = " ".join(
-        " ".join(source.headers) + " " + source.text for source in readings
-    ).lower()
+def _module_candidates(material: str) -> tuple[str, ...]:
+    material = material.lower()
     modules = []
     acs_labels = _SERVICE_LABELS["ACS"]
     if any(label in material for label in acs_labels):
@@ -641,13 +858,136 @@ def _detected_modules(readings: tuple[SourceCandidate, ...]) -> tuple[str, ...]:
     return tuple(modules)
 
 
+def _detected_modules(
+    invoices: tuple[InvoiceEvidence, ...],
+    readings: tuple[ReadingEvidence, ...],
+) -> tuple[str, ...]:
+    return _unique_labels(
+        candidate
+        for evidence in (*invoices, *readings)
+        for candidate in (
+            evidence.concepts
+            if isinstance(evidence, InvoiceEvidence)
+            else evidence.services
+        )
+        if candidate in _METER_MODULES
+    )
+
+
 def _reading_columns(readings: tuple[SourceCandidate, ...]) -> tuple[str, ...]:
     return _unique_labels(
         header
         for source in readings
         for header in source.headers
-        if "lectura" in header.lower() or "contador" in header.lower()
+        if "lectura" in header.lower()
+        and "fecha" not in header.lower()
+        and "contador" not in header.lower()
     )
+
+
+def _confirmed_reading_columns(
+    readings: tuple[SourceCandidate, ...],
+    evidence_items: tuple[ReadingEvidence, ...],
+) -> tuple[str, ...]:
+    return _unique_labels((
+        *_reading_columns(readings),
+        *(column for evidence in evidence_items for column in evidence.columns),
+    ))
+
+
+def _invoice_evidence(
+    invoices: tuple[SourceCandidate, ...],
+) -> tuple[InvoiceEvidence, ...]:
+    evidence: list[InvoiceEvidence] = []
+    for source in invoices:
+        explicit_concepts = _keyed_values(source.text, ("CONCEPTO", "SERVICIO"))
+        concepts = _unique_labels(
+            canonical
+            for value in explicit_concepts
+            for canonical in (_canonical_concept(value),)
+            if canonical
+        )
+        if not concepts:
+            concepts = _module_candidates(source.text)
+        evidence.append(InvoiceEvidence(
+            source_sha256=source.sha256,
+            providers=_keyed_values(source.text, ("PROVEEDOR", "EMISOR")),
+            periods=_keyed_values(source.text, ("PERIODO", "PERÍODO")),
+            amounts=_keyed_values(source.text, ("IMPORTE", "TOTAL")),
+            concepts=concepts,
+        ))
+    return tuple(evidence)
+
+
+def _reading_evidence(
+    readings: tuple[SourceCandidate, ...],
+) -> tuple[ReadingEvidence, ...]:
+    evidence: list[ReadingEvidence] = []
+    for source in readings:
+        if source.kind == "meter_reading_excel":
+            columns = _reading_columns((source,))
+            meters = _unique_labels(
+                header for header in source.headers if "contador" in header.lower()
+            )
+            dates = _unique_labels(
+                header for header in source.headers if "fecha" in header.lower()
+            )
+            values = _excel_column_values(source.path, columns)
+            material = " ".join(source.headers)
+        else:
+            columns = _keyed_values(source.text, ("COLUMNA",))
+            meters = _keyed_values(source.text, ("CONTADOR",))
+            dates = _keyed_values(source.text, ("FECHA",))
+            values = _keyed_values(source.text, ("LECTURA",))
+            material = source.text
+        evidence.append(ReadingEvidence(
+            source_sha256=source.sha256,
+            meters=meters,
+            columns=columns,
+            dates=dates,
+            readings=values,
+            services=_module_candidates(material),
+        ))
+    return tuple(evidence)
+
+
+def _excel_column_values(path: Path, columns: tuple[str, ...]) -> tuple[str, ...]:
+    if not columns or path.suffix.lower() == ".xls":
+        return ()
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook.active
+        header_indexes = {
+            str(cell.value or "").strip(): index
+            for index, cell in enumerate(
+                next(sheet.iter_rows(min_row=1, max_row=1), ()), start=1
+            )
+        }
+        return _unique_labels(
+            str(sheet.cell(row=row, column=header_indexes[column]).value).strip()
+            for column in columns
+            if column in header_indexes
+            for row in range(2, sheet.max_row + 1)
+            if sheet.cell(row=row, column=header_indexes[column]).value is not None
+        )
+    finally:
+        workbook.close()
+
+
+def _keyed_values(text: str, labels: tuple[str, ...]) -> tuple[str, ...]:
+    alternatives = "|".join(re.escape(label) for label in labels)
+    pattern = re.compile(
+        rf"(?:^|[;\n])\s*(?:{alternatives})\s*:\s*([^;\n]+)",
+        re.IGNORECASE,
+    )
+    return _unique_labels(match.group(1).strip() for match in pattern.finditer(text))
+
+
+def _canonical_concept(value: str) -> str:
+    modules = _module_candidates(value)
+    if len(modules) == 1:
+        return modules[0]
+    return " ".join(value.split())
 
 
 def _service_candidates(detected_modules: tuple[str, ...]) -> tuple[str, ...]:
@@ -662,20 +1002,50 @@ def _service_candidates(detected_modules: tuple[str, ...]) -> tuple[str, ...]:
 def _questions(
     readings: tuple[SourceCandidate, ...],
     detected_modules: tuple[str, ...],
+    invoices: tuple[InvoiceEvidence, ...],
+    reading_evidence: tuple[ReadingEvidence, ...],
 ) -> tuple[OnboardingQuestion, ...]:
     questions: list[OnboardingQuestion] = []
-    reading_columns = _reading_columns(readings)
-    if len(reading_columns) != 1:
-        questions.append(OnboardingQuestion(
-            key="reading_column",
-            prompt=(
-                "Selecciona la columna de lectura que se debe usar."
-                if reading_columns
-                else "Indica la columna o campo de lectura que se debe usar."
-            ),
-            candidates=reading_columns,
-            required=True,
-        ))
+    invoice_fields = (
+        ("invoice_provider", "proveedor", "providers"),
+        ("invoice_period", "período", "periods"),
+        ("invoice_amount", "importe", "amounts"),
+        ("invoice_concept", "concepto o servicio", "concepts"),
+    )
+    for index, evidence in enumerate(invoices):
+        for base_key, label, attribute in invoice_fields:
+            candidates = getattr(evidence, attribute)
+            if len(candidates) != 1:
+                questions.append(OnboardingQuestion(
+                    key=_indexed_question_key(base_key, index, len(invoices)),
+                    prompt=f"Confirma el {label} de la factura seleccionada.",
+                    candidates=candidates,
+                    required=True,
+                ))
+    reading_columns = _confirmed_reading_columns(readings, reading_evidence)
+    candidate_modules = detected_modules or _METER_MODULES
+    for module in candidate_modules:
+        has_reading_values = any(
+            evidence.readings
+            and (not evidence.services or module in evidence.services)
+            for evidence in reading_evidence
+        )
+        if (
+            len(reading_columns) != 1
+            or len(candidate_modules) > 1
+            or not has_reading_values
+        ):
+            questions.append(OnboardingQuestion(
+                key=f"reading_column:{module}",
+                prompt=(
+                    f"Selecciona la columna de lectura de {module}."
+                    if reading_columns
+                    else f"Indica la columna o campo de lectura de {module}."
+                ),
+                candidates=reading_columns,
+                required=True,
+            ))
+    questions.extend(_reading_detail_questions(reading_evidence, candidate_modules))
     questions.append(OnboardingQuestion(
         key="service",
         prompt="Confirma el servicio asociado a las lecturas o indica que no aplica.",
@@ -683,6 +1053,39 @@ def _questions(
         required=True,
     ))
     return tuple(questions)
+
+
+def _reading_detail_questions(
+    evidence_items: tuple[ReadingEvidence, ...],
+    modules: tuple[str, ...],
+) -> tuple[OnboardingQuestion, ...]:
+    candidates_by_field = {
+        "reading_meter": _unique_labels(
+            value for evidence in evidence_items for value in evidence.meters
+        ),
+        "reading_date": _unique_labels(
+            value for evidence in evidence_items for value in evidence.dates
+        ),
+    }
+    labels = {
+        "reading_meter": "contador",
+        "reading_date": "fecha de lectura",
+    }
+    questions: list[OnboardingQuestion] = []
+    for module in modules:
+        for base_key, candidates in candidates_by_field.items():
+            if len(candidates) != 1:
+                questions.append(OnboardingQuestion(
+                    key=f"{base_key}:{module}",
+                    prompt=f"Confirma el {labels[base_key]} de {module}.",
+                    candidates=candidates,
+                    required=True,
+                ))
+    return tuple(questions)
+
+
+def _indexed_question_key(base_key: str, index: int, total: int) -> str:
+    return base_key if total == 1 else f"{base_key}:{index + 1}"
 
 
 def _unique_labels(labels) -> tuple[str, ...]:
