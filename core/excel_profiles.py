@@ -259,6 +259,26 @@ def _onboarding_configuration(
         return MappingProxyType({})
     if not isinstance(value, dict):
         raise ValueError("onboarding_configuration debe ser un objeto")
+    bindings_value = value.get("reading_bindings")
+    has_current_fields = (
+        "schema_version" in value
+        or "invoice_decisions" in value
+        or "not_applicable_modules" in value
+        or isinstance(bindings_value, list)
+        and any(
+            isinstance(binding, dict)
+            and any(field in binding for field in ("meter", "date", "value"))
+            for binding in bindings_value
+        )
+    )
+    if has_current_fields:
+        _require_fields(
+            value,
+            {"schema_version", "invoice_decisions", "not_applicable_modules"},
+            "onboarding_configuration actual",
+        )
+        if value["schema_version"] != 2:
+            raise ValueError("onboarding_configuration.schema_version no es válido")
     _require_fields(
         value,
         {
@@ -306,12 +326,21 @@ def _onboarding_configuration(
             {"module", "column", "source_sha256s"},
             f"onboarding_configuration.reading_bindings[{index}]",
         )
+        if has_current_fields:
+            _require_fields(
+                binding,
+                {"meter", "date", "value"},
+                f"onboarding_configuration.reading_bindings[{index}] actual",
+            )
         if (
             not isinstance(binding["module"], str)
             or not isinstance(binding["column"], str)
             or not binding["column"]
             or not isinstance(binding.get("meter", ""), str)
             or not isinstance(binding.get("date", ""), str)
+            or not isinstance(binding.get("value", ""), str)
+            or has_current_fields
+            and not all(binding[field] for field in ("meter", "date", "value"))
             or not isinstance(binding["source_sha256s"], list)
             or not binding["source_sha256s"]
             or not all(
@@ -359,6 +388,16 @@ def _onboarding_configuration(
             or len(source["sha256"]) != 64
         ):
             raise ValueError(f"Traza de fuente no válida en posición {index}")
+    if has_current_fields:
+        invoice_source_sha256s = sorted(
+            source["sha256"] for source in sources
+            if source["kind"] == "invoice_pdf"
+        )
+        invoice_decision_sha256s = sorted(
+            decision["source_sha256"] for decision in invoice_decisions
+        )
+        if invoice_source_sha256s != invoice_decision_sha256s:
+            raise ValueError("Cada factura debe tener una decisión completa")
     return _freeze_json(value)
 
 

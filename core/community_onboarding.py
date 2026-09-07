@@ -70,6 +70,7 @@ class ReadingBinding:
     source_sha256s: tuple[str, ...]
     meter: str = ""
     date: str = ""
+    value: str = ""
 
 
 @dataclass(frozen=True)
@@ -236,6 +237,7 @@ def resolve_onboarding_configuration(
 
 def _configuration_payload(configuration: OnboardingConfiguration) -> dict[str, object]:
     return {
+        "schema_version": 2,
         "service_decision": configuration.service_decision,
         "active_modules": list(configuration.active_modules),
         "reading_column": configuration.reading_column,
@@ -245,6 +247,7 @@ def _configuration_payload(configuration: OnboardingConfiguration) -> dict[str, 
                 "column": binding.column,
                 "meter": binding.meter,
                 "date": binding.date,
+                "value": binding.value,
                 "source_sha256s": list(binding.source_sha256s),
             }
             for binding in configuration.reading_bindings
@@ -306,15 +309,19 @@ def _binding_for(
         len(active_modules) > 1
         or any(question.key in {key, "reading_column"} for question in questions)
     )
+    module_columns = _reading_candidates_for_module(
+        reading_evidence, module, "columns"
+    )
+    admissible_columns = module_columns or reading_columns
     if isinstance(selected, str) and selected.strip():
         column = selected.strip()
-    elif not requires_explicit and len(reading_columns) == 1:
-        column = reading_columns[0]
+    elif not requires_explicit and len(admissible_columns) == 1:
+        column = admissible_columns[0]
     else:
         raise ValueError(f"Debe responderse la columna de lectura obligatoria de {module}")
     if column == "NO_APLICA":
         raise ValueError(f"NO_APLICA no es válido para el módulo activo {module}")
-    if reading_columns and column not in reading_columns:
+    if admissible_columns and column not in admissible_columns:
         raise ValueError(f"La columna de lectura de {module} no consta en la evidencia")
 
     evidence_sha256s = tuple(
@@ -335,6 +342,9 @@ def _binding_for(
         date=_confirmed_reading_detail(
             "reading_date", module, reading_evidence, questions, answers
         ),
+        value=_confirmed_reading_detail(
+            "reading_value", module, reading_evidence, questions, answers
+        ),
     )
 
 
@@ -345,12 +355,13 @@ def _confirmed_reading_detail(
     questions: tuple[OnboardingQuestion, ...],
     answers: Mapping[str, str | bool],
 ) -> str:
-    attribute = "meters" if base_key == "reading_meter" else "dates"
-    candidates = _unique_labels(
-        value
-        for evidence in evidence_items
-        if not evidence.services or module in evidence.services
-        for value in getattr(evidence, attribute)
+    attribute = {
+        "reading_meter": "meters",
+        "reading_date": "dates",
+        "reading_value": "readings",
+    }[base_key]
+    candidates = _reading_candidates_for_module(
+        evidence_items, module, attribute
     )
     key = f"{base_key}:{module}"
     answer = answers.get(key)
@@ -363,9 +374,7 @@ def _confirmed_reading_detail(
         return value
     if len(candidates) == 1:
         return candidates[0]
-    if any(question.key == key for question in questions):
-        raise ValueError(f"Debe responderse la decisión obligatoria {key}")
-    return ""
+    raise ValueError(f"Debe responderse la decisión obligatoria {key}")
 
 
 def _invoice_decisions(
@@ -895,6 +904,19 @@ def _confirmed_reading_columns(
     ))
 
 
+def _reading_candidates_for_module(
+    evidence_items: tuple[ReadingEvidence, ...],
+    module: str,
+    attribute: str,
+) -> tuple[str, ...]:
+    return _unique_labels(
+        value
+        for evidence in evidence_items
+        if not evidence.services or module in evidence.services
+        for value in getattr(evidence, attribute)
+    )
+
+
 def _invoice_evidence(
     invoices: tuple[SourceCandidate, ...],
 ) -> tuple[InvoiceEvidence, ...]:
@@ -1023,26 +1045,27 @@ def _questions(
                     required=True,
                 ))
     reading_columns = _confirmed_reading_columns(readings, reading_evidence)
-    candidate_modules = detected_modules or _METER_MODULES
+    candidate_modules = _METER_MODULES
     for module in candidate_modules:
-        has_reading_values = any(
-            evidence.readings
-            and (not evidence.services or module in evidence.services)
-            for evidence in reading_evidence
+        module_columns = _reading_candidates_for_module(
+            reading_evidence, module, "columns"
+        )
+        module_values = _reading_candidates_for_module(
+            reading_evidence, module, "readings"
         )
         if (
-            len(reading_columns) != 1
-            or len(candidate_modules) > 1
-            or not has_reading_values
+            len(module_columns) != 1
+            or len(detected_modules) > 1 and module in detected_modules
+            or len(module_values) != 1
         ):
             questions.append(OnboardingQuestion(
                 key=f"reading_column:{module}",
                 prompt=(
                     f"Selecciona la columna de lectura de {module}."
-                    if reading_columns
+                    if module_columns or reading_columns
                     else f"Indica la columna o campo de lectura de {module}."
                 ),
-                candidates=reading_columns,
+                candidates=module_columns or reading_columns,
                 required=True,
             ))
     questions.extend(_reading_detail_questions(reading_evidence, candidate_modules))
@@ -1059,21 +1082,22 @@ def _reading_detail_questions(
     evidence_items: tuple[ReadingEvidence, ...],
     modules: tuple[str, ...],
 ) -> tuple[OnboardingQuestion, ...]:
-    candidates_by_field = {
-        "reading_meter": _unique_labels(
-            value for evidence in evidence_items for value in evidence.meters
-        ),
-        "reading_date": _unique_labels(
-            value for evidence in evidence_items for value in evidence.dates
-        ),
+    attributes_by_field = {
+        "reading_meter": "meters",
+        "reading_date": "dates",
+        "reading_value": "readings",
     }
     labels = {
         "reading_meter": "contador",
         "reading_date": "fecha de lectura",
+        "reading_value": "valor de lectura",
     }
     questions: list[OnboardingQuestion] = []
     for module in modules:
-        for base_key, candidates in candidates_by_field.items():
+        for base_key, attribute in attributes_by_field.items():
+            candidates = _reading_candidates_for_module(
+                evidence_items, module, attribute
+            )
             if len(candidates) != 1:
                 questions.append(OnboardingQuestion(
                     key=f"{base_key}:{module}",

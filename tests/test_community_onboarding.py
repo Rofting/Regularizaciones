@@ -101,6 +101,24 @@ class CommunityOnboardingTest(unittest.TestCase):
                 "LECTURA: 100; SERVICIO: ACS"
             ),
         )
+        self.readings_with_multiple_values_pdf = make_pdf(
+            self.project_root / "readings-with-multiple-values.pdf",
+            (
+                "CONTADOR: C-01; COLUMNA: Lectura ACS; FECHA: 2026-01-01; "
+                "LECTURA: 100; SERVICIO: ACS; LECTURA: 101"
+            ),
+        )
+        self.acs_reading_pdf = make_pdf(
+            self.project_root / "acs-reading.pdf",
+            (
+                "CONTADOR: C-ACS; COLUMNA: Lectura ACS; FECHA: 2026-01-01; "
+                "LECTURA: 100; SERVICIO: ACS"
+            ),
+        )
+        self.heating_reading_without_meter_or_date_pdf = make_pdf(
+            self.project_root / "heating-reading-without-meter-or-date.pdf",
+            "COLUMNA: Lectura Calefaccion; LECTURA: 200; SERVICIO: CALEFACCION",
+        )
         self.invoice_pdf = make_pdf(
             self.project_root / "invoice.pdf", "FACTURA SINTETICA"
         )
@@ -150,6 +168,14 @@ class CommunityOnboardingTest(unittest.TestCase):
                 prompt="Confirma el servicio de las lecturas.",
                 candidates=("ACS", "CALEFACCION", "ACS+CALEFACCION", "NO_APLICA"),
                 required=True,
+            ),),
+            reading_evidence=(community_onboarding.ReadingEvidence(
+                source_sha256=community_onboarding._sha256(self.readings_xlsx),
+                meters=("Contador confirmado",),
+                columns=("Lectura",),
+                dates=("2026-01-01",),
+                readings=("100",),
+                services=("ACS",),
             ),),
         )
         self.acs_heating_draft = community_onboarding.OnboardingDraft(
@@ -206,6 +232,21 @@ class CommunityOnboardingTest(unittest.TestCase):
                 prompt="Confirma el servicio de las lecturas.",
                 candidates=("ACS", "NO_APLICA"),
                 required=True,
+            ),),
+            invoice_evidence=(community_onboarding.InvoiceEvidence(
+                source_sha256=community_onboarding._sha256(self.invoice_pdf),
+                providers=("Proveedor confirmado",),
+                periods=("2026",),
+                amounts=("100,00 EUR",),
+                concepts=("ACS",),
+            ),),
+            reading_evidence=(community_onboarding.ReadingEvidence(
+                source_sha256=community_onboarding._sha256(self.readings_xlsx),
+                meters=("Contador confirmado",),
+                columns=("Lectura",),
+                dates=("2026-01-01",),
+                readings=("100",),
+                services=("ACS",),
             ),),
         )
         self.answers = {"service": "ACS"}
@@ -279,6 +320,106 @@ class CommunityOnboardingTest(unittest.TestCase):
             draft, {"service": "ACS"}
         )
         self.assertEqual("Lectura ACS", configuration.reading_bindings[0].column)
+
+    def test_multiple_reading_values_require_a_per_module_decision_and_persist_it(self):
+        draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv,
+            reading_paths=(self.readings_with_multiple_values_pdf,),
+            invoice_paths=(), project_root=self.project_root,
+        )
+
+        questions = {question.key: question for question in draft.questions}
+        self.assertTrue(questions["reading_value:ACS"].required)
+        with self.assertRaisesRegex(ValueError, "valor de lectura|reading_value:ACS"):
+            community_onboarding.resolve_onboarding_configuration(
+                draft,
+                {
+                    "service": "ACS",
+                    "reading_column:ACS": "Lectura ACS",
+                },
+            )
+        with self.assertRaises(ValueError):
+            community_onboarding.resolve_onboarding_configuration(
+                draft,
+                {
+                    "service": "ACS",
+                    "reading_column:ACS": "Lectura ACS",
+                    "reading_value:ACS": "999",
+                },
+            )
+
+        configuration = community_onboarding.resolve_onboarding_configuration(
+            draft,
+            {
+                "service": "ACS",
+                "reading_column:ACS": "Lectura ACS",
+                "reading_value:ACS": "100",
+            },
+        )
+
+        self.assertEqual("100", configuration.reading_bindings[0].value)
+
+    def test_missing_reading_value_blocks_publication_for_the_active_module(self):
+        draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv,
+            reading_paths=(self.readings_without_value,),
+            invoice_paths=(), project_root=self.project_root,
+        )
+
+        questions = {question.key: question for question in draft.questions}
+        self.assertTrue(questions["reading_value:ACS"].required)
+        with self.assertRaisesRegex(ValueError, "valor de lectura|reading_value:ACS"):
+            community_onboarding.build_profile_payload(
+                draft,
+                answers={
+                    "service": "ACS",
+                    "reading_column:ACS": "Lectura ACS",
+                    "reading_meter:ACS": "Contador ACS",
+                    "reading_date:ACS": "Fecha",
+                },
+            )
+
+    def test_meter_and_date_questions_are_scoped_to_each_module(self):
+        draft = community_onboarding.analyse_sources(
+            community_code="900", community_name="Comunidad prueba",
+            owner_list_path=self.owners_csv,
+            reading_paths=(
+                self.acs_reading_pdf,
+                self.heating_reading_without_meter_or_date_pdf,
+            ),
+            invoice_paths=(), project_root=self.project_root,
+        )
+
+        required_keys = {
+            question.key for question in draft.questions if question.required
+        }
+        self.assertIn("reading_meter:CALEFACCION", required_keys)
+        self.assertIn("reading_date:CALEFACCION", required_keys)
+        with self.assertRaisesRegex(ValueError, "contador.*CALEFACCION"):
+            community_onboarding.resolve_onboarding_configuration(
+                draft,
+                {
+                    "service": "ACS+CALEFACCION",
+                    "reading_column:ACS": "Lectura ACS",
+                    "reading_column:CALEFACCION": "Lectura Calefaccion",
+                },
+            )
+
+        configuration = community_onboarding.resolve_onboarding_configuration(
+            draft,
+            {
+                "service": "ACS+CALEFACCION",
+                "reading_column:ACS": "Lectura ACS",
+                "reading_column:CALEFACCION": "Lectura Calefaccion",
+                "reading_meter:CALEFACCION": "C-CALEFACCION",
+                "reading_date:CALEFACCION": "2026-01-01",
+            },
+        )
+        heating_binding = configuration.reading_bindings[1]
+        self.assertEqual("C-CALEFACCION", heating_binding.meter)
+        self.assertEqual("2026-01-01", heating_binding.date)
 
     def test_analyse_sources_records_sha256_and_requires_confirmation_for_ambiguous_reading_columns(self):
         ambiguous_readings = make_readings_workbook(
@@ -383,6 +524,7 @@ class CommunityOnboardingTest(unittest.TestCase):
                 "reading_column:CALEFACCION": "Consumo",
                 "reading_meter:CALEFACCION": "Contador confirmado",
                 "reading_date:CALEFACCION": "Fecha confirmada",
+                "reading_value:CALEFACCION": "100",
             },
         )
         self.assertEqual(
@@ -410,7 +552,13 @@ class CommunityOnboardingTest(unittest.TestCase):
                 {
                     "service": "ACS+CALEFACCION",
                     "reading_column:ACS": "Lectura ACS",
+                    "reading_meter:ACS": "Contador ACS",
+                    "reading_date:ACS": "2026-01-01",
+                    "reading_value:ACS": "100",
                     "reading_column:CALEFACCION": "Lectura Calefacción",
+                    "reading_meter:CALEFACCION": "Contador Calefacción",
+                    "reading_date:CALEFACCION": "2026-01-01",
+                    "reading_value:CALEFACCION": "200",
                 },
             )
         except ValueError as error:
@@ -436,6 +584,9 @@ class CommunityOnboardingTest(unittest.TestCase):
             {
                 "service": "ACS",
                 "reading_column:ACS": "Lectura ACS",
+                "reading_meter:ACS": "Contador ACS",
+                "reading_date:ACS": "2026-01-01",
+                "reading_value:ACS": "100",
                 "reading_column:CALEFACCION": "NO_APLICA",
             },
         )
@@ -513,6 +664,7 @@ class CommunityOnboardingTest(unittest.TestCase):
                 "reading_column:ACS": "Lectura ACS",
                 "reading_meter:ACS": "Contador confirmado",
                 "reading_date:ACS": "Fecha confirmada",
+                "reading_value:ACS": "100",
             },
         )
         heating = community_onboarding.build_profile_payload(
@@ -522,6 +674,7 @@ class CommunityOnboardingTest(unittest.TestCase):
                 "reading_column:CALEFACCION": "Lectura Calefacción",
                 "reading_meter:CALEFACCION": "Contador confirmado",
                 "reading_date:CALEFACCION": "Fecha confirmada",
+                "reading_value:CALEFACCION": "120",
             },
         )
 
@@ -554,7 +707,14 @@ class CommunityOnboardingTest(unittest.TestCase):
         )
 
         payload = community_onboarding.build_profile_payload(
-            draft, answers={"service": "CALEFACCION"}
+            draft,
+            answers={
+                "service": "CALEFACCION",
+                "reading_column:CALEFACCION": "Lectura ACS",
+                "reading_meter:CALEFACCION": "Contador confirmado",
+                "reading_date:CALEFACCION": "2026-01-01",
+                "reading_value:CALEFACCION": "100",
+            },
         )
 
         self.assertEqual(["CALEFACCION"], payload["active_modules"])
@@ -597,11 +757,13 @@ class CommunityOnboardingTest(unittest.TestCase):
             self.valid_draft, answers={"service": "ACS"}
         )
         configuration = payload["onboarding_configuration"]
+        configuration.pop("schema_version")
         configuration.pop("invoice_decisions")
         configuration.pop("not_applicable_modules")
         for binding in configuration["reading_bindings"]:
             binding.pop("meter")
             binding.pop("date")
+            binding.pop("value")
 
         profile = excel_profiles.validate_profile_payload(payload, self.project_root)
 
@@ -610,6 +772,24 @@ class CommunityOnboardingTest(unittest.TestCase):
             "Lectura",
             profile.onboarding_configuration["reading_bindings"][0]["column"],
         )
+
+    def test_profile_validation_rejects_incomplete_new_invoice_configuration(self):
+        payload = community_onboarding.build_profile_payload(
+            self.valid_draft, answers={"service": "ACS"}
+        )
+        payload["onboarding_configuration"]["invoice_decisions"] = []
+
+        with self.assertRaisesRegex(ValueError, "factura"):
+            excel_profiles.validate_profile_payload(payload, self.project_root)
+
+    def test_profile_validation_rejects_empty_new_reading_decisions(self):
+        payload = community_onboarding.build_profile_payload(
+            self.valid_draft, answers={"service": "ACS"}
+        )
+        payload["onboarding_configuration"]["reading_bindings"][0]["value"] = ""
+
+        with self.assertRaisesRegex(ValueError, "Binding de lectura"):
+            excel_profiles.validate_profile_payload(payload, self.project_root)
 
     def test_profile_payload_accepts_safe_community_codes(self):
         draft = community_onboarding.OnboardingDraft(
@@ -770,6 +950,8 @@ class CommunityOnboardingTest(unittest.TestCase):
             sources=self.valid_draft.sources,
             detected_modules=self.valid_draft.detected_modules,
             questions=self.valid_draft.questions,
+            invoice_evidence=self.valid_draft.invoice_evidence,
+            reading_evidence=self.valid_draft.reading_evidence,
         )
         result = community_onboarding.confirm_onboarding(
             self.connection,

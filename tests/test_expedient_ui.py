@@ -10,7 +10,13 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import expedient_ui
-from community_onboarding import OnboardingDraft, OnboardingQuestion, OnboardingResult, SourceCandidate
+from community_onboarding import (
+    OnboardingDraft,
+    OnboardingQuestion,
+    OnboardingResult,
+    ReadingEvidence,
+    SourceCandidate,
+)
 
 
 class FakeVariable:
@@ -110,6 +116,14 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
                     "reading_column", "Elige columna", ("Lectura A", "Lectura B"), True
                 ),
             ),
+            reading_evidence=(ReadingEvidence(
+                source_sha256="b" * 64,
+                meters=("Contador A",),
+                columns=("Lectura A", "Lectura B"),
+                dates=("2026-01-01",),
+                readings=("100",),
+                services=("ACS",),
+            ),),
         )
         expedient_ui.open_community_onboarding_dialog(self.app)
         entries = self.entries()
@@ -234,6 +248,14 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
             draft.community_code, draft.community_name, (draft.sources[0], readings), ("ACS",),
             (OnboardingQuestion(
                 "service", "Confirma el servicio", ("ACS", "NO_APLICA"), True
+            ),),
+            reading_evidence=(ReadingEvidence(
+                source_sha256="b" * 64,
+                meters=("Contador A",),
+                columns=("Lectura",),
+                dates=("2026-01-01",),
+                readings=("100",),
+                services=("ACS",),
             ),),
         )
         self.select_sources()
