@@ -20,6 +20,7 @@ import expedient_service
 import gestor_bd
 from excel_profiles import (
     MODULE_REQUIRED_SHEETS,
+    canonical_concepts_for_module,
     runtime_profile_path,
     validate_profile_payload,
 )
@@ -755,23 +756,7 @@ def _validate_community_code(community_code: str) -> None:
 
 
 def _concepts_for(module: str) -> tuple[dict[str, object], ...]:
-    prefix = "acs" if module == "ACS" else "heating"
-    return (
-        {
-            "key": f"{prefix}_fixed",
-            "allocation_method": "equal",
-            "actual_source": f"period_parameters.{prefix}_fixed_actual",
-            "billed_source": f"period_parameters.{prefix}_fixed_billed",
-            "required": True,
-        },
-        {
-            "key": f"{prefix}_variable",
-            "allocation_method": "consumption",
-            "actual_source": f"period_parameters.{prefix}_variable_actual",
-            "billed_source": f"period_parameters.{prefix}_variable_billed",
-            "required": True,
-        },
-    )
+    return canonical_concepts_for_module(module)
 
 
 def analyse_sources(

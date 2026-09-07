@@ -32,7 +32,7 @@ lectura.
 Comando ejecutado:
 
 ```powershell
-& 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding.CommunityOnboardingTest.test_profile_validation_accepts_existing_onboarding_configuration -v
+& '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding.CommunityOnboardingTest.test_profile_validation_accepts_existing_onboarding_configuration -v
 ```
 
 Resultado: `FAILED (errors=1)`. La carga de una configuración persistida con el
@@ -47,25 +47,25 @@ el mismo comando terminó con `Ran 1 test ... OK`.
 Comandos ejecutados y resultados:
 
 ```powershell
-& 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding tests.test_excel_profiles -v
+& '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding tests.test_excel_profiles -v
 ```
 
 Resultado: `Ran 39 tests ... OK`.
 
 ```powershell
-& 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_expedient_ui -v
+& '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_expedient_ui -v
 ```
 
 Resultado: `Ran 17 tests ... OK`.
 
 ```powershell
-& 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest discover -s tests -t . -q
+& '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest discover -s tests -t . -q
 ```
 
 Resultado: `Ran 203 tests in 28.321s` y `OK`.
 
 ```powershell
-& 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m compileall -q core/community_onboarding.py core/excel_profiles.py tests/test_community_onboarding.py
+& '<project-root>\.venv-fase1\Scripts\python.exe' -m compileall -q core/community_onboarding.py core/excel_profiles.py tests/test_community_onboarding.py
 git diff --check
 ```
 
@@ -152,7 +152,7 @@ La revisión de `cf36f32` confirmó tres causas:
 Se añadieron primero cinco regresiones focales y se ejecutaron con:
 
 ```powershell
-& 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding.CommunityOnboardingTest.test_multiple_reading_values_require_a_per_module_decision_and_persist_it tests.test_community_onboarding.CommunityOnboardingTest.test_missing_reading_value_blocks_publication_for_the_active_module tests.test_community_onboarding.CommunityOnboardingTest.test_meter_and_date_questions_are_scoped_to_each_module tests.test_community_onboarding.CommunityOnboardingTest.test_profile_validation_rejects_incomplete_new_invoice_configuration tests.test_community_onboarding.CommunityOnboardingTest.test_profile_validation_rejects_empty_new_reading_decisions -v
+& '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding.CommunityOnboardingTest.test_multiple_reading_values_require_a_per_module_decision_and_persist_it tests.test_community_onboarding.CommunityOnboardingTest.test_missing_reading_value_blocks_publication_for_the_active_module tests.test_community_onboarding.CommunityOnboardingTest.test_meter_and_date_questions_are_scoped_to_each_module tests.test_community_onboarding.CommunityOnboardingTest.test_profile_validation_rejects_incomplete_new_invoice_configuration tests.test_community_onboarding.CommunityOnboardingTest.test_profile_validation_rejects_empty_new_reading_decisions -v
 ```
 
 Resultado observado antes de modificar producción: `Ran 5 tests` y
@@ -251,7 +251,7 @@ traza `invoice_pdf` sigue presente y exige un error sobre `schema_version`.
 Comando RED ejecutado:
 
 ```powershell
-& 'C:\Users\Jose\Proyectos\Soporte\Soporte\Flujo calculo regularizaciones\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding.CommunityOnboardingTest.test_profile_validation_rejects_new_configuration_stripped_to_look_historical -v
+& '<project-root>\.venv-fase1\Scripts\python.exe' -m unittest tests.test_community_onboarding.CommunityOnboardingTest.test_profile_validation_rejects_new_configuration_stripped_to_look_historical -v
 ```
 
 Resultado antes del cambio: `Ran 1 test ... FAILED (failures=1)` con

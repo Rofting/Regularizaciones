@@ -32,6 +32,42 @@ _ONBOARDING_SERVICE_MODULES = {
     "ACS+CALEFACCION": ("ACS", "CALEFACCION"),
     "NO_APLICA": (),
 }
+MODULE_CONCEPTS = {
+    "ACS": ("acs_fixed", "acs_variable"),
+    "CALEFACCION": ("heating_fixed", "heating_variable"),
+}
+_ONBOARDING_CONCEPT_RULES = {
+    "acs_fixed": (
+        "equal", "period_parameters.acs_fixed_actual",
+        "period_parameters.acs_fixed_billed",
+    ),
+    "acs_variable": (
+        "consumption", "period_parameters.acs_variable_actual",
+        "period_parameters.acs_variable_billed",
+    ),
+    "heating_fixed": (
+        "equal", "period_parameters.heating_fixed_actual",
+        "period_parameters.heating_fixed_billed",
+    ),
+    "heating_variable": (
+        "consumption", "period_parameters.heating_variable_actual",
+        "period_parameters.heating_variable_billed",
+    ),
+}
+_ONBOARDING_PARAMETER_CELLS = {
+    "ACS": {
+        "acs_variable_actual": ("LECTURAS ACS M3", "H8"),
+        "acs_fixed_actual": ("LECTURAS ACS M3", "I9"),
+        "acs_variable_billed": ("LECTURAS ACS M3", "H4"),
+        "acs_fixed_billed": ("LECTURAS ACS M3", "I4"),
+    },
+    "CALEFACCION": {
+        "heating_variable_actual": ("LECTURAS CALEF KWH", "H8"),
+        "heating_fixed_actual": ("LECTURAS CALEF KWH", "I9"),
+        "heating_variable_billed": ("LECTURAS CALEF KWH", "H4"),
+        "heating_fixed_billed": ("LECTURAS CALEF KWH", "I4"),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -79,6 +115,24 @@ _CONCEPT_FIELDS = {
     "billed_source",
     "required",
 }
+
+
+def canonical_concepts_for_module(module: str) -> tuple[dict[str, object], ...]:
+    """Devuelve las reglas de reparto canónicas de un módulo de onboarding."""
+    try:
+        keys = MODULE_CONCEPTS[module]
+    except KeyError:
+        raise ValueError(f"Módulo de onboarding no soportado: {module}") from None
+    return tuple(
+        {
+            "key": key,
+            "allocation_method": _ONBOARDING_CONCEPT_RULES[key][0],
+            "actual_source": _ONBOARDING_CONCEPT_RULES[key][1],
+            "billed_source": _ONBOARDING_CONCEPT_RULES[key][2],
+            "required": True,
+        }
+        for key in keys
+    )
 
 
 def _require_fields(data: dict[str, Any], required: set[str], context: str) -> None:
@@ -385,6 +439,75 @@ def _onboarding_configuration(
     return _freeze_json(value)
 
 
+def _validate_onboarding_concepts(
+    onboarding_configuration: Mapping[str, Any],
+    active_modules: tuple[str, ...],
+    concepts: tuple[ConceptRule, ...],
+) -> None:
+    if not onboarding_configuration:
+        return
+    expected_keys = tuple(
+        key for module in active_modules for key in MODULE_CONCEPTS[module]
+    )
+    if tuple(concept.key for concept in concepts) != expected_keys:
+        raise ValueError("Los conceptos del onboarding no son los canónicos")
+    for concept in concepts:
+        expected_method, expected_actual, expected_billed = (
+            _ONBOARDING_CONCEPT_RULES[concept.key]
+        )
+        if (
+            concept.allocation_method != expected_method
+            or concept.actual_source != expected_actual
+            or concept.billed_source != expected_billed
+            or not concept.required
+        ):
+            raise ValueError(
+                f"El concepto canónico {concept.key} no tiene sus fuentes y reparto esperados"
+            )
+
+
+def _validate_onboarding_parameter_cells(
+    onboarding_configuration: Mapping[str, Any],
+    active_modules: tuple[str, ...],
+    workbook_layout: Mapping[str, Any],
+) -> None:
+    if not onboarding_configuration or not workbook_layout:
+        return
+    expected = {
+        key: binding
+        for module in active_modules
+        for key, binding in _ONBOARDING_PARAMETER_CELLS[module].items()
+    }
+    actual = workbook_layout["parameter_cells"]
+    if set(actual) != set(expected):
+        raise ValueError(
+            "Las celdas de parámetros del onboarding no son las canónicas"
+        )
+    for key, expected_binding in expected.items():
+        if tuple(actual[key]) != expected_binding:
+            raise ValueError(
+                f"El binding canónico {key} no apunta a su celda esperada"
+            )
+
+
+def _validate_onboarding_bootstrap_marker(
+    onboarding_configuration: Mapping[str, Any],
+    workbook_layout: Mapping[str, Any],
+) -> None:
+    if not onboarding_configuration or not workbook_layout:
+        return
+    marker = workbook_layout.get("bootstrap_template")
+    if (
+        not isinstance(marker, Mapping)
+        or marker.get("state") != "fresh_onboarding"
+        or not isinstance(marker.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", marker["sha256"]) is None
+    ):
+        raise ValueError(
+            "workbook_layout.bootstrap_template no identifica la plantilla inicial"
+        )
+
+
 def validate_profile_payload(payload: Mapping[str, Any], project_root: Path) -> ExcelProfile:
     """Validate an in-memory profile payload without creating any files."""
     if not isinstance(payload, Mapping):
@@ -422,6 +545,20 @@ def validate_profile_payload(payload: Mapping[str, Any], project_root: Path) -> 
         if not isinstance(data[field], str) or not data[field]:
             raise ValueError(f"{field} debe ser un texto no vacío")
 
+    concepts = _concepts(data["concepts"])
+    workbook_layout = _workbook_layout(data.get("workbook_layout"))
+    onboarding_configuration = _onboarding_configuration(
+        data.get("onboarding_configuration"), active_modules
+    )
+    _validate_onboarding_concepts(
+        onboarding_configuration, active_modules, concepts
+    )
+    _validate_onboarding_parameter_cells(
+        onboarding_configuration, active_modules, workbook_layout
+    )
+    _validate_onboarding_bootstrap_marker(
+        onboarding_configuration, workbook_layout
+    )
     return ExcelProfile(
         key=profile_key,
         version=data["version"],
@@ -432,12 +569,10 @@ def validate_profile_payload(payload: Mapping[str, Any], project_root: Path) -> 
         active_modules=active_modules,
         required_sheets=required_sheets,
         required_formula_cells=formula_cells,
-        concepts=_concepts(data["concepts"]),
-        workbook_layout=_workbook_layout(data.get("workbook_layout")),
+        concepts=concepts,
+        workbook_layout=workbook_layout,
         source_sha256="",
-        onboarding_configuration=_onboarding_configuration(
-            data.get("onboarding_configuration"), active_modules
-        ),
+        onboarding_configuration=onboarding_configuration,
     )
 
 

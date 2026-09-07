@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import xlrd
 from openpyxl import load_workbook
@@ -960,6 +960,7 @@ def _parse_profile_parameters(
     id_batch: int,
     community_id: int,
     period_id: int,
+    workbook_path: Path,
 ) -> None:
     """Importa importes económicos desde parameter_cells con trazabilidad doble.
 
@@ -968,7 +969,7 @@ def _parse_profile_parameters(
     registran aunque sean idénticos, pues su procedencia no lo es.
     """
     parameter_cells = profile.workbook_layout.get("parameter_cells", {})
-    if profile.onboarding_configuration and parameter_cells:
+    if _is_fresh_onboarding_template(workbook_path, profile) and parameter_cells:
         cells = []
         for binding in parameter_cells.values():
             if not isinstance(binding, (tuple, list)) or len(binding) != 2:
@@ -1032,6 +1033,18 @@ def _parse_profile_parameters(
                 sheet_name, address, formula_cell.value, formula_cell.value,
             ),
         ))
+
+
+def _is_fresh_onboarding_template(path: Path, profile: ExcelProfile) -> bool:
+    """Reconoce sólo los bytes exactos de la plantilla canónica recién creada."""
+    marker = profile.workbook_layout.get("bootstrap_template")
+    return bool(
+        profile.onboarding_configuration
+        and isinstance(marker, Mapping)
+        and marker.get("state") == "fresh_onboarding"
+        and isinstance(marker.get("sha256"), str)
+        and marker["sha256"] == _sha256(Path(path))
+    )
 
 
 def _validate_reused_master_period(
@@ -1251,6 +1264,7 @@ def import_master_excel(
                 connection, values_workbook=values_book, formula_workbook=formula_book,
                 profile=profile, id_case=id_case, id_document=document.id_document,
                 id_batch=batch_id, community_id=case.community_id, period_id=period_id,
+                workbook_path=archived_path,
             )
         _parse_other_expenses(
             connection, workbook=values_book, id_batch=batch_id,

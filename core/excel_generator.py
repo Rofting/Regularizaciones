@@ -27,6 +27,7 @@ import sys
 import shutil
 import sqlite3
 import argparse
+import hashlib
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,14 @@ BASE_DIR    = Path(__file__).parent.parent
 RUTA_BD     = BASE_DIR / "data" / "gestion.db"
 RUTA_EXCELS = BASE_DIR / "Excels_Maestros"
 MAX_BACKUPS = 5
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while chunk := handle.read(64 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 _CANONICAL_TABLES = {
@@ -226,6 +235,10 @@ def create_canonical_community_template(
         workbook.save(destination)
     finally:
         workbook.close()
+    layout["bootstrap_template"] = {
+        "state": "fresh_onboarding",
+        "sha256": _sha256(destination),
+    }
     return layout
 
 

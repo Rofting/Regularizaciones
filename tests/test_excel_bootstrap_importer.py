@@ -19,6 +19,7 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import expedient_service
+import excel_generator
 import excel_profiles
 import gestor_bd
 import document_review
@@ -276,6 +277,64 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
         self.connection.close()
         self.directory.cleanup()
 
+    def _onboarding_profile_and_template(self) -> tuple[excel_profiles.ExcelProfile, Path]:
+        template = self.root / "plantilla-onboarding.xlsx"
+        layout = excel_generator.create_canonical_community_template(
+            template,
+            community_code="658",
+            community_name="Comunidad sintética 658",
+            active_modules=("ACS",),
+        )
+        reading_sha256 = "a" * 64
+        payload = {
+            "key": "658_onboarding_v1",
+            "version": "1",
+            "community_code": "658",
+            "template_relative_path": "plantillas/comunidades/658/658_onboarding_v1.xlsx",
+            "active_modules": ["ACS"],
+            "required_sheets": ["DATOS", "LECTURAS ACS M3", "ANALISIS"],
+            "required_formula_cells": [],
+            "concepts": [
+                {
+                    "key": "acs_fixed",
+                    "allocation_method": "equal",
+                    "actual_source": "period_parameters.acs_fixed_actual",
+                    "billed_source": "period_parameters.acs_fixed_billed",
+                    "required": True,
+                },
+                {
+                    "key": "acs_variable",
+                    "allocation_method": "consumption",
+                    "actual_source": "period_parameters.acs_variable_actual",
+                    "billed_source": "period_parameters.acs_variable_billed",
+                    "required": True,
+                },
+            ],
+            "onboarding_configuration": {
+                "schema_version": 2,
+                "service_decision": "ACS",
+                "active_modules": ["ACS"],
+                "reading_column": "Lectura ACS",
+                "reading_bindings": [{
+                    "module": "ACS",
+                    "column": "Lectura ACS",
+                    "meter": "Contador ACS",
+                    "date": "2026-08-31",
+                    "value": "150",
+                    "source_sha256s": [reading_sha256],
+                }],
+                "invoice_decisions": [],
+                "not_applicable_modules": [],
+                "sources": [{
+                    "kind": "meter_reading_excel",
+                    "name": "lecturas.xlsx",
+                    "sha256": reading_sha256,
+                }],
+            },
+            "workbook_layout": layout,
+        }
+        return excel_profiles.validate_profile_payload(payload, self.root), template
+
     def test_master_import_is_idempotent_archived_and_traces_cell_values(self):
         workbook = _make_master(self.root / "modelo_sintetico.xlsx")
 
@@ -315,6 +374,41 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
         self.assertTrue(Path(document["archived_path"]).is_file())
         self.assertNotEqual(workbook.resolve(), Path(document["archived_path"]).resolve())
         self.assertEqual(64, len(document["sha256"]))
+
+    def test_later_empty_onboarding_master_reports_missing_required_field(self):
+        profile, template = self._onboarding_profile_and_template()
+        initial = import_master_excel(
+            self.connection,
+            id_case=self.case.id_case,
+            workbook_path=template,
+            profile=profile,
+            actor="Prueba",
+        )
+        later_master = self.root / "maestro-posterior-vacio.xlsx"
+        workbook = load_workbook(template)
+        workbook["DATOS"]["A3"] = (
+            "PERIODO: EJERCICIO 01/09/2025 - 31/08/2026"
+        )
+        workbook.save(later_master)
+        workbook.close()
+
+        later = import_master_excel(
+            self.connection,
+            id_case=self.case.id_case,
+            workbook_path=later_master,
+            profile=profile,
+            actor="Prueba",
+        )
+
+        self.assertEqual(0, initial.open_issue_count)
+        self.assertGreater(later.open_issue_count, 0)
+        self.assertTrue(any(
+            row["code"] == "MISSING_REQUIRED_FIELD"
+            for row in self.connection.execute(
+                "SELECT code FROM review_issues WHERE id_case=? AND status='open'",
+                (self.case.id_case,),
+            )
+        ))
 
     def test_profile_layout_imports_descriptive_headers_endpoints_and_parameters(self):
         workbook = _make_profile_layout_master(self.root / "modelo_por_perfil.xlsx")

@@ -283,9 +283,7 @@ def _validate_normalized_inputs(
         raise ExportBlockedError(
             "Faltan parámetros normalizados: " + ", ".join(missing_parameters)
         )
-    for reading_type in ("ACS", "CALEFACCION"):
-        if reading_type not in profile.active_modules:
-            continue
+    for reading_type in _profile_reading_types(profile):
         owners = connection.execute(
             "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND activo=1",
             (case["id_comunidad"],),
@@ -382,6 +380,11 @@ def _profile_reading_types(profile: ExcelProfile) -> tuple[str, ...]:
     lectura en su huella de entrada. Se reconocen tanto módulos declarados
     como conceptos que usan la convención de nombre de cada servicio.
     """
+    if profile.onboarding_configuration:
+        return tuple(
+            binding["module"]
+            for binding in profile.onboarding_configuration["reading_bindings"]
+        )
     types: set[str] = set()
     concept_keys = {concept.key for concept in profile.concepts}
     if "ACS" in profile.active_modules or any(key.startswith("acs_") for key in concept_keys):

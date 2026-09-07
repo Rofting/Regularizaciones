@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import sqlite3
 import sys
@@ -22,6 +23,7 @@ import community_onboarding
 import case_workflow_actions
 import document_review
 import expedient_service
+import excel_generator
 import excel_profiles
 import gestor_bd
 from case_distribution import calculate_case_distribution
@@ -257,6 +259,39 @@ class CommunityOnboardingTest(unittest.TestCase):
 
     def _row_count(self):
         return self.connection.execute("SELECT COUNT(*) FROM audit").fetchone()[0]
+
+    def _combined_answers(self) -> dict[str, str]:
+        return {
+            "service": "ACS+CALEFACCION",
+            "reading_column:ACS": "Lectura ACS",
+            "reading_meter:ACS": "Contador ACS",
+            "reading_date:ACS": "2026-12-31",
+            "reading_value:ACS": "130",
+            "reading_column:CALEFACCION": "Lectura Calefacción",
+            "reading_meter:CALEFACCION": "Contador Calefacción",
+            "reading_date:CALEFACCION": "2026-12-31",
+            "reading_value:CALEFACCION": "500",
+        }
+
+    def _combined_payload_with_layout(self, code: str = "900") -> dict[str, object]:
+        draft = community_onboarding.OnboardingDraft(
+            community_code=code,
+            community_name="Comunidad combinada",
+            sources=self.acs_heating_draft.sources,
+            detected_modules=self.acs_heating_draft.detected_modules,
+            questions=self.acs_heating_draft.questions,
+        )
+        configuration = community_onboarding.resolve_onboarding_configuration(
+            draft, self._combined_answers()
+        )
+        payload = community_onboarding.build_profile_payload(draft, configuration)
+        payload["workbook_layout"] = excel_generator.create_canonical_community_template(
+            self.project_root / f"{code}-canonical.xlsx",
+            community_code=code,
+            community_name=draft.community_name,
+            active_modules=configuration.active_modules,
+        )
+        return payload
 
     def _community_count(self):
         return self.connection.execute(
@@ -790,6 +825,96 @@ class CommunityOnboardingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Binding de lectura"):
             excel_profiles.validate_profile_payload(payload, self.project_root)
 
+    def test_profile_validation_rejects_cross_module_canonical_concept_source(self):
+        payload = self._combined_payload_with_layout()
+        heating_variable = next(
+            concept for concept in payload["concepts"]
+            if concept["key"] == "heating_variable"
+        )
+        heating_variable["actual_source"] = "period_parameters.acs_variable_actual"
+
+        with self.assertRaisesRegex(ValueError, "heating_variable"):
+            excel_profiles.validate_profile_payload(payload, self.project_root)
+
+    def test_profile_validation_rejects_shared_combined_parameter_binding(self):
+        payload = self._combined_payload_with_layout()
+        parameter_cells = payload["workbook_layout"]["parameter_cells"]
+        parameter_cells["heating_variable_actual"] = parameter_cells[
+            "acs_variable_actual"
+        ]
+
+        with self.assertRaisesRegex(ValueError, "heating_variable_actual"):
+            excel_profiles.validate_profile_payload(payload, self.project_root)
+
+    def test_profile_validation_rejects_final_onboarding_layout_without_bootstrap_marker(self):
+        payload = self._combined_payload_with_layout()
+        del payload["workbook_layout"]["bootstrap_template"]
+
+        with self.assertRaisesRegex(ValueError, "bootstrap"):
+            excel_profiles.validate_profile_payload(payload, self.project_root)
+
+    def test_combined_onboarding_profile_has_canonical_concepts_and_bindings(self):
+        payload = self._combined_payload_with_layout()
+        profile = excel_profiles.validate_profile_payload(payload, self.project_root)
+
+        self.assertEqual(
+            {
+                "acs_fixed": (
+                    "equal", "period_parameters.acs_fixed_actual",
+                    "period_parameters.acs_fixed_billed",
+                ),
+                "acs_variable": (
+                    "consumption", "period_parameters.acs_variable_actual",
+                    "period_parameters.acs_variable_billed",
+                ),
+                "heating_fixed": (
+                    "equal", "period_parameters.heating_fixed_actual",
+                    "period_parameters.heating_fixed_billed",
+                ),
+                "heating_variable": (
+                    "consumption", "period_parameters.heating_variable_actual",
+                    "period_parameters.heating_variable_billed",
+                ),
+            },
+            {
+                concept.key: (
+                    concept.allocation_method,
+                    concept.actual_source,
+                    concept.billed_source,
+                )
+                for concept in profile.concepts
+            },
+        )
+        self.assertEqual(
+            {
+                "acs_variable_actual": ("LECTURAS ACS M3", "H8"),
+                "acs_fixed_actual": ("LECTURAS ACS M3", "I9"),
+                "acs_variable_billed": ("LECTURAS ACS M3", "H4"),
+                "acs_fixed_billed": ("LECTURAS ACS M3", "I4"),
+                "heating_variable_actual": ("LECTURAS CALEF KWH", "H8"),
+                "heating_fixed_actual": ("LECTURAS CALEF KWH", "I9"),
+                "heating_variable_billed": ("LECTURAS CALEF KWH", "H4"),
+                "heating_fixed_billed": ("LECTURAS CALEF KWH", "I4"),
+            },
+            {
+                key: tuple(binding)
+                for key, binding in profile.workbook_layout["parameter_cells"].items()
+            },
+        )
+        self.assertEqual(
+            {"ACS": "Lectura ACS", "CALEFACCION": "Lectura Calefacción"},
+            {
+                binding["module"]: binding["column"]
+                for binding in profile.onboarding_configuration["reading_bindings"]
+            },
+        )
+        marker = profile.workbook_layout["bootstrap_template"]
+        template = self.project_root / "900-canonical.xlsx"
+        self.assertEqual("fresh_onboarding", marker["state"])
+        self.assertEqual(
+            hashlib.sha256(template.read_bytes()).hexdigest(), marker["sha256"]
+        )
+
     def test_profile_payload_accepts_safe_community_codes(self):
         draft = community_onboarding.OnboardingDraft(
             community_code="644", community_name="Comunidad prueba", sources=(),
@@ -904,6 +1029,96 @@ class CommunityOnboardingTest(unittest.TestCase):
         self.assertEqual(
             ("heating_fixed", "heating_variable"),
             self._exercise_meter_service_flow("CALEFACCION", "902"),
+        )
+
+    def test_combined_onboarding_exports_and_distributes_distinct_module_readings(self):
+        code = "903"
+        draft = community_onboarding.OnboardingDraft(
+            community_code=code,
+            community_name="Comunidad combinada",
+            sources=self.acs_heating_draft.sources,
+            detected_modules=self.acs_heating_draft.detected_modules,
+            questions=self.acs_heating_draft.questions,
+        )
+        result = community_onboarding.confirm_onboarding(
+            self.connection,
+            draft=draft,
+            answers=self._combined_answers(),
+            project_root=self.project_root,
+            archive_root=self.archive_root,
+            period_name="2026",
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 12, 31),
+            actor="Prueba",
+        )
+        bootstrap, companions = case_workflow_actions.run_bootstrap_import(
+            self.database,
+            id_case=result.case_id,
+            active_community_id=result.community_id,
+            project_root=self.project_root,
+            master_path=result.template_path,
+            actor="Prueba",
+        )
+        self.assertIsNone(companions)
+        self.assertEqual(0, bootstrap.open_issue_count)
+
+        owner = self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario,coeficiente,activo)
+               VALUES (?,?,?,?,1)""",
+            (result.community_id, "A-01", "VECINO SINTETICO", 100),
+        )
+        self.connection.executemany(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado)
+               VALUES (?,?,?,?,?,'real')""",
+            (
+                (owner.lastrowid, result.period_id, "ACS", "2026-01-01", 100),
+                (owner.lastrowid, result.period_id, "ACS", "2026-12-31", 130),
+                (owner.lastrowid, result.period_id, "CALEFACCION", "2026-01-01", 200),
+                (owner.lastrowid, result.period_id, "CALEFACCION", "2026-12-31", 500),
+            ),
+        )
+        for key, value in (
+            ("acs_fixed_actual", 20), ("acs_fixed_billed", 10),
+            ("acs_variable_actual", 80), ("acs_variable_billed", 40),
+            ("heating_fixed_actual", 50), ("heating_fixed_billed", 25),
+            ("heating_variable_actual", 120), ("heating_variable_billed", 60),
+        ):
+            self.connection.execute(
+                """INSERT INTO period_parameters
+                   (id_comunidad,id_periodo,parameter_key,numeric_value,unit)
+                   VALUES (?,?,?,?, 'EUR')""",
+                (result.community_id, result.period_id, key, value),
+            )
+        self.connection.commit()
+
+        exported = generate_official_excel(
+            self.connection,
+            id_case=result.case_id,
+            project_root=self.project_root,
+            output_root=self.project_root / "salidas",
+            recalculator=DeterministicRecalculator(),
+        )
+        distributed = calculate_case_distribution(
+            self.connection, id_case=result.case_id, project_root=self.project_root
+        )
+
+        self.assertTrue(exported.output_path.is_file())
+        self.assertEqual(
+            {"acs_fixed", "acs_variable", "heating_fixed", "heating_variable"},
+            set(distributed.concept_totals_cents),
+        )
+        self.assertEqual(
+            {"acs_variable": 30, "heating_variable": 300},
+            {
+                row["concept_key"]: row["consumption"]
+                for row in self.connection.execute(
+                    """SELECT concept_key,consumption FROM owner_concept_results
+                       WHERE id_periodo=? AND concept_key IN (?,?)""",
+                    (result.period_id, "acs_variable", "heating_variable"),
+                )
+            },
         )
 
     def test_confirm_onboarding_writes_profile_template_archives_sources_and_creates_case(self):
