@@ -1,4 +1,5 @@
 import os
+import stat
 import sys
 import tkinter as tk
 from datetime import datetime
@@ -20,6 +21,102 @@ from ui_moderna import C
 
 if TYPE_CHECKING:
     from app import AppGestionFincas
+
+
+_SOURCE_SUFFIXES = frozenset({".pdf", ".xlsx", ".xls", ".csv"})
+
+
+def _is_hidden_source_path(path: Path) -> bool:
+    """Identifica ocultos de Windows y temporales de Office sin depender del tema."""
+    if path.name.startswith((".", "~$")):
+        return True
+    try:
+        attributes = getattr(path.stat(), "st_file_attributes", 0)
+    except OSError:
+        return True
+    hidden_flag = getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 0x2)
+    return bool(attributes & hidden_flag)
+
+
+def is_supported_source_file(path: Path) -> bool:
+    """Indica si un documento se puede incorporar de forma segura al expediente."""
+    candidate = Path(path)
+    return (
+        candidate.is_file()
+        and not _is_hidden_source_path(candidate)
+        and candidate.suffix.lower() in _SOURCE_SUFFIXES
+    )
+
+
+def source_files_in_folder(folder: Path) -> list[Path]:
+    """Devuelve las fuentes compatibles, visibles y ordenadas de una carpeta.
+
+    Incluye sus subcarpetas para que un expediente completo se pueda cargar
+    en una sola acción, ignorando los directorios y documentos ocultos.
+    """
+    root = Path(folder)
+    if not root.is_dir():
+        return []
+    return sorted(
+        (
+            path for path in root.rglob("*")
+            if is_supported_source_file(path)
+            and not any(
+                _is_hidden_source_path(root.joinpath(*path.relative_to(root).parts[:index]))
+                for index in range(1, len(path.relative_to(root).parts))
+            )
+        ),
+        key=lambda path: str(path.relative_to(root)).casefold(),
+    )
+
+
+def issue_guidance(field_name: str) -> dict[str, str]:
+    """Traduce campos técnicos a instrucciones accionables de revisión."""
+    guides = {
+        "fecha_inicio": {
+            "label": "Fecha de inicio del período facturado",
+            "what_to_find": "Busca en la factura el inicio del período de suministro o consumo, normalmente junto a «Período facturado», «Desde» o «Fecha inicial».",
+            "format": "Escribe la fecha como dd/mm/aaaa. Ejemplo: 01/08/2025.",
+            "why": "Se necesita para decidir qué parte del consumo corresponde al ejercicio y para comprobar que el cálculo usa el período correcto.",
+        },
+        "fecha_fin": {
+            "label": "Fecha de fin del período facturado",
+            "what_to_find": "Busca el último día de suministro o consumo, junto a «Período facturado», «Hasta» o «Fecha final».",
+            "format": "Escribe la fecha como dd/mm/aaaa. Ejemplo: 31/08/2025.",
+            "why": "Cierra el intervalo de la factura y permite asignar el consumo al período y a su temporada correcta.",
+        },
+        "importe_total": {
+            "label": "Importe total de la factura",
+            "what_to_find": "Busca «Total factura», «Importe total» o el total final con impuestos. No uses una línea parcial ni el importe sin impuestos.",
+            "format": "Escribe solo el número con dos decimales. Ejemplo: 245,70.",
+            "why": "Es el importe que debe conciliar con los conceptos fijo y variable antes de repartir.",
+        },
+        "consumo_total": {
+            "label": "Consumo total facturado",
+            "what_to_find": "Busca el consumo del período y su unidad, por ejemplo kWh para energía o m³ para agua.",
+            "format": "Escribe solo el valor numérico. Ejemplo: 1.245,50.",
+            "why": "Permite comprobar el consumo contra las lecturas y calcular la parte variable.",
+        },
+        "proveedor": {
+            "label": "Proveedor emisor de la factura",
+            "what_to_find": "Busca la razón social que figura como emisor o comercializadora en la cabecera de la factura.",
+            "format": "Escribe el nombre tal como aparece en el documento.",
+            "why": "Identifica la fuente y evita mezclar facturas de suministros distintos.",
+        },
+        "concepto": {
+            "label": "Concepto o suministro de la factura",
+            "what_to_find": "Indica si corresponde a gas, electricidad, agua, lectura de contadores, mantenimiento u otro gasto.",
+            "format": "Elige o escribe el concepto que describe el servicio real.",
+            "why": "Determina la hoja del Excel y la regla de reparto que se aplicará.",
+        },
+    }
+    default = {
+        "label": field_name.replace("_", " ").capitalize(),
+        "what_to_find": "Busca este dato en el documento original antes de confirmarlo.",
+        "format": "Copia el valor con el formato que aparece en la fuente.",
+        "why": "Es necesario para mantener trazabilidad y evitar un cálculo con datos incompletos.",
+    }
+    return guides.get(field_name, default)
 
 
 def onboarding_summary_data(
@@ -1092,20 +1189,35 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
         unselected_hover_color=C["acento_suave_hover"],
     ).pack(fill="x", padx=22)
 
-    def select_files():
-        paths = filedialog.askopenfilenames(
-            parent=dialog,
-            title="Seleccionar fuentes",
-            filetypes=(
-                ("Documentos compatibles", "*.pdf *.xlsx *.xls *.csv"),
-                ("PDF", "*.pdf"),
-                ("Excel", "*.xlsx *.xls"),
-                ("CSV", "*.csv"),
-                ("Todos los archivos", "*.*"),
-            ),
-        )
+    def select_files(paths=None):
+        if paths is None:
+            paths = filedialog.askopenfilenames(
+                parent=dialog,
+                title="Seleccionar fuentes",
+                filetypes=(
+                    ("Documentos compatibles", "*.pdf *.xlsx *.xls *.csv"),
+                    ("PDF", "*.pdf"),
+                    ("Excel", "*.xlsx *.xls"),
+                    ("CSV", "*.csv"),
+                    ("Todos los archivos", "*.*"),
+                ),
+            )
+        selected_paths = tuple(Path(path) for path in paths)
+        paths = tuple(str(path) for path in selected_paths if is_supported_source_file(path))
+        ignored_count = len(selected_paths) - len(paths)
         if not paths:
+            messagebox.showwarning(
+                "Sin fuentes compatibles",
+                "Selecciona PDF, XLSX, XLS o CSV que no sean ocultos ni temporales.",
+                parent=dialog,
+            )
             return
+        if ignored_count:
+            messagebox.showinfo(
+                "Archivos omitidos",
+                f"Se han omitido {ignored_count} archivo(s) no compatible(s), oculto(s) o temporal(es).",
+                parent=dialog,
+            )
         kind_by_label = {
             "Facturas": "invoice",
             "Lecturas": "reading",
@@ -1174,19 +1286,40 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
         app._estado(f"Incorporando 0 de {len(paths)} fuentes", procesando=True)
         app.after(0, lambda: app._en_hilo(add_all))
 
+    def select_folder():
+        folder = filedialog.askdirectory(
+            parent=dialog,
+            title="Selecciona una carpeta de fuentes",
+        )
+        if not folder:
+            return
+        paths = tuple(str(path) for path in source_files_in_folder(Path(folder)))
+        if not paths:
+            messagebox.showwarning(
+                "Sin fuentes compatibles",
+                "La carpeta no contiene PDF, XLSX, XLS o CSV visibles.",
+                parent=dialog,
+            )
+            return
+        select_files(paths)
+
+    source_actions = ctk.CTkFrame(panel, fg_color="transparent")
+    source_actions.pack(anchor="w", padx=22, pady=(22, 8))
     ctk.CTkButton(
-        panel,
-        text="Seleccionar archivos",
-        command=select_files,
-        height=46,
-        corner_radius=11,
-        font=UIM.fuente(13, "bold"),
-        fg_color=C["primario"],
-        hover_color=C["primario_hover"],
-    ).pack(anchor="w", padx=22, pady=(22, 8))
+        source_actions, text="Añadir archivos", command=select_files,
+        height=42, corner_radius=10, font=UIM.fuente(12, "bold"),
+        fg_color=C["primario"], hover_color=C["primario_hover"],
+        border_width=1, border_color=C["primario"],
+    ).pack(side="left", padx=(0, 8))
+    ctk.CTkButton(
+        source_actions, text="Añadir carpeta", command=select_folder,
+        height=42, corner_radius=10, font=UIM.fuente(12, "bold"),
+        fg_color="transparent", hover_color=C["acento_suave"],
+        border_width=1, border_color=C["borde"], text_color=C["primario"],
+    ).pack(side="left")
     ctk.CTkLabel(
         panel,
-        text="PDF · XLSX · XLS · CSV",
+        text="Puedes seleccionar varios archivos o cargar una carpeta completa · PDF · XLSX · XLS · CSV",
         font=UIM.fuente(10),
         text_color=C["texto_sec"],
     ).pack(anchor="w", padx=22)
@@ -1212,7 +1345,7 @@ def resolution_route_for_issue(issue: ReviewIssue) -> str:
 
 def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     route = resolution_route_for_issue(issue)
-    dialog = _dialog(app, "Resolver incidencia", 620, 620)
+    dialog = _dialog(app, "Resolver incidencia", 680, 720)
     panel = ctk.CTkFrame(
         dialog,
         fg_color=C["panel"],
@@ -1232,11 +1365,15 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         text_color=C["texto"],
     ).grid(row=0, column=0, sticky="w", padx=22, pady=(22, 3))
 
+    guidance = issue_guidance(issue.field_name)
     facts = (
         ("ARCHIVO", issue.archived_path.name),
-        ("CAMPO", issue.field_name),
+        ("DATO QUE NECESITAMOS", guidance["label"]),
         ("VALOR DETECTADO", issue.detected_value or "—"),
-        ("EXPLICACIÓN", issue.message),
+        ("QUÉ BUSCAR", guidance["what_to_find"]),
+        ("FORMATO", guidance["format"]),
+        ("POR QUÉ SE PIDE", guidance["why"]),
+        ("RESULTADO DEL ANÁLISIS", issue.message),
     )
     facts_frame = ctk.CTkFrame(panel, fg_color=C["panel_2"], corner_radius=11)
     facts_frame.grid(row=1, column=0, sticky="ew", padx=22, pady=(8, 5))
@@ -1305,8 +1442,8 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         action_row = 6
         action_text = "Cerrar: no corresponde al período"
     else:
-        value = _field(panel, "Valor confirmado", 3)
-        reason = _field(panel, "Motivo de la corrección", 5)
+        value = _field(panel, f"Valor confirmado · {guidance['label']}", 3)
+        reason = _field(panel, "Motivo de la corrección y fuente consultada", 5)
         action_row = 7
         action_text = "Guardar corrección"
 
@@ -1380,7 +1517,9 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         height=38,
         corner_radius=9,
         font=UIM.fuente(12, "bold"),
-        fg_color=C["primario"],
-        hover_color=C["primario_hover"],
+        fg_color=C["exito"],
+        hover_color=C["exito_hover"],
+        border_width=1,
+        border_color=C["exito"],
     ).pack(side="right", padx=(0, 8))
     (value or reason).focus_set()

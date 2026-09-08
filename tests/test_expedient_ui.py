@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -170,6 +171,33 @@ class OnboardingSummaryDataTest(unittest.TestCase):
             with self.subTest(configuration=configuration):
                 summary = expedient_ui.onboarding_summary_data(configuration)
                 self.assertFalse(summary["ready_to_publish"])
+
+
+class SourceFolderAndIssueGuidanceTest(unittest.TestCase):
+    def test_source_folder_ignores_unsupported_and_hidden_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("factura.pdf", "lecturas.XLS", "vecinos.csv", "nota.txt", ".oculto.pdf", "~$lecturas.xlsx"):
+                (root / name).write_text("x", encoding="utf-8")
+            (root / "lecturas").mkdir()
+            (root / "lecturas" / "cierre.xlsx").write_text("x", encoding="utf-8")
+            (root / ".temporal").mkdir()
+            (root / ".temporal" / "ignorar.pdf").write_text("x", encoding="utf-8")
+
+            paths = expedient_ui.source_files_in_folder(root)
+
+        self.assertEqual(
+            ["factura.pdf", "lecturas.XLS", "lecturas/cierre.xlsx", "vecinos.csv"],
+            [str(path.relative_to(root)).replace("\\", "/") for path in paths],
+        )
+
+    def test_issue_guidance_explains_invoice_start_date_for_a_human(self):
+        guidance = expedient_ui.issue_guidance("fecha_inicio")
+
+        self.assertEqual("Fecha de inicio del período facturado", guidance["label"])
+        self.assertIn("Busca", guidance["what_to_find"])
+        self.assertIn("dd/mm/aaaa", guidance["format"])
+        self.assertIn("cálculo", guidance["why"])
 
 
 class CommunityOnboardingDialogTest(unittest.TestCase):
