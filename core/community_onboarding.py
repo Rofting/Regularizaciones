@@ -25,6 +25,7 @@ from excel_profiles import (
     validate_profile_payload,
 )
 from lector_pdf import extraer_texto
+from meter_reading_sources import ReadingObservation, excel_observations
 
 
 _EXCEL_SUFFIXES = frozenset({".xls", ".xlsx"})
@@ -91,6 +92,7 @@ class ReadingEvidence:
     dates: tuple[str, ...]
     readings: tuple[str, ...]
     services: tuple[str, ...]
+    observations: tuple[ReadingObservation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -325,28 +327,42 @@ def _binding_for(
     if admissible_columns and column not in admissible_columns:
         raise ValueError(f"La columna de lectura de {module} no consta en la evidencia")
 
+    scoped_evidence = tuple(
+        evidence for evidence in reading_evidence
+        if (not evidence.services or module in evidence.services)
+        and column in evidence.columns
+    )
     evidence_sha256s = tuple(
         evidence.source_sha256
-        for evidence in reading_evidence
-        if module in evidence.services
+        for evidence in scoped_evidence
     )
     source_sha256s = evidence_sha256s or tuple(
         source.sha256 for source in reading_sources
     )
-    return ReadingBinding(
+    binding = ReadingBinding(
         module,
         column,
         _unique_labels(source_sha256s),
         meter=_confirmed_reading_detail(
-            "reading_meter", module, reading_evidence, questions, answers
+            "reading_meter", module, scoped_evidence, questions, answers
         ),
         date=_confirmed_reading_detail(
-            "reading_date", module, reading_evidence, questions, answers
+            "reading_date", module, scoped_evidence, questions, answers
         ),
         value=_confirmed_reading_detail(
-            "reading_value", module, reading_evidence, questions, answers
+            "reading_value", module, scoped_evidence, questions, answers
         ),
     )
+    observations = tuple(item for evidence in scoped_evidence
+                         for item in evidence.observations if item.column == column)
+    if observations and not any(
+        all(not actual or actual == confirmed for actual, confirmed in (
+            (item.meter, binding.meter), (item.date, binding.date),
+            (item.value, binding.value),
+        )) for item in observations
+    ):
+        raise ValueError(f"La combinación contador, fecha y lectura de {module} no consta en la evidencia")
+    return binding
 
 
 def _confirmed_reading_detail(
@@ -933,14 +949,19 @@ def _reading_evidence(
     for source in readings:
         if source.kind == "meter_reading_excel":
             columns = _reading_columns((source,))
-            meters = _unique_labels(
-                header for header in source.headers if "contador" in header.lower()
-            )
-            dates = _unique_labels(
-                header for header in source.headers if "fecha" in header.lower()
-            )
-            values = _excel_column_values(source.path, columns)
-            material = " ".join(source.headers)
+            observations = excel_observations(source.path)
+            for column in columns:
+                selected = tuple(item for item in observations if item.column == column)
+                evidence.append(ReadingEvidence(
+                    source_sha256=source.sha256,
+                    meters=_unique_labels(item.meter for item in selected if item.meter),
+                    columns=(column,),
+                    dates=_unique_labels(item.date for item in selected if item.date),
+                    readings=_unique_labels(item.value for item in selected if item.value),
+                    services=_module_candidates(column),
+                    observations=selected,
+                ))
+            continue
         else:
             columns = _keyed_values(source.text, ("COLUMNA",))
             meters = _keyed_values(source.text, ("CONTADOR",))
@@ -956,29 +977,6 @@ def _reading_evidence(
             services=_module_candidates(material),
         ))
     return tuple(evidence)
-
-
-def _excel_column_values(path: Path, columns: tuple[str, ...]) -> tuple[str, ...]:
-    if not columns or path.suffix.lower() == ".xls":
-        return ()
-    workbook = load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet = workbook.active
-        header_indexes = {
-            str(cell.value or "").strip(): index
-            for index, cell in enumerate(
-                next(sheet.iter_rows(min_row=1, max_row=1), ()), start=1
-            )
-        }
-        return _unique_labels(
-            str(sheet.cell(row=row, column=header_indexes[column]).value).strip()
-            for column in columns
-            if column in header_indexes
-            for row in range(2, sheet.max_row + 1)
-            if sheet.cell(row=row, column=header_indexes[column]).value is not None
-        )
-    finally:
-        workbook.close()
 
 
 def _keyed_values(text: str, labels: tuple[str, ...]) -> tuple[str, ...]:

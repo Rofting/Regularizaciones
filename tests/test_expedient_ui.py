@@ -319,6 +319,19 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
             ["ACS", "CALEFACCION", "ACS+CALEFACCION", "NO_APLICA"], choices
         )
 
+    def test_simple_service_reaches_summary_with_inactive_questions_unanswered(self):
+        draft = self.analysis.return_value
+        self.analysis.return_value = replace(
+            draft,
+            questions=(*draft.questions, OnboardingQuestion(
+                "reading_meter:CALEFACCION", "Contador de calefacción", (), True,
+            )),
+        )
+        self.select_sources()
+        self.analyse()
+        self.summary()
+        self.assertIn("Crear comunidad", self.texts())
+
     def test_analysis_error_back_and_continue_returns_to_sources_then_retries(self):
         self.select_sources()
         self.analysis.side_effect = ValueError("bad source")

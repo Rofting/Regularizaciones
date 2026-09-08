@@ -581,7 +581,15 @@ def _write_other_expenses(connection, workbook, case, table) -> None:
         _set_cell_value(sheet[f"{columns['amount']}{row_number}"], float(expense[2]))
 
 
-def _write_meter_readings(connection, workbook, case, module, table) -> None:
+def _write_meter_readings(
+    connection,
+    workbook,
+    case,
+    module,
+    table,
+    *,
+    materialize_consumption: bool = False,
+) -> None:
     sheet = workbook[table["sheet"]]
     available_rows = _available_table_rows(sheet, table)
     _clear_table(sheet, table)
@@ -647,7 +655,9 @@ def _write_meter_readings(connection, workbook, case, module, table) -> None:
     if consumption and columns.get("final") and columns.get("initial"):
         _set_cell_value(
             sheet[f"{consumption}{variable_row}"],
-            f"={columns['final']}{variable_row}-{columns['initial']}{variable_row}",
+            final - initial
+            if materialize_consumption
+            else f"={columns['final']}{variable_row}-{columns['initial']}{variable_row}",
         )
     if total and columns.get("variable_fee") and columns.get("fixed_fee"):
         for row in (variable_row, fixed_row):
@@ -705,7 +715,14 @@ def _write_workbook(
             elif module == "OTROS_GASTOS":
                 _write_other_expenses(connection, workbook, case, table)
             elif module in ("ACS", "CALEFACCION"):
-                _write_meter_readings(connection, workbook, case, module, table)
+                _write_meter_readings(
+                    connection,
+                    workbook,
+                    case,
+                    module,
+                    table,
+                    materialize_consumption=bool(profile.onboarding_configuration),
+                )
 
         parameters = {
             row["parameter_key"]: row["numeric_value"]

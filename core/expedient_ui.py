@@ -519,8 +519,14 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             render(onboarding_step_route(state))
             return
         draft = state["draft"]
+        service_variable = answer_variables.get("service")
+        active_modules = service_variable.get().split("+") if service_variable else draft.detected_modules
         answers = {
             key: variable.get() for key, variable in answer_variables.items()
+            if not (
+                key.startswith("reading_") and ":" in key
+                and key.rsplit(":", 1)[1] not in active_modules
+            )
         }
         state["step"] = "confirmations"
         try:
@@ -762,7 +768,13 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                 "Confirma lo detectado",
                 "Confirma el servicio y cada dato incierto. No se inventa ningún valor.",
             )
-            for question in draft.questions:
+            service = answer_variables.get("service")
+            active = service.get().split("+") if service and service.get() else None
+            for question in sorted(draft.questions, key=lambda item: item.key != "service"):
+                if (active is not None and question.key.startswith("reading_")
+                        and ":" in question.key
+                        and question.key.rsplit(":", 1)[1] not in active):
+                    continue
                 ctk.CTkLabel(
                     content,
                     text=question.prompt,
@@ -779,6 +791,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                         border_color=C["borde"],
                         fg_color=C["panel_2"],
                         button_color=C["primario"],
+                        command=(lambda _value: render("confirmations"))
+                        if question.key == "service" else None,
                     ).pack(fill="x")
                 else:
                     ctk.CTkEntry(

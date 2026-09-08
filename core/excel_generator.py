@@ -204,12 +204,14 @@ def create_canonical_community_template(
         sheet["A1"].font = Font(bold=True, color="1A3A5C")
 
     headers = {
-        "GAS": ("Fecha factura", "Días", "Inicio", "Fin", "Consumo", "Fijo", "Variable", "Total", "Proveedor"),
-        "ELECTRICIDAD": ("Fecha factura", "Días", "Inicio", "Fin", "Consumo", "Fijo", "Variable", "Total", "Proveedor"),
-        "AGUA": ("Fecha factura", "Días", "Inicio", "Fin", "Consumo", "Fijo", "Variable", "Total", "Proveedor"),
-        "OTROS_GASTOS": ("Fecha", "Descripción", "Importe"),
-        "ACS": ("Fecha cargo", "Fecha final", "Lectura final", "Fecha inicial", "Lectura inicial", "Consumo", "Variable", "Fijo", "Total"),
-        "CALEFACCION": ("Fecha cargo", "Fecha final", "Lectura final", "Fecha inicial", "Lectura inicial", "Consumo", "Variable", "Fijo", "Total"),
+        "invoice_date": "Fecha factura", "days": "Días", "start_date": "Inicio",
+        "end_date": "Fin", "consumption": "Consumo", "fixed": "Fijo",
+        "variable": "Variable", "total": "Total", "provider": "Proveedor",
+        "date": "Fecha", "description": "Descripción", "amount": "Importe",
+        "charge_date": "Fecha cargo", "final_date": "Fecha final",
+        "final": "Lectura final", "initial_date": "Fecha inicial",
+        "initial": "Lectura inicial", "variable_fee": "Variable", "fixed_fee": "Fijo",
+        "variable_unit": "Precio variable", "fixed_unit": "Precio fijo",
     }
     for module, table in layout["tables"].items():
         sheet = workbook[table["sheet"]]
@@ -221,11 +223,11 @@ def create_canonical_community_template(
             sheet["H3"] = "Variable"
             sheet["I3"] = "Fijo"
         header_row = table["start_row"] - 1
-        columns = list(table.get("input_columns", table.get("columns", {})).values())
-        columns += list(table.get("derived_columns", {}).values())
-        for column, label in zip(columns, headers[module]):
+        columns = {**table.get("input_columns", table.get("columns", {})),
+                   **table.get("derived_columns", {})}
+        for field, column in columns.items():
             cell = sheet[f"{column}{header_row}"]
-            cell.value = label
+            cell.value = headers[field]
             cell.font = Font(bold=True, color="1A3A5C")
             cell.fill = header_fill
 

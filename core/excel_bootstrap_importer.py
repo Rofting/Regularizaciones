@@ -34,6 +34,7 @@ from expedient_service import (
     register_source_document,
 )
 from importar_excel_referencia import ReferenceValidationError, parse_reference_workbook
+from meter_reading_sources import excel_observations
 
 
 @dataclass(frozen=True)
@@ -1687,12 +1688,180 @@ def _import_reading_source(
     return batch_id, inserted
 
 
+def _configured_reading_paths(connection, id_case, readings_path, profile):
+    """Resolve only confirmed sources, including archived companion files."""
+    paths = (readings_path,) if isinstance(readings_path, (str, Path)) else readings_path
+    expected = {sha for binding in profile.onboarding_configuration["reading_bindings"]
+                for sha in binding["source_sha256s"]}
+    selected = {}
+    for path in paths:
+        path = Path(path).resolve()
+        fingerprint = _sha256(path)
+        if fingerprint not in expected:
+            raise ValueError("La huella de la fuente de lecturas no está confirmada en el perfil")
+        selected[fingerprint] = path
+    for row in connection.execute(
+        "SELECT sha256,archived_path FROM source_documents WHERE id_case=?", (id_case,)
+    ):
+        if row["sha256"] in expected and row["sha256"] not in selected:
+            path = Path(row["archived_path"])
+            if path.is_file() and _sha256(path) == row["sha256"]:
+                selected[row["sha256"]] = path
+    if set(selected) != expected:
+        raise ValueError("Faltan fuentes de lecturas confirmadas para los módulos activos")
+    observations = {sha: excel_observations(path) for sha, path in selected.items()}
+    for binding in profile.onboarding_configuration["reading_bindings"]:
+        if not any(
+            item.column == binding["column"]
+            and (item.meter, item.date, item.value) ==
+            (binding["meter"], binding["date"], binding["value"])
+            for sha in binding["source_sha256s"] for item in observations[sha]
+        ):
+            raise ValueError(f"El binding de {binding['module']} no corresponde a las lecturas de la fuente")
+    return tuple(selected.values())
+
+
+def _import_configured_reading_source(
+    connection, *, id_case, case, period_id, path, bindings,
+):
+    document = _register_source(
+        connection, id_case=id_case, source_path=path, document_kind="meter_readings",
+    )
+    archived_path = _verified_archived_path(document)
+    source_kind = "meter_readings"
+    existing = _existing_batch(connection, case.community_id, document.sha256, source_kind)
+    batch_id = int(existing["id_batch"]) if existing is not None else None
+    if batch_id is not None and _batch_is_linked_to_case(
+        connection, id_case=id_case, id_batch=batch_id,
+        id_periodo=period_id, source_kind=source_kind,
+    ):
+        return batch_id, 0
+    observations = excel_observations(archived_path)
+    owners = {
+        _owner_key(row["codigo_vivienda"]): row for row in connection.execute(
+            "SELECT id_propietario,codigo_vivienda FROM propietarios WHERE id_comunidad=? AND activo=1",
+            (case.community_id,),
+        )
+    }
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        batch_id = batch_id or _start_batch(
+            connection, community_id=case.community_id, period_id=period_id,
+            source_kind=source_kind, archived_path=archived_path, source_hash=document.sha256,
+        )
+        _link_batch_to_case(
+            connection, id_case=id_case, id_batch=batch_id, id_periodo=period_id,
+            source_kind=source_kind, source_hash=document.sha256,
+        )
+        inserted = 0
+        for binding in bindings:
+            service = binding["module"]
+            for item in observations:
+                if item.column != binding["column"]:
+                    continue
+                owner = owners.get(_owner_key(item.property_code))
+                reading_date, value = _date(item.date), _number(item.value)
+                field = f"reading.{item.property_code}.{service}"
+                if owner is None:
+                    _issue(connection, id_case=id_case, id_document=document.id_document,
+                           code="UNMATCHED_OWNER", field_name=field,
+                           message="La vivienda de la lectura no existe en propietarios",
+                           detected_value=item.property_code)
+                    continue
+                if reading_date is None or value is None or not item.meter:
+                    _issue(connection, id_case=id_case, id_document=document.id_document,
+                           code="MISSING_REQUIRED_FIELD", field_name=field,
+                           message="Falta contador, fecha o valor en la fila de lectura")
+                    continue
+                if reading_date not in (case.start_date, case.end_date):
+                    continue
+                _store_sources(connection, batch_id, (
+                    _Source("reading", f"{item.property_code}:{service}", key,
+                            item.sheet, address, raw, value if key in {"initial", "final"} else raw)
+                    for key, address, raw in (
+                        ("initial" if reading_date == case.start_date else "final", item.value_cell, item.value),
+                        ("meter", item.meter_cell, item.meter), ("date", item.date_cell, item.date),
+                        ("column", item.value_cell, item.column),
+                    )
+                ))
+                previous = connection.execute(
+                    "SELECT valor_acumulado FROM lecturas_vecino WHERE id_propietario=? "
+                    "AND id_periodo=? AND tipo=? AND fecha_lectura=?",
+                    (owner["id_propietario"], period_id, service, reading_date.isoformat()),
+                ).fetchone()
+                if previous is not None and previous[0] != value:
+                    _issue(connection, id_case=id_case, id_document=document.id_document,
+                           code="UNRECOGNIZED_VALUE", field_name=field,
+                           message="Hay lecturas contradictorias para la misma vivienda y fecha")
+                    continue
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO lecturas_vecino "
+                    "(id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente) "
+                    "VALUES (?,?,?,?,?,'real',?)",
+                    (owner["id_propietario"], period_id, service, reading_date.isoformat(),
+                     value, str(archived_path)),
+                )
+                inserted += int(bool(cursor.rowcount))
+        if existing is None:
+            connection.execute(
+                "UPDATE import_batches SET status='validated',validated_at=datetime('now') WHERE id_batch=?",
+                (batch_id,),
+            )
+        _validate_document_if_clean(connection, document.id_document)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return batch_id, inserted
+
+
+def _validate_configured_reading_ranges(connection, *, id_case, case, period_id, bindings):
+    """Validate ranges after all source files have contributed their readings."""
+    for binding in bindings:
+        service = binding["module"]
+        document = connection.execute(
+            "SELECT id_document FROM source_documents WHERE id_case=? AND sha256=?",
+            (id_case, binding["source_sha256s"][0]),
+        ).fetchone()
+        for owner in connection.execute(
+            "SELECT id_propietario,codigo_vivienda FROM propietarios WHERE id_comunidad=? AND activo=1",
+            (case.community_id,),
+        ).fetchall():
+            readings = connection.execute(
+                "SELECT fecha_lectura,valor_acumulado FROM lecturas_vecino "
+                "WHERE id_propietario=? AND id_periodo=? AND tipo=? AND fecha_lectura IN (?,?) "
+                "ORDER BY fecha_lectura",
+                (owner["id_propietario"], period_id, service,
+                 case.start_date.isoformat(), case.end_date.isoformat()),
+            ).fetchall()
+            field = f"reading.{owner['codigo_vivienda']}.{service}"
+            if len(readings) < 2:
+                _issue(connection, id_case=id_case, id_document=document[0],
+                       code="MISSING_READING_RANGE", field_name=field,
+                       message="Faltan las lecturas inicial y final del propietario activo")
+            elif readings[1][1] < readings[0][1]:
+                connection.execute(
+                    "UPDATE lecturas_vecino SET estado='contador_averiado' WHERE id_propietario=? "
+                    "AND id_periodo=? AND tipo=? AND fecha_lectura=? AND estado='real'",
+                    (owner["id_propietario"], period_id, service, case.end_date.isoformat()),
+                )
+                counter_field = "estado_contador_acs" if service == "ACS" else "estado_contador_cal"
+                connection.execute(f"UPDATE propietarios SET {counter_field}='averiado' WHERE id_propietario=?",
+                                   (owner["id_propietario"],))
+                _issue(connection, id_case=id_case, id_document=document[0],
+                       code="COUNTER_RESET", field_name=field,
+                       message="El contador disminuye y requiere una estimación aprobada",
+                       detected_value=f"{readings[0][1]} -> {readings[1][1]}")
+        _validate_document_if_clean(connection, document[0])
+    connection.commit()
+
+
 def import_companion_sources(
     connection: sqlite3.Connection,
     *,
     id_case: int,
     owner_list_path: str | Path,
-    readings_path: str | Path,
+    readings_path: str | Path | tuple[Path, ...],
     profile: ExcelProfile,
     actor: str,
     service: str = "ACS",
@@ -1701,6 +1870,32 @@ def import_companion_sources(
     if not actor.strip():
         raise ValueError("El responsable de la importación es obligatorio")
     owner_path = Path(owner_list_path).resolve()
+    if profile.onboarding_configuration:
+        reading_paths = _configured_reading_paths(connection, id_case, readings_path, profile)
+        owner_hashes = {source["sha256"] for source in profile.onboarding_configuration["sources"]
+                        if source["kind"] == "owner_list"}
+        if _sha256(owner_path) not in owner_hashes:
+            raise ValueError("La huella del listado de propietarios no está confirmada")
+        case, period_id = _case_context(connection, id_case, profile)
+        owner_batch, owner_count = _import_owner_source(
+            connection, id_case=id_case, case=case, period_id=period_id, path=owner_path,
+        )
+        batches, reading_count = [owner_batch], 0
+        bindings = profile.onboarding_configuration["reading_bindings"]
+        for path in reading_paths:
+            fingerprint = _sha256(path)
+            batch, count = _import_configured_reading_source(
+                connection, id_case=id_case, case=case, period_id=period_id, path=path,
+                bindings=tuple(binding for binding in bindings
+                               if fingerprint in binding["source_sha256s"]),
+            )
+            batches.append(batch)
+            reading_count += count
+        _validate_configured_reading_ranges(
+            connection, id_case=id_case, case=case, period_id=period_id, bindings=bindings,
+        )
+        return CompanionImportResult(tuple(batches), period_id, owner_count, reading_count,
+                                     _open_issue_count(connection, id_case))
     reading_path = Path(readings_path).resolve()
     for path in (owner_path, reading_path):
         if not path.is_file():
