@@ -38,6 +38,7 @@ C = {
     "texto":              ("#0F172A", "#E7EAF3"),
     "texto_sec":          ("#64748B", "#8B93A7"),
     "exito":              ("#059669", "#34D399"),
+    "exito_hover":        ("#047857", "#5EEAD4"),
     "alerta":             ("#DC2626", "#F87171"),
     "aviso":              ("#D97706", "#FBBF24"),
     "banner_abierto":     ("#E5F4F1", "#173B39"),

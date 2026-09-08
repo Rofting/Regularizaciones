@@ -2848,15 +2848,24 @@ class AppGestionFincas(ctk.CTk):
                 self._crear_excel_si_no_existe(cod, nom)
                 self._cargar_comunidades()
                 dialogo.destroy()
+                messagebox.showinfo(
+                    "Comunidad guardada en la base de datos",
+                    f"Se ha creado el registro directo:\n\n"
+                    f"ID: {id_com}\nCódigo: {cod}\nNombre: {nom}\n"
+                    f"CIF: {entradas['cif'].get().strip() or '—'}\n"
+                    f"Viviendas: {nviv or '—'}\n\n"
+                    "Ya aparece en el selector de comunidades.",
+                )
             except Exception as e:
                 messagebox.showerror("Error", str(e))
 
-        ctk.CTkButton(dialogo, text="Registrar Comunidad",
+        ctk.CTkButton(dialogo, text="Guardar comunidad",
                       command=_crear,
                       height=38, corner_radius=10,
                       font=UIM.fuente(13, "bold"),
-                      fg_color=C["primario"],
-                      hover_color=C["primario_hover"]).grid(
+                      fg_color=C["exito"],
+                      hover_color=C["exito_hover"],
+                      border_width=1, border_color=C["exito"]).grid(
                           row=len(campos), column=0, columnspan=2, pady=18)
 
     def _configurar_rutas(self):
