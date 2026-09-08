@@ -2,6 +2,7 @@ import os
 import stat
 import sys
 import tkinter as tk
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -24,6 +25,101 @@ if TYPE_CHECKING:
 
 
 _SOURCE_SUFFIXES = frozenset({".pdf", ".xlsx", ".xls", ".csv"})
+
+
+@dataclass(frozen=True)
+class GuidedStep:
+    """One visible step in the guided regularization workspace."""
+
+    key: str
+    label: str
+    status: str
+
+
+@dataclass(frozen=True)
+class GuidedWorkspaceState:
+    """UI-only projection of a regularization case and its allowed next action."""
+
+    active_step: str
+    next_action: str
+    headline: str
+    detail: str
+    steps: tuple[GuidedStep, ...]
+
+
+_GUIDED_STEP_LABELS = (
+    ("fuentes", "Fuentes"),
+    ("validar", "Validar"),
+    ("reparto", "Reparto"),
+    ("cartas", "Cartas"),
+)
+
+
+def guided_workspace_state(
+    *, has_case: bool, document_count: int, open_issue_count: int, case_status: str,
+) -> GuidedWorkspaceState:
+    """Returns the next safe user action without replacing workflow service gates."""
+    if not has_case:
+        active_step, next_action = "fuentes", "crear_expediente"
+        headline = "Crear expediente"
+        detail = "Elige el intervalo que vas a regularizar antes de incorporar fuentes."
+    elif open_issue_count:
+        active_step, next_action = "validar", "resolver_incidencias"
+        headline = "Resuelve las incidencias"
+        detail = f"Hay {open_issue_count} dato(s) pendiente(s) antes de continuar."
+    elif case_status in {"ready_for_calculation"}:
+        active_step, next_action = "reparto", "generar_excel"
+        headline = "Genera el Excel oficial"
+        detail = "Las fuentes están validadas; prepara el modelo antes del reparto final."
+    elif case_status in {"calculated"}:
+        active_step, next_action = "reparto", "calcular_reparto"
+        headline = "Calcula el reparto final"
+        detail = "El Excel está preparado; calcula y concilia el reparto por propietario."
+    elif case_status == "reconciled":
+        active_step, next_action = "cartas", "generar_cartas"
+        headline = "Genera las cartas"
+        detail = "El reparto está conciliado y listo para comunicar a cada propietario."
+    elif case_status in {"deliveries_generated", "closed"}:
+        active_step, next_action = "cartas", "abrir_salidas"
+        headline = "Cartas generadas"
+        detail = "Puedes abrir las salidas o revisar los documentos generados."
+    elif document_count <= 0 or case_status in {"draft", "gathering_sources", ""}:
+        active_step, next_action = "fuentes", "anadir_fuentes"
+        headline = "Incorpora las fuentes"
+        detail = "Añade facturas, lecturas y Excel del período para iniciar la revisión."
+    elif case_status == "under_review":
+        active_step, next_action = "validar", "resolver_incidencias"
+        headline = "Comprueba la validación"
+        detail = "Revisa las fuentes incorporadas y confirma los datos que el sistema solicite."
+    else:
+        active_step, next_action = "fuentes", "anadir_fuentes"
+        headline = "Completa las fuentes"
+        detail = "El estado del expediente requiere revisar sus fuentes antes de avanzar."
+
+    active_index = next(
+        index for index, (key, _label) in enumerate(_GUIDED_STEP_LABELS)
+        if key == active_step
+    )
+    complete = case_status in {"deliveries_generated", "closed"}
+    steps = tuple(
+        GuidedStep(
+            key=key,
+            label=label,
+            status=(
+                "done" if complete or index < active_index else
+                "active" if index == active_index else
+                "blocked"
+            ),
+        )
+        for index, (key, label) in enumerate(_GUIDED_STEP_LABELS)
+    )
+    return GuidedWorkspaceState(
+        active_step=active_step,
+        next_action=next_action,
+        headline=headline,
+        detail=detail,
+        steps=steps,
+    )
 
 
 def _is_hidden_source_path(path: Path) -> bool:

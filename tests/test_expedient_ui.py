@@ -200,6 +200,52 @@ class SourceFolderAndIssueGuidanceTest(unittest.TestCase):
         self.assertIn("cálculo", guidance["why"])
 
 
+class GuidedWorkspaceStateTest(unittest.TestCase):
+    def test_no_case_prompts_case_creation(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=False, document_count=0, open_issue_count=0, case_status=""
+        )
+
+        self.assertEqual(
+            ("fuentes", "crear_expediente"),
+            (state.active_step, state.next_action),
+        )
+        self.assertEqual("Crear expediente", state.headline)
+
+    def test_open_issue_routes_to_validation(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True, document_count=4, open_issue_count=2,
+            case_status="under_review",
+        )
+
+        self.assertEqual(
+            ("validar", "resolver_incidencias"),
+            (state.active_step, state.next_action),
+        )
+
+    def test_ready_case_routes_to_excel_generation(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True, document_count=4, open_issue_count=0,
+            case_status="ready_for_calculation",
+        )
+
+        self.assertEqual(
+            ("reparto", "generar_excel"),
+            (state.active_step, state.next_action),
+        )
+
+    def test_reconciled_case_routes_to_letters(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True, document_count=4, open_issue_count=0,
+            case_status="reconciled",
+        )
+
+        self.assertEqual(
+            ("cartas", "generar_cartas"),
+            (state.active_step, state.next_action),
+        )
+
+
 class CommunityOnboardingDialogTest(unittest.TestCase):
     def setUp(self):
         self.dialog = FakeWidget()
