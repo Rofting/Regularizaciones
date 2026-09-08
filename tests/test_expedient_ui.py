@@ -12,6 +12,7 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import expedient_ui
+import ui_moderna
 from community_onboarding import (
     InvoiceDecision,
     OnboardingConfiguration,
@@ -244,6 +245,20 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
             ("cartas", "generar_cartas"),
             (state.active_step, state.next_action),
         )
+
+
+class WorkflowVisualStyleTest(unittest.TestCase):
+    def test_secondary_button_style_is_neutral_and_bordered(self):
+        style = ui_moderna.secondary_button_kwargs()
+
+        self.assertEqual("transparent", style["fg_color"])
+        self.assertEqual(1, style["border_width"])
+        self.assertEqual(ui_moderna.C["borde"], style["border_color"])
+
+    def test_every_workflow_state_has_a_style(self):
+        for status in ("pending", "active", "blocked", "ready", "done"):
+            with self.subTest(status=status):
+                self.assertIn(status, ui_moderna.WORKFLOW_STEP_STYLES)
 
 
 class CommunityOnboardingDialogTest(unittest.TestCase):
