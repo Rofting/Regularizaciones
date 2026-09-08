@@ -2732,6 +2732,79 @@ class AppGestionFincas(ctk.CTk):
                       hover_color=C["primario_hover"]).pack(pady=14)
 
     def _nueva_comunidad(self):
+        """Ofrece el registro rápido existente o el alta guiada desde fuentes."""
+        dialogo = self._preparar_dialogo("Añadir comunidad", 560, 360)
+        panel = ctk.CTkFrame(
+            dialogo,
+            fg_color=C["panel"],
+            corner_radius=16,
+            border_width=1,
+            border_color=C["borde"],
+        )
+        panel.pack(fill="both", expand=True, padx=18, pady=18)
+        ctk.CTkLabel(
+            panel,
+            text="¿Cómo quieres añadirla?",
+            font=UIM.fuente(20, "bold"),
+            text_color=C["texto"],
+        ).pack(anchor="w", padx=22, pady=(22, 2))
+        ctk.CTkLabel(
+            panel,
+            text="Elige una incorporación básica o deja que las fuentes guíen la configuración.",
+            font=UIM.fuente(11),
+            text_color=C["texto_sec"],
+            wraplength=470,
+            justify="left",
+        ).pack(anchor="w", padx=22, pady=(0, 16))
+
+        def option(title, description, command, *, primary=False):
+            row = ctk.CTkFrame(
+                panel,
+                fg_color=C["panel_2"],
+                corner_radius=11,
+                border_width=1,
+                border_color=C["borde"],
+            )
+            row.pack(fill="x", padx=22, pady=5)
+            copy = ctk.CTkFrame(row, fg_color="transparent")
+            copy.pack(side="left", fill="both", expand=True, padx=14, pady=12)
+            ctk.CTkLabel(
+                copy, text=title, font=UIM.fuente(12, "bold"), text_color=C["texto"]
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                copy, text=description, font=UIM.fuente(10), text_color=C["texto_sec"]
+            ).pack(anchor="w", pady=(2, 0))
+
+            def choose():
+                dialogo.destroy()
+                command()
+
+            ctk.CTkButton(
+                row,
+                text="Elegir",
+                command=choose,
+                width=86,
+                height=34,
+                corner_radius=8,
+                fg_color=C["primario"] if primary else C["acento_suave"],
+                hover_color=C["primario_hover"] if primary else C["acento_suave_hover"],
+                text_color=("#FFFFFF", "#FFFFFF") if primary else C["primario"],
+            ).pack(side="right", padx=14)
+
+        expedient_ui = MOD.get("expedient_ui")
+        option(
+            "Alta guiada desde fuentes",
+            "Analiza propietarios, lecturas y facturas antes de crear el perfil.",
+            lambda: expedient_ui.open_community_onboarding_dialog(self),
+            primary=True,
+        )
+        option(
+            "Registro rápido",
+            "Conserva el formulario básico para crear la comunidad directamente.",
+            self._registro_rapido_comunidad,
+        )
+
+    def _registro_rapido_comunidad(self):
         """Diálogo para registrar una nueva comunidad."""
         dialogo = self._preparar_dialogo("Nueva Comunidad", 470, 320)
 

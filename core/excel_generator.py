@@ -27,6 +27,8 @@ import sys
 import shutil
 import sqlite3
 import argparse
+import hashlib
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -47,6 +49,199 @@ BASE_DIR    = Path(__file__).parent.parent
 RUTA_BD     = BASE_DIR / "data" / "gestion.db"
 RUTA_EXCELS = BASE_DIR / "Excels_Maestros"
 MAX_BACKUPS = 5
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while chunk := handle.read(64 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+_CANONICAL_TABLES = {
+    "GAS": {
+        "sheet": "GAS", "start_row": 10, "end_row": 30,
+        "input_columns": {
+            "invoice_date": "B", "days": "C", "start_date": "D",
+            "end_date": "E", "consumption": "F", "fixed": "G",
+            "variable": "H", "provider": "J",
+        },
+        "derived_columns": {"total": "I"},
+    },
+    "ELECTRICIDAD": {
+        "sheet": "ELECTRICIDAD", "start_row": 10, "end_row": 30,
+        "input_columns": {
+            "invoice_date": "B", "days": "C", "start_date": "D",
+            "end_date": "E", "consumption": "F", "fixed": "G",
+            "variable": "H", "provider": "J",
+        },
+        "derived_columns": {"total": "I"},
+    },
+    "AGUA": {
+        "sheet": "AGUA", "start_row": 10, "end_row": 30,
+        "input_columns": {
+            "invoice_date": "B", "days": "C", "start_date": "D",
+            "end_date": "E", "consumption": "F", "fixed": "G",
+            "variable": "H", "provider": "J",
+        },
+        "derived_columns": {"total": "I"},
+    },
+    "OTROS_GASTOS": {
+        "sheet": "OTROS GASTOS", "start_row": 10, "end_row": 60,
+        "columns": {"date": "B", "description": "C", "amount": "D"},
+    },
+    "ACS": {
+        "sheet": "LECTURAS ACS M3", "start_row": 8, "end_row": 40,
+        "input_columns": {
+            "charge_date": "B", "final_date": "C", "final": "D",
+            "initial_date": "E", "initial": "F", "variable_fee": "H",
+            "fixed_fee": "I",
+        },
+        "derived_columns": {
+            "consumption": "G", "total": "J", "variable_unit": "L",
+            "fixed_unit": "M",
+        },
+    },
+    "CALEFACCION": {
+        "sheet": "LECTURAS CALEF KWH", "start_row": 8, "end_row": 40,
+        "input_columns": {
+            "charge_date": "B", "final_date": "C", "final": "D",
+            "initial_date": "E", "initial": "F", "variable_fee": "H",
+            "fixed_fee": "I",
+        },
+        "derived_columns": {
+            "consumption": "G", "total": "J", "variable_unit": "L",
+            "fixed_unit": "M",
+        },
+    },
+}
+
+
+def canonical_workbook_layout(active_modules: tuple[str, ...] | list[str]) -> dict:
+    """Return the declarative layout used by generated community templates."""
+    tables = {
+        module: deepcopy(_CANONICAL_TABLES[module]) for module in active_modules
+    }
+    parameter_cells: dict[str, list[str]] = {}
+    total_checks: dict[str, list[str]] = {}
+    for module, table in tables.items():
+        sheet = table["sheet"]
+        start = table["start_row"]
+        end = table["end_row"]
+        if module in {"GAS", "ELECTRICIDAD", "AGUA"}:
+            total_checks.update({
+                f"invoice_total:{module}": [sheet, f"I{start}:I{end}"],
+                f"invoice_component:{module}:fixed": [sheet, f"G{start}:G{end}"],
+                f"invoice_component:{module}:variable": [sheet, f"H{start}:H{end}"],
+            })
+        elif module == "OTROS_GASTOS":
+            total_checks["parameter:extraordinary_expense_actual"] = [
+                sheet, f"D{start}:D{end}"
+            ]
+        elif module in {"ACS", "CALEFACCION"}:
+            prefix = "acs" if module == "ACS" else "heating"
+            parameter_cells.update({
+                f"{prefix}_variable_actual": [sheet, f"H{start}"],
+                f"{prefix}_fixed_actual": [sheet, f"I{start + 1}"],
+                f"{prefix}_variable_billed": [sheet, "H4"],
+                f"{prefix}_fixed_billed": [sheet, "I4"],
+            })
+            total_checks.update({
+                f"reading_total:{module}": [sheet, f"G{start}:G{end}"],
+                f"parameter:{prefix}_variable_actual": [sheet, f"H{start}"],
+                f"parameter:{prefix}_fixed_actual": [sheet, f"I{start + 1}"],
+                f"parameter:{prefix}_variable_billed": [sheet, "H4"],
+                f"parameter:{prefix}_fixed_billed": [sheet, "I4"],
+            })
+    return {
+        "metadata_cells": {
+            "community_name": ["DATOS", "A1"],
+            "period_label": ["DATOS", "A3"],
+            "owner_count": ["DATOS", "D4"],
+        },
+        "tables": tables,
+        "parameter_cells": parameter_cells,
+        "total_checks": total_checks,
+    }
+
+
+def create_canonical_community_template(
+    destination: str | Path,
+    *,
+    community_code: str,
+    community_name: str,
+    active_modules: tuple[str, ...] | list[str],
+) -> dict:
+    """Create a portable workbook containing only confirmed module sheets."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+
+    from excel_profiles import MODULE_REQUIRED_SHEETS
+
+    modules = tuple(active_modules)
+    layout = canonical_workbook_layout(modules)
+    workbook = Workbook()
+    data_sheet = workbook.active
+    data_sheet.title = "DATOS"
+    data_sheet["A1"] = community_name
+    data_sheet["A2"] = f"CÓDIGO: {community_code}"
+    data_sheet["A3"] = "PERIODO: pendiente de expediente"
+    data_sheet["D4"] = 0
+
+    sheet_names = ["DATOS"]
+    for module in modules:
+        for sheet_name in MODULE_REQUIRED_SHEETS[module]:
+            if sheet_name not in sheet_names:
+                workbook.create_sheet(sheet_name)
+                sheet_names.append(sheet_name)
+
+    title_fill = PatternFill("solid", fgColor="1A3A5C")
+    header_fill = PatternFill("solid", fgColor="D6EAF8")
+    for sheet in workbook.worksheets:
+        sheet.print_area = "A1:M60"
+        sheet.freeze_panes = "B8" if sheet.title != "DATOS" else "A5"
+        sheet["A1"].font = Font(bold=True, color="1A3A5C")
+
+    headers = {
+        "invoice_date": "Fecha factura", "days": "Días", "start_date": "Inicio",
+        "end_date": "Fin", "consumption": "Consumo", "fixed": "Fijo",
+        "variable": "Variable", "total": "Total", "provider": "Proveedor",
+        "date": "Fecha", "description": "Descripción", "amount": "Importe",
+        "charge_date": "Fecha cargo", "final_date": "Fecha final",
+        "final": "Lectura final", "initial_date": "Fecha inicial",
+        "initial": "Lectura inicial", "variable_fee": "Variable", "fixed_fee": "Fijo",
+        "variable_unit": "Precio variable", "fixed_unit": "Precio fijo",
+    }
+    for module, table in layout["tables"].items():
+        sheet = workbook[table["sheet"]]
+        sheet["A2"] = f"{module} — {community_name}"
+        sheet["A2"].font = Font(bold=True, color="FFFFFF")
+        sheet["A2"].fill = title_fill
+        if module in {"ACS", "CALEFACCION"}:
+            sheet["G3"] = "Importes facturados"
+            sheet["H3"] = "Variable"
+            sheet["I3"] = "Fijo"
+        header_row = table["start_row"] - 1
+        columns = {**table.get("input_columns", table.get("columns", {})),
+                   **table.get("derived_columns", {})}
+        for field, column in columns.items():
+            cell = sheet[f"{column}{header_row}"]
+            cell.value = headers[field]
+            cell.font = Font(bold=True, color="1A3A5C")
+            cell.fill = header_fill
+
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        workbook.save(destination)
+    finally:
+        workbook.close()
+    layout["bootstrap_template"] = {
+        "state": "fresh_onboarding",
+        "sha256": _sha256(destination),
+    }
+    return layout
 
 
 def _log_defecto(mensaje: str, tipo: str = "neutro"):

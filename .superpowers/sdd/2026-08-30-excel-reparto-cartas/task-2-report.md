@@ -38,3 +38,26 @@ Cada lote nuevo guarda una fotografía completa de sus celdas para auditoría. L
 ## Commit
 
 Esta entrega queda contenida en un único commit con el mensaje `Importa fuentes maestras de Excel de forma auditable`.
+
+## Corrección de revisión — layout obligatorio en onboarding
+
+Se cerró el hueco que permitía a un perfil con `onboarding_configuration`
+omitir `workbook_layout`: el perfil quedaba validado con un mapeo vacío y el
+importador posterior podía informar `MISSING_REQUIRED_FIELD` contra un maestro
+sin las celdas canónicas. Ahora esos perfiles deben aportar un layout no vacío;
+después se validan los `parameter_cells` canónicos y el marcador
+`bootstrap_template` con estado `fresh_onboarding` y SHA-256. Los perfiles
+públicos que no tienen onboarding siguen pudiendo no declarar dicha
+configuración.
+
+### RED/GREEN y verificación
+
+- RED: `test_profile_validation_requires_nonempty_layout_for_onboarding`
+  demostró que sin layout no se levantaba `ValueError`; con `{}` el rechazo era
+  solo incidental por una clave estructural ausente.
+- GREEN focalizado: 2 pruebas correctas, incluida la carga del perfil público
+  `658_acs_v1` sin `onboarding_configuration`.
+- Suite completa: 215 pruebas correctas.
+- Compilación: `core/excel_profiles.py`,
+  `tests/test_community_onboarding.py` y `tests/test_excel_profiles.py`
+  compilan correctamente.

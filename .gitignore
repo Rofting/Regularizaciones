@@ -28,6 +28,9 @@ Excels_Maestros_backup*/
 # Plantillas privadas instaladas desde los maestros de cada comunidad
 plantillas/comunidades/
 
+# Perfiles runtime locales; los perfiles públicos permanecen en el directorio padre
+config/excel_profiles/runtime/
+
 # Archivos temporales de Office
 ~$*.xlsx
 ~$*.xls

@@ -26,6 +26,48 @@ MODULE_REQUIRED_SHEETS = {
     "ACS": ("LECTURAS ACS M3", "ANALISIS"),
     "CALEFACCION": ("LECTURAS CALEF KWH",),
 }
+_ONBOARDING_SERVICE_MODULES = {
+    "ACS": ("ACS",),
+    "CALEFACCION": ("CALEFACCION",),
+    "ACS+CALEFACCION": ("ACS", "CALEFACCION"),
+    "NO_APLICA": (),
+}
+MODULE_CONCEPTS = {
+    "ACS": ("acs_fixed", "acs_variable"),
+    "CALEFACCION": ("heating_fixed", "heating_variable"),
+}
+_ONBOARDING_CONCEPT_RULES = {
+    "acs_fixed": (
+        "equal", "period_parameters.acs_fixed_actual",
+        "period_parameters.acs_fixed_billed",
+    ),
+    "acs_variable": (
+        "consumption", "period_parameters.acs_variable_actual",
+        "period_parameters.acs_variable_billed",
+    ),
+    "heating_fixed": (
+        "equal", "period_parameters.heating_fixed_actual",
+        "period_parameters.heating_fixed_billed",
+    ),
+    "heating_variable": (
+        "consumption", "period_parameters.heating_variable_actual",
+        "period_parameters.heating_variable_billed",
+    ),
+}
+_ONBOARDING_PARAMETER_CELLS = {
+    "ACS": {
+        "acs_variable_actual": ("LECTURAS ACS M3", "H8"),
+        "acs_fixed_actual": ("LECTURAS ACS M3", "I9"),
+        "acs_variable_billed": ("LECTURAS ACS M3", "H4"),
+        "acs_fixed_billed": ("LECTURAS ACS M3", "I4"),
+    },
+    "CALEFACCION": {
+        "heating_variable_actual": ("LECTURAS CALEF KWH", "H8"),
+        "heating_fixed_actual": ("LECTURAS CALEF KWH", "I9"),
+        "heating_variable_billed": ("LECTURAS CALEF KWH", "H4"),
+        "heating_fixed_billed": ("LECTURAS CALEF KWH", "I4"),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -51,6 +93,9 @@ class ExcelProfile:
         default_factory=lambda: MappingProxyType({})
     )
     source_sha256: str = ""
+    onboarding_configuration: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 _PROFILE_FIELDS = {
@@ -70,6 +115,24 @@ _CONCEPT_FIELDS = {
     "billed_source",
     "required",
 }
+
+
+def canonical_concepts_for_module(module: str) -> tuple[dict[str, object], ...]:
+    """Devuelve las reglas de reparto canónicas de un módulo de onboarding."""
+    try:
+        keys = MODULE_CONCEPTS[module]
+    except KeyError:
+        raise ValueError(f"Módulo de onboarding no soportado: {module}") from None
+    return tuple(
+        {
+            "key": key,
+            "allocation_method": _ONBOARDING_CONCEPT_RULES[key][0],
+            "actual_source": _ONBOARDING_CONCEPT_RULES[key][1],
+            "billed_source": _ONBOARDING_CONCEPT_RULES[key][2],
+            "required": True,
+        }
+        for key in keys
+    )
 
 
 def _require_fields(data: dict[str, Any], required: set[str], context: str) -> None:
@@ -242,23 +305,218 @@ def _workbook_layout(value: Any) -> Mapping[str, Any]:
     return _freeze_json(value)
 
 
-def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
-    """Carga y valida un perfil versionado sin salir del directorio de configuración."""
-    if not profile_key or Path(profile_key).name != profile_key:
-        raise ValueError("Clave de perfil no válida")
-    path = Path(project_root) / "config" / "excel_profiles" / f"{profile_key}.json"
-    try:
-        source_bytes = path.read_bytes()
-        data = json.loads(source_bytes.decode("utf-8"))
-    except FileNotFoundError:
-        raise LookupError(f"Perfil Excel no encontrado: {profile_key}") from None
-    except json.JSONDecodeError as error:
-        raise ValueError(f"JSON de perfil no válido: {error.msg}") from error
-    if not isinstance(data, dict):
+def _onboarding_configuration(
+    value: Any,
+    active_modules: tuple[str, ...],
+) -> Mapping[str, Any]:
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, dict):
+        raise ValueError("onboarding_configuration debe ser un objeto")
+    _require_fields(
+        value,
+        {"schema_version", "invoice_decisions", "not_applicable_modules"},
+        "onboarding_configuration actual",
+    )
+    if value["schema_version"] != 2:
+        raise ValueError("onboarding_configuration.schema_version no es válido")
+    _require_fields(
+        value,
+        {
+            "service_decision", "active_modules", "reading_column",
+            "reading_bindings", "sources",
+        },
+        "onboarding_configuration",
+    )
+    configured_modules = _string_tuple(
+        value["active_modules"], "onboarding_configuration.active_modules"
+    )
+    if configured_modules != active_modules:
+        raise ValueError(
+            "onboarding_configuration.active_modules no coincide con el perfil"
+        )
+    service_decision = value["service_decision"]
+    if not isinstance(service_decision, str) or not service_decision:
+        raise ValueError("onboarding_configuration.service_decision no es válido")
+    if _ONBOARDING_SERVICE_MODULES.get(service_decision) != configured_modules:
+        raise ValueError(
+            "onboarding_configuration.service_decision contradice los módulos activos"
+        )
+    not_applicable_modules = _string_tuple(
+        value.get("not_applicable_modules", []),
+        "onboarding_configuration.not_applicable_modules",
+    )
+    if (
+        set(not_applicable_modules).difference({"ACS", "CALEFACCION"})
+        or set(not_applicable_modules).intersection(configured_modules)
+    ):
+        raise ValueError(
+            "onboarding_configuration.not_applicable_modules contiene módulos activos"
+        )
+    if not isinstance(value["reading_column"], str):
+        raise ValueError("onboarding_configuration.reading_column no es válido")
+    bindings = value["reading_bindings"]
+    if not isinstance(bindings, list):
+        raise ValueError("onboarding_configuration.reading_bindings debe ser una lista")
+    bound_modules: list[str] = []
+    for index, binding in enumerate(bindings):
+        if not isinstance(binding, dict):
+            raise ValueError(f"El binding de lectura {index} no es un objeto")
+        _require_fields(
+            binding,
+            {"module", "column", "source_sha256s"},
+            f"onboarding_configuration.reading_bindings[{index}]",
+        )
+        _require_fields(
+            binding,
+            {"meter", "date", "value"},
+            f"onboarding_configuration.reading_bindings[{index}] actual",
+        )
+        if (
+            not isinstance(binding["module"], str)
+            or not isinstance(binding["column"], str)
+            or not binding["column"]
+            or not isinstance(binding.get("meter", ""), str)
+            or not isinstance(binding.get("date", ""), str)
+            or not isinstance(binding.get("value", ""), str)
+            or not all(binding[field] for field in ("meter", "date", "value"))
+            or not isinstance(binding["source_sha256s"], list)
+            or not binding["source_sha256s"]
+            or not all(
+                isinstance(item, str) and len(item) == 64
+                for item in binding["source_sha256s"]
+            )
+        ):
+            raise ValueError(f"Binding de lectura no válido para {binding.get('module')}")
+        bound_modules.append(binding["module"])
+    if tuple(bound_modules) != active_modules:
+        raise ValueError("Cada módulo activo debe tener un binding de lectura")
+    invoice_decisions = value.get("invoice_decisions", [])
+    if not isinstance(invoice_decisions, list):
+        raise ValueError("onboarding_configuration.invoice_decisions debe ser una lista")
+    for index, decision in enumerate(invoice_decisions):
+        if not isinstance(decision, dict):
+            raise ValueError(f"La decisión de factura {index} no es un objeto")
+        _require_fields(
+            decision,
+            {"source_sha256", "provider", "period", "amount", "concept"},
+            f"onboarding_configuration.invoice_decisions[{index}]",
+        )
+        if (
+            not isinstance(decision["source_sha256"], str)
+            or len(decision["source_sha256"]) != 64
+            or not all(
+                isinstance(decision[field], str) and decision[field]
+                for field in ("provider", "period", "amount", "concept")
+            )
+        ):
+            raise ValueError(f"Decisión de factura no válida en posición {index}")
+    sources = value["sources"]
+    if not isinstance(sources, list) or not all(isinstance(item, dict) for item in sources):
+        raise ValueError("onboarding_configuration.sources debe ser una lista de objetos")
+    for index, source in enumerate(sources):
+        _require_fields(source, {"kind", "name", "sha256"}, f"fuente {index}")
+        if (
+            not isinstance(source["kind"], str)
+            or not source["kind"]
+            or not isinstance(source["name"], str)
+            or not source["name"]
+            or "/" in source["name"]
+            or "\\" in source["name"]
+            or not isinstance(source["sha256"], str)
+            or len(source["sha256"]) != 64
+        ):
+            raise ValueError(f"Traza de fuente no válida en posición {index}")
+    invoice_source_sha256s = sorted(
+        source["sha256"] for source in sources
+        if source["kind"] == "invoice_pdf"
+    )
+    invoice_decision_sha256s = sorted(
+        decision["source_sha256"] for decision in invoice_decisions
+    )
+    if invoice_source_sha256s != invoice_decision_sha256s:
+        raise ValueError("Cada factura debe tener una decisión completa")
+    return _freeze_json(value)
+
+
+def _validate_onboarding_concepts(
+    onboarding_configuration: Mapping[str, Any],
+    active_modules: tuple[str, ...],
+    concepts: tuple[ConceptRule, ...],
+) -> None:
+    if not onboarding_configuration:
+        return
+    expected_keys = tuple(
+        key for module in active_modules for key in MODULE_CONCEPTS[module]
+    )
+    if tuple(concept.key for concept in concepts) != expected_keys:
+        raise ValueError("Los conceptos del onboarding no son los canónicos")
+    for concept in concepts:
+        expected_method, expected_actual, expected_billed = (
+            _ONBOARDING_CONCEPT_RULES[concept.key]
+        )
+        if (
+            concept.allocation_method != expected_method
+            or concept.actual_source != expected_actual
+            or concept.billed_source != expected_billed
+            or not concept.required
+        ):
+            raise ValueError(
+                f"El concepto canónico {concept.key} no tiene sus fuentes y reparto esperados"
+            )
+
+
+def _validate_onboarding_parameter_cells(
+    onboarding_configuration: Mapping[str, Any],
+    active_modules: tuple[str, ...],
+    workbook_layout: Mapping[str, Any],
+) -> None:
+    if not onboarding_configuration:
+        return
+    expected = {
+        key: binding
+        for module in active_modules
+        for key, binding in _ONBOARDING_PARAMETER_CELLS[module].items()
+    }
+    actual = workbook_layout["parameter_cells"]
+    if set(actual) != set(expected):
+        raise ValueError(
+            "Las celdas de parámetros del onboarding no son las canónicas"
+        )
+    for key, expected_binding in expected.items():
+        if tuple(actual[key]) != expected_binding:
+            raise ValueError(
+                f"El binding canónico {key} no apunta a su celda esperada"
+            )
+
+
+def _validate_onboarding_bootstrap_marker(
+    onboarding_configuration: Mapping[str, Any],
+    workbook_layout: Mapping[str, Any],
+) -> None:
+    if not onboarding_configuration:
+        return
+    marker = workbook_layout.get("bootstrap_template")
+    if (
+        not isinstance(marker, Mapping)
+        or marker.get("state") != "fresh_onboarding"
+        or not isinstance(marker.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", marker["sha256"]) is None
+    ):
+        raise ValueError(
+            "workbook_layout.bootstrap_template no identifica la plantilla inicial"
+        )
+
+
+def validate_profile_payload(payload: Mapping[str, Any], project_root: Path) -> ExcelProfile:
+    """Validate an in-memory profile payload without creating any files."""
+    if not isinstance(payload, Mapping):
         raise ValueError("El perfil Excel debe ser un objeto JSON")
+    data = dict(payload)
+    profile_key = data.get("key")
+    if not isinstance(profile_key, str) or not profile_key or Path(profile_key).name != profile_key:
+        raise ValueError("Clave de perfil no válida")
     _require_fields(data, _PROFILE_FIELDS, "perfil")
-    if data["key"] != profile_key:
-        raise ValueError("La clave interna del perfil no coincide con el archivo")
 
     active_modules = _string_tuple(data["active_modules"], "active_modules")
     unsupported_modules = sorted(set(active_modules).difference(MODULE_REQUIRED_SHEETS))
@@ -287,6 +545,25 @@ def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
         if not isinstance(data[field], str) or not data[field]:
             raise ValueError(f"{field} debe ser un texto no vacío")
 
+    concepts = _concepts(data["concepts"])
+    onboarding_configuration = _onboarding_configuration(
+        data.get("onboarding_configuration"), active_modules
+    )
+    layout_payload = data.get("workbook_layout")
+    if onboarding_configuration and not layout_payload:
+        raise ValueError(
+            "Todo perfil de onboarding debe declarar un workbook_layout canónico no vacío"
+        )
+    workbook_layout = _workbook_layout(layout_payload)
+    _validate_onboarding_concepts(
+        onboarding_configuration, active_modules, concepts
+    )
+    _validate_onboarding_parameter_cells(
+        onboarding_configuration, active_modules, workbook_layout
+    )
+    _validate_onboarding_bootstrap_marker(
+        onboarding_configuration, workbook_layout
+    )
     return ExcelProfile(
         key=profile_key,
         version=data["version"],
@@ -297,15 +574,80 @@ def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
         active_modules=active_modules,
         required_sheets=required_sheets,
         required_formula_cells=formula_cells,
-        concepts=_concepts(data["concepts"]),
-        workbook_layout=_workbook_layout(data.get("workbook_layout")),
+        concepts=concepts,
+        workbook_layout=workbook_layout,
+        source_sha256="",
+        onboarding_configuration=onboarding_configuration,
+    )
+
+
+def runtime_profile_path(profile_key: str, project_root: Path) -> Path:
+    """Return the ignored local path reserved for onboarding runtime profiles."""
+    if not profile_key or Path(profile_key).name != profile_key:
+        raise ValueError("Clave de perfil no válida")
+    return (
+        Path(project_root) / "config" / "excel_profiles" / "runtime"
+        / f"{profile_key}.json"
+    )
+
+
+def configured_profile_paths(project_root: Path) -> tuple[Path, ...]:
+    """List public profiles plus non-shadowed local runtime profiles."""
+    directory = Path(project_root) / "config" / "excel_profiles"
+    public = sorted(directory.glob("*.json"))
+    public_keys = {path.stem for path in public}
+    runtime = [
+        path for path in sorted((directory / "runtime").glob("*.json"))
+        if path.stem not in public_keys
+    ]
+    return tuple((*public, *runtime))
+
+
+def _profile_source_path(profile_key: str, project_root: Path) -> Path:
+    public = Path(project_root) / "config" / "excel_profiles" / f"{profile_key}.json"
+    if public.is_file():
+        return public
+    runtime = runtime_profile_path(profile_key, project_root)
+    if runtime.is_file():
+        return runtime
+    return public
+
+
+def load_profile(profile_key: str, project_root: Path) -> ExcelProfile:
+    """Carga y valida un perfil versionado sin salir del directorio de configuración."""
+    if not profile_key or Path(profile_key).name != profile_key:
+        raise ValueError("Clave de perfil no válida")
+    path = _profile_source_path(profile_key, project_root)
+    try:
+        source_bytes = path.read_bytes()
+        data = json.loads(source_bytes.decode("utf-8"))
+    except FileNotFoundError:
+        raise LookupError(f"Perfil Excel no encontrado: {profile_key}") from None
+    except json.JSONDecodeError as error:
+        raise ValueError(f"JSON de perfil no válido: {error.msg}") from error
+    if not isinstance(data, dict):
+        raise ValueError("El perfil Excel debe ser un objeto JSON")
+    if data.get("key") != profile_key:
+        raise ValueError("La clave interna del perfil no coincide con el archivo")
+    profile = validate_profile_payload(data, project_root)
+    return ExcelProfile(
+        key=profile.key,
+        version=profile.version,
+        community_code=profile.community_code,
+        template_relative_path=profile.template_relative_path,
+        active_modules=profile.active_modules,
+        required_sheets=profile.required_sheets,
+        required_formula_cells=profile.required_formula_cells,
+        concepts=profile.concepts,
+        workbook_layout=profile.workbook_layout,
         source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        onboarding_configuration=profile.onboarding_configuration,
     )
 
 
 def calculate_profile_sha256(profile: ExcelProfile, project_root: Path) -> str:
     """Calcula la huella actual de los bytes del JSON que define el perfil."""
-    path = Path(project_root).resolve() / "config" / "excel_profiles" / f"{profile.key}.json"
+    path = _profile_source_path(profile.key, Path(project_root).resolve())
     if path.is_file():
         return hashlib.sha256(path.read_bytes()).hexdigest()
     if profile.source_sha256:

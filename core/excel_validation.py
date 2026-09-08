@@ -55,6 +55,12 @@ def _mutable_addresses(profile: ExcelProfile) -> dict[str, set[str]]:
         result.setdefault(sheet_name, set()).add(address)
     for sheet_name, address in layout.get("parameter_cells", {}).values():
         result.setdefault(sheet_name, set()).add(address)
+    for key, binding in layout.get("total_checks", {}).items():
+        if not str(key).startswith("parameter:"):
+            continue
+        sheet_name, address = binding
+        if ":" not in address:
+            result.setdefault(sheet_name, set()).add(address)
     for table in layout.get("tables", {}).values():
         sheet_name = table["sheet"]
         for row in range(int(table["start_row"]), int(table["end_row"]) + 1):
