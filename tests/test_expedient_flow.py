@@ -276,6 +276,45 @@ class ExpedientFlowTest(unittest.TestCase):
             )],
         )
 
+    def test_manual_reading_classification_ignores_conflicting_invoice_requirements(self):
+        result = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.unknown_file,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.unknown(),
+        )
+        classification_issue = document_review.list_open_issues(
+            self.connection, self.case.id_case
+        )[0]
+        document_review.resolve_issue(
+            self.connection,
+            classification_issue.id_issue,
+            value="reading",
+            reason="La gestora confirmó que es una lectura",
+        )
+
+        reanalysed = case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            analyser=lambda _path: SourceAnalysis.invoice({}),
+        )
+        repeated = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.unknown_file,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.invoice({}),
+        )
+
+        self.assertEqual("reading", reanalysed[0].document.document_kind)
+        self.assertEqual("reading", repeated.document.document_kind)
+        self.assertEqual((), document_review.list_open_issues(self.connection, self.case.id_case))
+        self.assertEqual("reading", self.connection.execute(
+            "SELECT document_kind FROM source_documents WHERE id_document = ?",
+            (result.document.id_document,),
+        ).fetchone()[0])
+
     def test_reanalysis_keeps_manual_issue_that_uses_automatic_code(self):
         result = case_ingestion.add_analysed_document_to_case(
             self.connection,

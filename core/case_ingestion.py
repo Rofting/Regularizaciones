@@ -75,6 +75,15 @@ def _normalised_analysis(analysis: SourceAnalysis) -> SourceAnalysis:
     return analysis
 
 
+def _required_fields_for_kind(analysis: SourceAnalysis, document_kind: str) -> tuple[str, ...]:
+    """Uses the effective classification, not a conflicting automatic guess."""
+    if document_kind == analysis.kind:
+        return tuple(field.strip() for field in analysis.required_fields)
+    if document_kind == "invoice":
+        return SourceAnalysis.invoice().required_fields
+    return ()
+
+
 def _replace_unvalidated_candidates_not_in_analysis(
     connection: sqlite3.Connection,
     document_id: int,
@@ -108,12 +117,12 @@ def _persist_analysis(
 ) -> None:
     analysis = _normalised_analysis(analysis)
     candidates = {field.strip(): value for field, value in analysis.candidates.items()}
-    required_fields = tuple(field.strip() for field in analysis.required_fields)
     with _transaction(connection):
         confirmed_kind = document_review.resolved_classification_kind(
             connection, document.id_document,
         )
         effective_kind = confirmed_kind or analysis.kind.strip()
+        required_fields = _required_fields_for_kind(analysis, effective_kind)
         connection.execute(
             """UPDATE source_documents
                SET document_kind = ?, classification_confidence = ?
@@ -138,7 +147,7 @@ def _persist_analysis(
                 connection, case_id, document.id_document,
             )
         if (
-            analysis.kind == "unknown"
+            effective_kind == "unknown"
             and not document_review.has_closed_classification_outcome(
                 connection, document.id_document,
             )

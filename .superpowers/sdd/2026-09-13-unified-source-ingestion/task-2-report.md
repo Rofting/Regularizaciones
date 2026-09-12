@@ -69,3 +69,17 @@ The four review findings were reproduced through public APIs before the fix.
 - Analysed duplicate ingestion and reanalysis reload `SourceDocument` after persistence, so callers receive the current type and status.
 
 The new regressions first failed against the reviewed implementation: manual same-code issues were deleted, rejected manual values became automatic candidates, and returned classification snapshots were stale. The focused verification then passed all 36 flow, review, and migration tests; full discovery also passed.
+
+## Scoped re-review addendum
+
+The scoped re-review identified that the persisted effective kind and the
+generated requirements could diverge. The new regression starts with an
+unknown source manually confirmed as `reading`, then supplies a conflicting
+invoice analysis through both reanalysis and duplicate analysed ingestion.
+
+The regression first failed because the invoice's three required fields were
+used despite the effective reading classification. Requirement selection now
+uses the effective document kind: an effective invoice has invoice fields,
+while readings and other non-invoice kinds have none. The reading remains
+persisted and returned as `reading` and has no invoice missing-field blockers.
+The 37-test focused suite passed after the correction.
