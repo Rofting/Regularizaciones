@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 MIGRATION_1_SQL = (
@@ -388,6 +388,17 @@ def _migration_6(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migration_7(connection: sqlite3.Connection) -> None:
+    """Distingue las incidencias regenerables de las creadas por una persona."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(review_issues)")}
+    if "origin" not in columns:
+        connection.execute(
+            """ALTER TABLE review_issues
+               ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'
+               CHECK(origin IN ('automatic', 'manual'))"""
+        )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -395,6 +406,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migration_4,
     5: _migration_5,
     6: _migration_6,
+    7: _migration_7,
 }
 
 

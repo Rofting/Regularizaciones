@@ -15,6 +15,7 @@ _INVOICE_OUTSIDE_PERIOD_CODE = "INVOICE_OUTSIDE_PERIOD"
 _CLASSIFICATION_REQUIRED_CODE = "DOCUMENT_CLASSIFICATION_REQUIRED"
 _AUTOMATIC_REVIEW_CODES = (_MISSING_FIELD_CODE, _CLASSIFICATION_REQUIRED_CODE)
 _VALIDATION_STATUSES = {"candidate", "validated", "rejected"}
+_ISSUE_ORIGINS = {"automatic", "manual"}
 
 
 @contextmanager
@@ -160,7 +161,8 @@ def record_candidates(
                        source = excluded.source,
                        validation_status = excluded.validation_status,
                        source_context = excluded.source_context
-                   WHERE ? = 0 OR extraction_candidates.validation_status <> 'validated'""",
+                   WHERE ? = 0
+                      OR extraction_candidates.validation_status NOT IN ('validated', 'rejected')""",
                 (
                     document_id, field_name, normalized_value, normalized_source, candidate_status,
                     source_context, int(preserve_validated),
@@ -214,8 +216,8 @@ def create_missing_field_issues(connection: sqlite3.Connection, case_id: int,
             if candidate is None:
                 connection.execute(
                     """INSERT INTO review_issues
-                       (id_case, id_document, code, field_name, detected_value, message, status)
-                       VALUES (?, ?, ?, ?, NULL, ?, 'open')
+                       (id_case, id_document, code, field_name, detected_value, message, status, origin)
+                       VALUES (?, ?, ?, ?, NULL, ?, 'open', 'automatic')
                        ON CONFLICT(id_document, code, field_name, status) DO NOTHING""",
                     (
                         case_id, document_id, _MISSING_FIELD_CODE, field_name,
@@ -249,7 +251,7 @@ def create_missing_field_issues(connection: sqlite3.Connection, case_id: int,
     return tuple(review_issue_from_row(row) for row in rows)
 
 
-def create_review_issue(
+def _create_review_issue(
     connection: sqlite3.Connection,
     case_id: int,
     document_id: int,
@@ -258,13 +260,16 @@ def create_review_issue(
     field_name: str,
     message: str,
     detected_value: str | None = None,
+    origin: str,
 ) -> ReviewIssue:
-    """Registra de forma idempotente una incidencia genérica que sigue abierta."""
+    """Registra de forma idempotente una incidencia con procedencia explícita."""
     normalized_code = code.strip()
     normalized_field = field_name.strip()
     normalized_message = message.strip()
     if not normalized_code or not normalized_field or not normalized_message:
         raise ValueError("Código, campo y mensaje de la incidencia son obligatorios")
+    if origin not in _ISSUE_ORIGINS:
+        raise ValueError("El origen de la incidencia no es válido")
 
     with _transaction(connection):
         document = connection.execute(
@@ -274,8 +279,8 @@ def create_review_issue(
             raise LookupError("El documento no pertenece al expediente")
         connection.execute(
             """INSERT INTO review_issues
-               (id_case,id_document,code,field_name,detected_value,message,status)
-               VALUES (?,?,?,?,?,?,'open')
+               (id_case,id_document,code,field_name,detected_value,message,status,origin)
+               VALUES (?,?,?,?,?,?,'open',?)
                ON CONFLICT(id_document,code,field_name,status) DO NOTHING""",
             (
                 case_id,
@@ -284,6 +289,7 @@ def create_review_issue(
                 normalized_field,
                 _normalise_value(detected_value),
                 normalized_message,
+                origin,
             ),
         )
         connection.execute(
@@ -309,6 +315,29 @@ def create_review_issue(
     return review_issue_from_row(row)
 
 
+def create_review_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    code: str,
+    field_name: str,
+    message: str,
+    detected_value: str | None = None,
+) -> ReviewIssue:
+    """Registra una incidencia manual; sólo el análisis crea incidencias automáticas."""
+    return _create_review_issue(
+        connection,
+        case_id,
+        document_id,
+        code=code,
+        field_name=field_name,
+        message=message,
+        detected_value=detected_value,
+        origin="manual",
+    )
+
+
 def create_classification_required_issue(
     connection: sqlite3.Connection,
     case_id: int,
@@ -317,14 +346,47 @@ def create_classification_required_issue(
     message: str,
 ) -> ReviewIssue:
     """Crea la única incidencia abierta necesaria para una fuente desconocida."""
-    return create_review_issue(
+    return _create_review_issue(
         connection,
         case_id,
         document_id,
         code=_CLASSIFICATION_REQUIRED_CODE,
         field_name="document_kind",
         message=message,
+        origin="automatic",
     )
+
+
+def resolved_classification_kind(
+    connection: sqlite3.Connection, document_id: int
+) -> str | None:
+    """Devuelve una clasificación confirmada manualmente, si existe."""
+    row = connection.execute(
+        """SELECT candidates.value FROM review_issues AS issues
+           JOIN extraction_candidates AS candidates
+             ON candidates.id_document = issues.id_document
+            AND candidates.field_name = issues.field_name
+           WHERE issues.id_document = ?
+             AND issues.code = ? AND issues.field_name = 'document_kind'
+             AND issues.status = 'resolved'
+             AND candidates.source = 'manual'
+             AND candidates.validation_status = 'validated'
+             AND candidates.value IS NOT NULL AND trim(candidates.value) <> ''""",
+        (document_id, _CLASSIFICATION_REQUIRED_CODE),
+    ).fetchone()
+    return row["value"] if row is not None else None
+
+
+def has_closed_classification_outcome(
+    connection: sqlite3.Connection, document_id: int
+) -> bool:
+    """Una decisión cerrada no debe convertirse de nuevo en un bloqueo automático."""
+    return connection.execute(
+        """SELECT 1 FROM review_issues
+           WHERE id_document = ? AND code = ? AND field_name = 'document_kind'
+             AND status IN ('resolved', 'dismissed')""",
+        (document_id, _CLASSIFICATION_REQUIRED_CODE),
+    ).fetchone() is not None
 
 
 def clear_open_automatic_issues(
@@ -342,7 +404,7 @@ def clear_open_automatic_issues(
         connection.execute(
             """DELETE FROM review_issues
                WHERE id_case = ? AND id_document = ? AND status = 'open'
-                 AND code IN (?, ?)""",
+                 AND origin = 'automatic' AND code IN (?, ?)""",
             (case_id, document_id, *_AUTOMATIC_REVIEW_CODES),
         )
 

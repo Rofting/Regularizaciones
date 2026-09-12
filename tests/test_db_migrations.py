@@ -72,7 +72,7 @@ class DatabaseMigrationTest(unittest.TestCase):
 
         self.assertTrue(EXPECTED_TABLES.issubset(tables))
         self.assertIn("email", columns)
-        self.assertEqual([1, 2, 3, 4, 5, 6], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], [row[0] for row in versions])
         self.assertEqual(
             [
                 "acs_fixed",
@@ -100,7 +100,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM regularization_concepts"
             ).fetchone()[0]
 
-        self.assertEqual([1, 2, 3, 4, 5, 6], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], [row[0] for row in versions])
         self.assertEqual(8, concept_count)
 
     def test_migration_two_creates_case_and_review_tables(self):
@@ -127,6 +127,10 @@ class DatabaseMigrationTest(unittest.TestCase):
                 row[1]
                 for row in connection.execute("PRAGMA table_info(extraction_candidates)")
             }
+            issue_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(review_issues)")
+            }
             indexes = {
                 row[0]
                 for row in connection.execute(
@@ -134,7 +138,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
         self.assertTrue({
             "regularization_cases", "source_documents", "extraction_candidates",
             "review_issues", "manual_corrections",
@@ -142,6 +146,7 @@ class DatabaseMigrationTest(unittest.TestCase):
         self.assertTrue({"id_case", "id_document", "field_name", "status"}.issubset(columns))
         self.assertIn("classification_confidence", document_columns)
         self.assertIn("source_context", candidate_columns)
+        self.assertIn("origin", issue_columns)
         self.assertTrue({
             "idx_cases_community",
             "idx_documents_case",
@@ -153,13 +158,13 @@ class DatabaseMigrationTest(unittest.TestCase):
             for statement in gestor_bd.TABLAS:
                 connection.execute(statement)
             connection.commit()
-            self.assertEqual(6, gestor_bd.aplicar_migraciones(connection))
-            self.assertEqual(6, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(7, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(7, gestor_bd.aplicar_migraciones(connection))
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
 
-        self.assertEqual([1, 2, 3, 4, 5, 6], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], [row[0] for row in versions])
 
     def test_migration_three_links_cases_and_creates_export_audit_tables(self):
         with closing(self._connect()) as connection:
@@ -187,7 +192,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(6, version)
+        self.assertEqual(7, version)
         self.assertTrue({
             "invoice_components",
             "period_parameters",

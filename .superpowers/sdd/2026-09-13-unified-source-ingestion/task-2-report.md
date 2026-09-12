@@ -42,7 +42,7 @@ New focused coverage proves reading/unknown classification behavior, compact per
 
 ## Migration applied
 
-`CURRENT_SCHEMA_VERSION` is now 6. New databases receive migration 6 after migrations 1–5; databases already at version 5 receive only the two nullable columns and a version-6 migration record. The migration's `PRAGMA table_info` guards make its column changes defensive.
+`CURRENT_SCHEMA_VERSION` is now 7. New databases receive migration 6 after migrations 1–5 and migration 7 afterwards. Databases already at version 5 receive the two nullable analysis columns and the review-issue provenance column, each with a version record. The migrations' `PRAGMA table_info` guards make their column changes defensive.
 
 ## Self-review
 
@@ -58,3 +58,14 @@ New focused coverage proves reading/unknown classification behavior, compact per
 ## Concerns
 
 None.
+
+## Review-fix addendum
+
+The four review findings were reproduced through public APIs before the fix.
+
+- Resolved classifications now remain effective: a validated manual `document_kind` is used as the document's effective kind, and a resolved or dismissed classification outcome prevents a new blocking classification issue from being created.
+- Migration 7 adds `review_issues.origin` (`automatic` or `manual`). Existing issues default to `manual` conservatively; only explicitly automatic open issues are deleted during reanalysis.
+- Candidate replacement and obsolete-candidate cleanup now preserve both `validated` and `rejected` values.
+- Analysed duplicate ingestion and reanalysis reload `SourceDocument` after persistence, so callers receive the current type and status.
+
+The new regressions first failed against the reviewed implementation: manual same-code issues were deleted, rejected manual values became automatic candidates, and returned classification snapshots were stale. The focused verification then passed all 36 flow, review, and migration tests; full discovery also passed.

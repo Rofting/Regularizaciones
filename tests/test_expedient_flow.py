@@ -87,6 +87,13 @@ class ExpedientFlowTest(unittest.TestCase):
             (document_id, field_name),
         ).fetchone()[0]
 
+    def candidate_row(self, document_id, field_name):
+        return self.connection.execute(
+            """SELECT value, source, validation_status FROM extraction_candidates
+               WHERE id_document = ? AND field_name = ?""",
+            (document_id, field_name),
+        ).fetchone()
+
     def add_invoice_with_manual_total(self, total):
         result = case_ingestion.add_analysed_document_to_case(
             self.connection,
@@ -225,6 +232,146 @@ class ExpedientFlowTest(unittest.TestCase):
 
         open_issues = document_review.list_open_issues(self.connection, self.case.id_case)
         self.assertEqual([manual.id_issue], [issue.id_issue for issue in open_issues])
+
+    def test_reanalysis_keeps_resolved_classification_effective_without_reopening_it(self):
+        result = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.unknown_file,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.unknown(),
+        )
+        classification_issue = document_review.list_open_issues(
+            self.connection, self.case.id_case
+        )[0]
+        document_review.resolve_issue(
+            self.connection,
+            classification_issue.id_issue,
+            value="reading",
+            reason="La gestora confirmó que es una lectura",
+        )
+
+        reanalysed = case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            analyser=lambda _path: SourceAnalysis.unknown(),
+        )
+        repeated = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.unknown_file,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.unknown(),
+        )
+
+        self.assertEqual("reading", reanalysed[0].document.document_kind)
+        self.assertEqual("reading", repeated.document.document_kind)
+        self.assertEqual(0, len(document_review.list_open_issues(self.connection, self.case.id_case)))
+        self.assertEqual(
+            [(classification_issue.id_issue, "resolved")],
+            [tuple(row) for row in self.connection.execute(
+                """SELECT id_issue, status FROM review_issues
+                   WHERE id_document = ? AND code = 'DOCUMENT_CLASSIFICATION_REQUIRED'""",
+                (result.document.id_document,),
+            )],
+        )
+
+    def test_reanalysis_keeps_manual_issue_that_uses_automatic_code(self):
+        result = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.reading_file,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.reading(),
+        )
+        manual = document_review.create_review_issue(
+            self.connection,
+            self.case.id_case,
+            result.document.id_document,
+            code="MISSING_REQUIRED_FIELD",
+            field_name="manual_note",
+            message="La gestora solicita comprobar la nota adjunta",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            analyser=lambda _path: SourceAnalysis.reading(),
+        )
+
+        self.assertEqual(
+            (manual.id_issue, "open"),
+            tuple(self.connection.execute(
+                "SELECT id_issue, status FROM review_issues WHERE id_issue = ?",
+                (manual.id_issue,),
+            ).fetchone()),
+        )
+
+    def test_reanalysis_keeps_rejected_manual_candidate_when_present_or_absent(self):
+        result = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.source_path,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.invoice({
+                "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31",
+                "importe_total": "12.00",
+            }),
+        )
+        document_review.record_candidates(
+            self.connection,
+            result.document.id_document,
+            {"importe_total": "10.00"},
+            source="manual",
+            validation_status="rejected",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            analyser=lambda _path: SourceAnalysis.invoice({
+                "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31",
+                "importe_total": "20.00",
+            }),
+        )
+        after_present = self.candidate_row(result.document.id_document, "importe_total")
+        case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            analyser=lambda _path: SourceAnalysis.invoice({
+                "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31",
+            }),
+        )
+
+        self.assertEqual(("10.00", "manual", "rejected"), tuple(after_present))
+        self.assertEqual(
+            ("10.00", "manual", "rejected"),
+            tuple(self.candidate_row(result.document.id_document, "importe_total")),
+        )
+
+    def test_reanalysis_returns_the_new_persisted_document_classification(self):
+        result = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.unknown_file,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.unknown(),
+        )
+
+        reanalysed = case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            analyser=lambda _path: SourceAnalysis.reading(),
+        )
+
+        persisted_kind = self.connection.execute(
+            "SELECT document_kind FROM source_documents WHERE id_document = ?",
+            (result.document.id_document,),
+        ).fetchone()[0]
+        self.assertEqual("reading", persisted_kind)
+        self.assertEqual("reading", reanalysed[0].document.document_kind)
 
     def test_invoice_review_flow_reaches_ready_for_calculation(self):
         result = self._add_invoice_and_resolve_start_date()

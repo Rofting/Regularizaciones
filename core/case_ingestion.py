@@ -8,7 +8,7 @@ from typing import Callable, Collection, Iterator, Mapping
 
 import document_review
 import expedient_service
-from expedient_models import RegularizationCase, SourceDocument
+from expedient_models import RegularizationCase, SourceDocument, document_from_row
 from source_analysis import SourceAnalysis, analyse_source
 
 
@@ -84,7 +84,8 @@ def _replace_unvalidated_candidates_not_in_analysis(
     candidate_names = {field.strip() for field in candidates}
     rows = connection.execute(
         """SELECT field_name FROM extraction_candidates
-           WHERE id_document = ? AND validation_status <> 'validated'""",
+           WHERE id_document = ?
+             AND validation_status NOT IN ('validated', 'rejected')""",
         (document_id,),
     ).fetchall()
     for row in rows:
@@ -92,7 +93,7 @@ def _replace_unvalidated_candidates_not_in_analysis(
             connection.execute(
                 """DELETE FROM extraction_candidates
                    WHERE id_document = ? AND field_name = ?
-                     AND validation_status <> 'validated'""",
+                     AND validation_status NOT IN ('validated', 'rejected')""",
                 (document_id, row["field_name"]),
             )
 
@@ -109,11 +110,15 @@ def _persist_analysis(
     candidates = {field.strip(): value for field, value in analysis.candidates.items()}
     required_fields = tuple(field.strip() for field in analysis.required_fields)
     with _transaction(connection):
+        confirmed_kind = document_review.resolved_classification_kind(
+            connection, document.id_document,
+        )
+        effective_kind = confirmed_kind or analysis.kind.strip()
         connection.execute(
             """UPDATE source_documents
                SET document_kind = ?, classification_confidence = ?
                WHERE id_document = ? AND id_case = ?""",
-            (analysis.kind.strip(), analysis.confidence.strip(), document.id_document, case_id),
+            (effective_kind, analysis.confidence.strip(), document.id_document, case_id),
         )
         if reanalysis:
             _replace_unvalidated_candidates_not_in_analysis(
@@ -132,7 +137,12 @@ def _persist_analysis(
             document_review.clear_open_automatic_issues(
                 connection, case_id, document.id_document,
             )
-        if analysis.kind == "unknown":
+        if (
+            analysis.kind == "unknown"
+            and not document_review.has_closed_classification_outcome(
+                connection, document.id_document,
+            )
+        ):
             document_review.create_classification_required_issue(
                 connection,
                 case_id,
@@ -144,6 +154,18 @@ def _persist_analysis(
             document_review.create_missing_field_issues(
                 connection, case_id, document.id_document, required_fields,
             )
+
+
+def _source_document(connection: sqlite3.Connection, document_id: int) -> SourceDocument:
+    row = connection.execute(
+        """SELECT id_document, id_case, original_name, archived_path, sha256,
+                  document_kind, status
+           FROM source_documents WHERE id_document = ?""",
+        (document_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError("El documento no existe")
+    return document_from_row(row)
 
 
 def _open_issue_count(connection: sqlite3.Connection, case_id: int) -> int:
@@ -241,7 +263,11 @@ def add_analysed_document_to_case(
     _persist_analysis(
         connection, case_id, document, analysis, reanalysis=not created,
     )
-    return IngestionResult(document, created, _open_issue_count(connection, case_id))
+    return IngestionResult(
+        _source_document(connection, document.id_document),
+        created,
+        _open_issue_count(connection, case_id),
+    )
 
 
 def _case_analyser(
@@ -275,15 +301,7 @@ def reanalyze_case_documents(
     ).fetchall()
     results = []
     for row in documents:
-        document = SourceDocument(
-            id_document=row["id_document"],
-            id_case=row["id_case"],
-            original_name=row["original_name"],
-            archived_path=Path(row["archived_path"]),
-            sha256=row["sha256"],
-            document_kind=row["document_kind"],
-            status=row["status"],
-        )
+        document = document_from_row(row)
         _persist_analysis(
             connection,
             case_id,
@@ -291,5 +309,9 @@ def reanalyze_case_documents(
             active_analyser(document.archived_path),
             reanalysis=True,
         )
-        results.append(IngestionResult(document, False, _open_issue_count(connection, case_id)))
+        results.append(IngestionResult(
+            _source_document(connection, document.id_document),
+            False,
+            _open_issue_count(connection, case_id),
+        ))
     return tuple(results)
