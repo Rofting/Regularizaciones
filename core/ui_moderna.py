@@ -39,6 +39,9 @@ C = {
     "texto_sec":          ("#64748B", "#8B93A7"),
     "exito":              ("#059669", "#34D399"),
     "exito_hover":        ("#047857", "#5EEAD4"),
+    "secundario_hover":   ("#EEF4F5", "#203034"),
+    "revision":           ("#B7791F", "#F6C760"),
+    "revision_hover":     ("#975A16", "#FBD38D"),
     "alerta":             ("#DC2626", "#F87171"),
     "aviso":              ("#D97706", "#FBBF24"),
     "banner_abierto":     ("#E5F4F1", "#173B39"),
@@ -48,6 +51,25 @@ C = {
 
 # Compatibilidad con código antiguo que use TEMA["clave"]
 TEMA = {k: v[0] for k, v in C.items()}
+
+WORKFLOW_STEP_STYLES = {
+    "pending": {"fg_color": "transparent", "text_color": C["texto_sec"], "marker": "○"},
+    "active": {"fg_color": C["acento_suave"], "text_color": C["primario"], "marker": "●"},
+    "blocked": {"fg_color": "transparent", "text_color": C["revision"], "marker": "!"},
+    "ready": {"fg_color": C["acento_suave"], "text_color": C["primario"], "marker": "→"},
+    "done": {"fg_color": "transparent", "text_color": C["exito"], "marker": "✓"},
+}
+
+
+def secondary_button_kwargs() -> dict[str, object]:
+    """Shared stable treatment for non-primary controls."""
+    return {
+        "fg_color": "transparent",
+        "hover_color": C["secundario_hover"],
+        "border_width": 1,
+        "border_color": C["borde"],
+        "text_color": C["texto_sec"],
+    }
 
 RUTA_PREFS = Path(__file__).parent.parent / "config" / "ui_prefs.json"
 
@@ -280,6 +302,38 @@ class LineaGradiente(tk.Canvas):
             self.create_rectangle(w * i / tramos, 0,
                                   w * (i + 1) / tramos, self._altura,
                                   fill=c, outline=c)
+
+
+class WorkflowStepRow(ctk.CTkFrame):
+    """Compact workflow navigation item; status comes from the caller."""
+
+    def __init__(self, master, *, number: str, label: str, status: str, command=None):
+        super().__init__(master, corner_radius=10, fg_color="transparent")
+        self._command = command
+        self._number = number
+        self._label = label
+        self._marker = ctk.CTkLabel(self, text="", width=24, font=fuente(12, "bold"))
+        self._marker.pack(side="left", padx=(10, 4), pady=7)
+        self._button = ctk.CTkButton(
+            self, text="", command=self._invoke, anchor="w", height=34,
+            corner_radius=8, font=fuente(11, "bold"),
+        )
+        self._button.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=4)
+        self.set_status(status)
+
+    def _invoke(self):
+        if self._command is not None and self._status in {"active", "ready"}:
+            self._command()
+
+    def set_status(self, status: str) -> None:
+        self._status = status if status in WORKFLOW_STEP_STYLES else "pending"
+        style = WORKFLOW_STEP_STYLES[self._status]
+        self.configure(fg_color=style["fg_color"])
+        self._marker.configure(text=style["marker"], text_color=style["text_color"])
+        self._button.configure(
+            text=f"{self._number}  {self._label}", fg_color="transparent",
+            hover_color=C["secundario_hover"], text_color=style["text_color"],
+        )
 
 
 # ---------------------------------------------------------------------------

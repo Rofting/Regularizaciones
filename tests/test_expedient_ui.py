@@ -12,6 +12,7 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import expedient_ui
+import ui_moderna
 from community_onboarding import (
     InvoiceDecision,
     OnboardingConfiguration,
@@ -198,6 +199,66 @@ class SourceFolderAndIssueGuidanceTest(unittest.TestCase):
         self.assertIn("Busca", guidance["what_to_find"])
         self.assertIn("dd/mm/aaaa", guidance["format"])
         self.assertIn("cálculo", guidance["why"])
+
+
+class GuidedWorkspaceStateTest(unittest.TestCase):
+    def test_no_case_prompts_case_creation(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=False, document_count=0, open_issue_count=0, case_status=""
+        )
+
+        self.assertEqual(
+            ("fuentes", "crear_expediente"),
+            (state.active_step, state.next_action),
+        )
+        self.assertEqual("Crear expediente", state.headline)
+
+    def test_open_issue_routes_to_validation(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True, document_count=4, open_issue_count=2,
+            case_status="under_review",
+        )
+
+        self.assertEqual(
+            ("validar", "resolver_incidencias"),
+            (state.active_step, state.next_action),
+        )
+
+    def test_ready_case_routes_to_excel_generation(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True, document_count=4, open_issue_count=0,
+            case_status="ready_for_calculation",
+        )
+
+        self.assertEqual(
+            ("reparto", "generar_excel"),
+            (state.active_step, state.next_action),
+        )
+
+    def test_reconciled_case_routes_to_letters(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True, document_count=4, open_issue_count=0,
+            case_status="reconciled",
+        )
+
+        self.assertEqual(
+            ("cartas", "generar_cartas"),
+            (state.active_step, state.next_action),
+        )
+
+
+class WorkflowVisualStyleTest(unittest.TestCase):
+    def test_secondary_button_style_is_neutral_and_bordered(self):
+        style = ui_moderna.secondary_button_kwargs()
+
+        self.assertEqual("transparent", style["fg_color"])
+        self.assertEqual(1, style["border_width"])
+        self.assertEqual(ui_moderna.C["borde"], style["border_color"])
+
+    def test_every_workflow_state_has_a_style(self):
+        for status in ("pending", "active", "blocked", "ready", "done"):
+            with self.subTest(status=status):
+                self.assertIn(status, ui_moderna.WORKFLOW_STEP_STYLES)
 
 
 class CommunityOnboardingDialogTest(unittest.TestCase):

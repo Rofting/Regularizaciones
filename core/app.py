@@ -175,6 +175,89 @@ class AppGestionFincas(ctk.CTk):
     # -----------------------------------------------------------------------
     def _crear_ui_v3(self):
         """Panel principal del flujo de regularización, diseñado para operar por pasos."""
+        self._crear_ui_guiada()
+        return
+
+    def _crear_ui_guiada(self):
+        """Shell compacto: contexto arriba, cuatro pasos y una tarea principal."""
+        header = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=76)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        ctk.CTkLabel(header, text="Regularizaciones", font=UIM.fuente(22, "bold"), text_color=C["texto"]).pack(side="left", padx=(28, 8), pady=18)
+        ctk.CTkLabel(header, text="Flujo guiado de facturas, lecturas y cartas", font=UIM.fuente(11), text_color=C["texto_sec"]).pack(side="left", pady=18)
+        self.interruptor = UIM.InterruptorTema(header)
+        self.interruptor.pack(side="right", padx=(8, 22))
+        ctk.CTkButton(header, text="Ajustes", command=self._configurar_rutas, height=31, corner_radius=8, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="right", padx=8)
+        self.linea = UIM.LineaGradiente(self, altura=2)
+        self.linea.pack(fill="x")
+        self.interruptor.al_cambiar(self.linea.refrescar)
+
+        context = ctk.CTkFrame(self, fg_color="transparent")
+        context.pack(fill="x", padx=28, pady=(16, 8))
+        context.grid_columnconfigure(0, weight=3)
+        context.grid_columnconfigure(1, weight=2)
+        context.grid_columnconfigure(2, weight=2)
+        for column, label in enumerate(("Comunidad", "Período", "Expediente")):
+            ctk.CTkLabel(context, text=label, font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=column, sticky="w", padx=(0 if column == 0 else 10, 0), pady=(0, 4))
+        self.cb_comunidad = UIM.ComboModerno(context, variable=self.comunidad_actual, values=[], width=420, height=38, command=lambda _v: self._on_comunidad_seleccionada())
+        self.cb_comunidad.grid(row=1, column=0, sticky="ew", padx=(0, 10))
+        self.cb_periodo = UIM.ComboModerno(context, variable=self.periodo_actual, values=[], width=250, height=38, command=lambda _v: self._on_periodo_seleccionado())
+        self.cb_periodo.grid(row=1, column=1, sticky="ew", padx=10)
+        self.cb_expediente = UIM.ComboModerno(context, variable=self.expediente_seleccionado, values=[], width=250, height=38, command=lambda _v: self._on_expediente_seleccionado())
+        self.cb_expediente.grid(row=1, column=2, sticky="ew", padx=10)
+        actions = ctk.CTkFrame(context, fg_color="transparent")
+        actions.grid(row=1, column=3, padx=(14, 0))
+        ctk.CTkButton(actions, text="Nueva comunidad", command=self._nueva_comunidad, height=38, corner_radius=9, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="left", padx=(0, 7))
+        ctk.CTkButton(actions, text="Crear expediente", command=self._accion_crear_expediente, height=38, corner_radius=9, font=UIM.fuente(11, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left")
+        self.banner_periodo = ctk.CTkFrame(self, fg_color=C["acento_suave"], corner_radius=10)
+        self.banner_periodo.pack(fill="x", padx=28, pady=(0, 12))
+        self.lbl_banner = ctk.CTkLabel(self.banner_periodo, text="Selecciona una comunidad y un período para empezar.", font=UIM.fuente(11), text_color=C["primario"], anchor="w")
+        self.lbl_banner.pack(fill="x", padx=14, pady=8)
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=28, pady=(0, 12))
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+        nav = ctk.CTkFrame(body, width=190, fg_color=C["panel"], corner_radius=14, border_width=1, border_color=C["borde"])
+        nav.grid(row=0, column=0, sticky="ns", padx=(0, 12))
+        nav.grid_propagate(False)
+        ctk.CTkLabel(nav, text="Expediente", font=UIM.fuente(11, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=16, pady=(16, 8))
+        self.workflow_step_rows, self.etapas, self.botones = {}, {}, {}
+        rows = (("fuentes", "1", "Fuentes", self._accion_anadir_fuentes), ("validar", "2", "Validar", self._accion_resolver_incidencias), ("reparto", "3", "Reparto", self._accion_generar_excel_expediente), ("cartas", "4", "Cartas", self._accion_generar_cartas_expediente))
+        for key, number, label, command in rows:
+            row = UIM.WorkflowStepRow(nav, number=number, label=label, status="pending", command=command)
+            row.pack(fill="x", padx=8, pady=3)
+            self.workflow_step_rows[key] = row
+            self.etapas[key] = row._marker
+        ctk.CTkButton(nav, text="Gestionar períodos", command=self._nuevo_periodo, height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(18, 5))
+        ctk.CTkButton(nav, text="Abrir salidas", command=self._abrir_salidas, height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs()).pack(fill="x", padx=12)
+
+        work = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=14, border_width=1, border_color=C["borde"])
+        work.grid(row=0, column=1, sticky="nsew")
+        self.workspace_headline = ctk.CTkLabel(work, text="Crea un expediente", font=UIM.fuente(23, "bold"), text_color=C["texto"])
+        self.workspace_headline.pack(anchor="w", padx=24, pady=(24, 4))
+        self.workspace_detail = ctk.CTkLabel(work, text="Elige el intervalo de trabajo para comenzar.", font=UIM.fuente(12), text_color=C["texto_sec"], anchor="w")
+        self.workspace_detail.pack(fill="x", padx=24)
+        self.workspace_primary = ctk.CTkButton(work, text="Crear expediente", command=self._accion_crear_expediente, height=44, corner_radius=10, font=UIM.fuente(13, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"])
+        self.workspace_primary.pack(anchor="w", padx=24, pady=(18, 16))
+        self.botones["Crear expediente · principal"] = self.workspace_primary
+        panel = ctk.CTkFrame(work, fg_color=C["panel_2"], corner_radius=11)
+        panel.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        self.lbl_incidencias_bandeja = ctk.CTkLabel(panel, text="Validación del expediente", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"])
+        self.lbl_incidencias_bandeja.pack(anchor="w", padx=14, pady=(12, 3))
+        self.bandeja_incidencias = ctk.CTkScrollableFrame(panel, fg_color="transparent")
+        self.bandeja_incidencias.pack(fill="both", expand=True, padx=7, pady=(0, 7))
+        self.expediente_metricas = {}
+        self.carril_estado_expediente = ctk.CTkFrame(work, width=1, height=1, fg_color=C["primario"])
+        self.lbl_estado_resumen = self.workspace_detail
+        self.log_area = tk.Text(work, height=1, state="disabled")
+        self.barra_estado = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=34)
+        self.barra_estado.pack(fill="x", side="bottom")
+        self.punto_estado = UIM.PuntoEstado(self.barra_estado); self.punto_estado.pack(side="left", padx=(20, 6), pady=7)
+        self.lbl_estado = ctk.CTkLabel(self.barra_estado, text="Listo", font=UIM.fuente(10), text_color=C["texto"]); self.lbl_estado.pack(side="left")
+        self.lbl_bd = ctk.CTkLabel(self.barra_estado, text="Datos locales", font=UIM.fuente(10), text_color=C["texto_sec"]); self.lbl_bd.pack(side="right", padx=20)
+        self.progreso = ctk.CTkProgressBar(self.barra_estado, mode="indeterminate", width=130, height=5, progress_color=C["primario"])
+
         header = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=78)
         header.pack(fill="x")
         header.pack_propagate(False)
@@ -1095,6 +1178,11 @@ class AppGestionFincas(ctk.CTk):
         )
         self._resumen_ejercicio(summary)
         self._refrescar_bandeja_incidencias(issues)
+        workspace = MOD.get("expedient_ui").guided_workspace_state(
+            has_case=True, document_count=document_count,
+            open_issue_count=open_count, case_status=case.status,
+        )
+        self.after(0, lambda: self._actualizar_workspace(workspace))
 
         def update_metrics():
             metrics = getattr(self, "expediente_metricas", {})
@@ -1142,6 +1230,26 @@ class AppGestionFincas(ctk.CTk):
                 "Revisa las incidencias o completa sus fuentes.",
                 "info",
             )
+
+    def _actualizar_workspace(self, workspace):
+        """Renders the safe next action without bypassing service-level gates."""
+        action_map = {
+            "crear_expediente": ("Crear expediente", self._accion_crear_expediente),
+            "anadir_fuentes": ("Añadir fuentes", self._accion_anadir_fuentes),
+            "resolver_incidencias": ("Resolver incidencias", self._accion_resolver_incidencias),
+            "generar_excel": ("Generar Excel oficial", self._accion_generar_excel_expediente),
+            "calcular_reparto": ("Calcular reparto", self._accion_calcular_reparto_expediente),
+            "generar_cartas": ("Generar cartas", self._accion_generar_cartas_expediente),
+            "abrir_salidas": ("Abrir salidas", self._abrir_salidas),
+        }
+        label, command = action_map[workspace.next_action]
+        self.workspace_headline.configure(text=workspace.headline)
+        self.workspace_detail.configure(text=workspace.detail)
+        self.workspace_primary.configure(text=label, command=command)
+        for step in workspace.steps:
+            row = self.workflow_step_rows.get(step.key)
+            if row is not None:
+                row.set_status(step.status)
 
     def _refrescar_bandeja_incidencias(self, issues=()):
         issues = tuple(issues)
@@ -1338,10 +1446,12 @@ class AppGestionFincas(ctk.CTk):
 
     def _actualizar_etapa(self, activa):
         def _actualizar():
-            colores = {"fuentes": C["primario"], "validacion": C["primario"], "calculo": C["primario"], "cartas": C["primario"], "fin": C["exito"]}
-            orden = ["fuentes", "validacion", "calculo", "cartas", "fin"]
+            aliases = {"validacion": "validar", "calculo": "reparto", "fin": "cartas"}
+            activa_normalizada = aliases.get(activa, activa)
+            colores = {"fuentes": C["primario"], "validar": C["primario"], "reparto": C["primario"], "cartas": C["exito"]}
+            orden = ["fuentes", "validar", "reparto", "cartas"]
             for key, dot in getattr(self, "etapas", {}).items():
-                if orden.index(key) <= orden.index(activa):
+                if key in orden and activa_normalizada in orden and orden.index(key) <= orden.index(activa_normalizada):
                     dot.configure(text="●", text_color=colores.get(key, C["primario"]))
                 else:
                     dot.configure(text="○", text_color=C["texto_sec"])
