@@ -258,6 +258,10 @@ class AppGestionFincas(ctk.CTk):
         self.lbl_bd = ctk.CTkLabel(self.barra_estado, text="Datos locales", font=UIM.fuente(10), text_color=C["texto_sec"]); self.lbl_bd.pack(side="right", padx=20)
         self.progreso = ctk.CTkProgressBar(self.barra_estado, mode="indeterminate", width=130, height=5, progress_color=C["primario"])
 
+        # La composición v3 heredada continúa debajo por compatibilidad, pero
+        # no debe ejecutarse después de la pantalla guiada.
+        return
+
         header = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=78)
         header.pack(fill="x")
         header.pack_propagate(False)
