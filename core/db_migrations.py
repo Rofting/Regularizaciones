@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 MIGRATION_1_SQL = (
@@ -369,12 +369,32 @@ def _migration_5(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE lecturas_vecino ADD COLUMN approved_at TEXT")
 
 
+def _migration_6(connection: sqlite3.Connection) -> None:
+    """Conserva la trazabilidad de la clasificación y de cada extracción."""
+    document_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(source_documents)")
+    }
+    if "classification_confidence" not in document_columns:
+        connection.execute(
+            "ALTER TABLE source_documents ADD COLUMN classification_confidence TEXT"
+        )
+
+    candidate_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(extraction_candidates)")
+    }
+    if "source_context" not in candidate_columns:
+        connection.execute(
+            "ALTER TABLE extraction_candidates ADD COLUMN source_context TEXT"
+        )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
     3: _migration_3,
     4: _migration_4,
     5: _migration_5,
+    6: _migration_6,
 }
 
 

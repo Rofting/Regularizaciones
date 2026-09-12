@@ -12,6 +12,9 @@ _savepoint_counter = count()
 _MISSING_FIELD_CODE = "MISSING_REQUIRED_FIELD"
 _COUNTER_RESET_CODE = "COUNTER_RESET"
 _INVOICE_OUTSIDE_PERIOD_CODE = "INVOICE_OUTSIDE_PERIOD"
+_CLASSIFICATION_REQUIRED_CODE = "DOCUMENT_CLASSIFICATION_REQUIRED"
+_AUTOMATIC_REVIEW_CODES = (_MISSING_FIELD_CODE, _CLASSIFICATION_REQUIRED_CODE)
+_VALIDATION_STATUSES = {"candidate", "validated", "rejected"}
 
 
 @contextmanager
@@ -125,26 +128,42 @@ def _issue_row(connection: sqlite3.Connection, issue_id: int):
     ).fetchone()
 
 
-def record_candidates(connection: sqlite3.Connection, document_id: int,
-                      candidates: Mapping[str, str | None], *, source: str) -> None:
+def record_candidates(
+    connection: sqlite3.Connection,
+    document_id: int,
+    candidates: Mapping[str, str | None],
+    *,
+    source: str,
+    source_context: str | None = None,
+    validation_status: str | None = None,
+    preserve_validated: bool = False,
+) -> None:
+    """Guarda extracciones, sin reemplazar correcciones cuando se solicita."""
     normalized_source = source.strip()
     if not normalized_source:
         raise ValueError("La fuente del candidato es obligatoria")
+    if validation_status is not None and validation_status not in _VALIDATION_STATUSES:
+        raise ValueError("El estado de validación del candidato no es válido")
 
     with _transaction(connection):
         for field_name, value in candidates.items():
             normalized_value = _normalise_value(value)
+            candidate_status = validation_status or (
+                "validated" if normalized_value is not None else "candidate"
+            )
             connection.execute(
                 """INSERT INTO extraction_candidates
-                   (id_document, field_name, value, source, validation_status)
-                   VALUES (?, ?, ?, ?, ?)
+                   (id_document, field_name, value, source, validation_status, source_context)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id_document, field_name) DO UPDATE SET
                        value = excluded.value,
                        source = excluded.source,
-                       validation_status = excluded.validation_status""",
+                       validation_status = excluded.validation_status,
+                       source_context = excluded.source_context
+                   WHERE ? = 0 OR extraction_candidates.validation_status <> 'validated'""",
                 (
-                    document_id, field_name, normalized_value, normalized_source,
-                    "validated" if normalized_value is not None else "candidate",
+                    document_id, field_name, normalized_value, normalized_source, candidate_status,
+                    source_context, int(preserve_validated),
                 ),
             )
 
@@ -288,6 +307,44 @@ def create_review_issue(
             (document_id, normalized_code, normalized_field),
         ).fetchone()
     return review_issue_from_row(row)
+
+
+def create_classification_required_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    message: str,
+) -> ReviewIssue:
+    """Crea la única incidencia abierta necesaria para una fuente desconocida."""
+    return create_review_issue(
+        connection,
+        case_id,
+        document_id,
+        code=_CLASSIFICATION_REQUIRED_CODE,
+        field_name="document_kind",
+        message=message,
+    )
+
+
+def clear_open_automatic_issues(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+) -> None:
+    """Elimina sólo incidencias abiertas que el análisis puede regenerar."""
+    with _transaction(connection):
+        document = connection.execute(
+            "SELECT id_case FROM source_documents WHERE id_document = ?", (document_id,)
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        connection.execute(
+            """DELETE FROM review_issues
+               WHERE id_case = ? AND id_document = ? AND status = 'open'
+                 AND code IN (?, ?)""",
+            (case_id, document_id, *_AUTOMATIC_REVIEW_CODES),
+        )
 
 
 def list_open_issues(connection: sqlite3.Connection, case_id: int) -> tuple[ReviewIssue, ...]:
