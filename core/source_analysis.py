@@ -122,7 +122,10 @@ def classify_headers(
     """Classify a tabular source from its headers without guessing missing data."""
     normalised = tuple(_normalise_header(header) for header in headers)
     has_reading_signal = any("lectura" in header or "contador" in header for header in normalised)
-    has_owner_signal = any("propietario" in header for header in normalised)
+    has_owner_signal = any(
+        "propietario" in header or "propiedad" in header or "vivienda" in header
+        for header in normalised
+    )
     if has_reading_signal:
         return SourceAnalysis.reading(locator=locator)
     if has_owner_signal:

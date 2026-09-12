@@ -36,6 +36,12 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual("unknown", result.kind)
         self.assertTrue(result.review_message.startswith("No se ha podido identificar"))
 
+    def test_property_and_dwelling_headers_classify_owner_lists(self):
+        for header in ("Propiedad", "Vivienda"):
+            with self.subTest(header=header):
+                result = source_analysis.classify_headers((header, "Nombre"), suffix=".csv")
+                self.assertEqual("owners", result.kind)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,3 +28,17 @@
 ## Concerns
 
 None.
+
+## Review-fix addendum
+
+The Task 1 review identified that `Propiedad` and `Vivienda` headers were
+incorrectly returned as `unknown`. A regression test now covers both headers,
+and the owner-list signal treats `propiedad`, `vivienda`, and `propietario` as
+owner indicators while retaining reading-header precedence.
+
+Tests run:
+
+1. Red: `..\\..\\.venv-fase1\\Scripts\\python.exe -m unittest tests.test_source_analysis -v`
+   failed for `Propiedad` and `Vivienda`, each returning `unknown` instead of `owners`.
+2. Green: the same command passed: 4 tests, 0 failures.
+3. `git diff --check` completed without whitespace errors.
