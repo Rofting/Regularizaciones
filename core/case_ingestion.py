@@ -220,8 +220,6 @@ def apply_confirmed_source(
         document = _source_document(connection, document_id)
         if document.id_case != case_id:
             raise LookupError("El documento no pertenece al expediente")
-        if document.status == "validated":
-            return document
 
         case = expedient_service.get_case(connection, case_id)
         period_id = expedient_service.link_case_to_period(connection, case_id)
@@ -232,8 +230,9 @@ def apply_confirmed_source(
             (marker_name,),
         ).fetchone()
 
+        canonical_invoice_id = None
         if document.document_kind == "invoice":
-            _apply_confirmed_invoice(
+            canonical_invoice_id = _apply_confirmed_invoice(
                 connection, case, period_id, document, values, already_applied,
             )
         elif document.document_kind == "reading":
@@ -243,22 +242,19 @@ def apply_confirmed_source(
         else:
             raise ValueError("Sólo se pueden aplicar facturas o lecturas confirmadas")
 
+        if already_applied is None:
+            if document.document_kind != "invoice" or canonical_invoice_id is not None:
+                gestor_bd.marcar_archivo_procesado(
+                    connection,
+                    marker_name,
+                    hash_md5=document.sha256,
+                    id_factura=canonical_invoice_id,
+                    notas=f"Fuente confirmada del expediente {case_id}",
+                    commit=False,
+                )
         if _has_open_document_issues(connection, document_id):
             return _source_document(connection, document_id)
 
-        if already_applied is None:
-            invoice_row = connection.execute(
-                "SELECT id_factura FROM facturas WHERE archivo_origen=? ORDER BY id_factura LIMIT 1",
-                (str(document.archived_path),),
-            ).fetchone()
-            gestor_bd.marcar_archivo_procesado(
-                connection,
-                marker_name,
-                hash_md5=document.sha256,
-                id_factura=invoice_row["id_factura"] if invoice_row is not None else None,
-                notas=f"Fuente confirmada del expediente {case_id}",
-                commit=False,
-            )
         connection.execute(
             "UPDATE source_documents SET status='validated' WHERE id_document=?",
             (document_id,),
@@ -306,10 +302,10 @@ def _apply_confirmed_invoice(
     document: SourceDocument,
     values: Mapping[str, str],
     already_applied: sqlite3.Row | None,
-) -> None:
+) -> int | None:
     _required_confirmed(values, "tipo_suministro", "importe_total")
     if already_applied is not None:
-        return
+        return already_applied["id_factura"]
 
     numeric_fields = (
         "consumo_total", "termino_fijo", "termino_variable", "impuestos", "iva",
@@ -336,12 +332,36 @@ def _apply_confirmed_invoice(
     )
     if invoice_id is None:
         existing = connection.execute(
-            """SELECT id_factura FROM facturas
+            """SELECT id_factura,id_periodo,tipo_suministro,importe_total FROM facturas
                WHERE id_comunidad=? AND num_factura IS ? AND cups_o_referencia IS ?""",
             (case.community_id, invoice.get("num_factura"), invoice.get("cups_o_referencia")),
         ).fetchone()
         if existing is None:
             raise ValueError("No se ha podido identificar la factura canónica")
+        if existing["id_periodo"] not in (None, period_id):
+            document_review.create_review_issue(
+                connection, case.id_case, document.id_document,
+                code="INVOICE_PERIOD_CONFLICT", field_name="id_periodo",
+                message="La factura canónica ya pertenece a otro período",
+                detected_value=str(existing["id_periodo"]),
+            )
+            return None
+        if (
+            existing["tipo_suministro"] != invoice["tipo_suministro"]
+            or abs(existing["importe_total"] - invoice["importe_total"]) > 0.01
+        ):
+            document_review.create_review_issue(
+                connection, case.id_case, document.id_document,
+                code="INVOICE_CONFLICT", field_name="importe_total",
+                message="La factura canónica contradice los importes o suministro confirmados",
+                detected_value=str(existing["importe_total"]),
+            )
+            return None
+        if existing["id_periodo"] is None:
+            connection.execute(
+                "UPDATE facturas SET id_periodo=? WHERE id_factura=?",
+                (period_id, existing["id_factura"]),
+            )
         invoice_id = existing["id_factura"]
 
     for component_key, candidate_name in (
@@ -358,6 +378,7 @@ def _apply_confirmed_invoice(
                VALUES (?, ?, ?, 'EUR')""",
             (invoice_id, component_key, amount),
         )
+    return invoice_id
 
 
 def _apply_confirmed_readings(

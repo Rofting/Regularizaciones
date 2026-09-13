@@ -190,6 +190,63 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
         self.assertEqual(2, self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0])
 
+    def test_pending_invoice_retry_keeps_one_canonical_invoice(self):
+        document = self.add_confirmed_invoice()
+        document_review.create_review_issue(
+            self.connection, self.case.id_case, document.id_document,
+            code="CHECK", field_name="proveedor", message="Confirmar proveedor",
+        )
+        for _ in range(2):
+            case_ingestion.apply_confirmed_source(
+                self.connection, self.case.id_case, document.id_document,
+            )
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM archivos_procesados").fetchone()[0])
+        self.assertEqual("under_review", self.document_status(document))
+
+    def test_validated_source_without_marker_is_applied_to_canonical_data(self):
+        document = self.add_confirmed_invoice()
+        document_review.validate_case_ready(self.connection, self.case.id_case)
+        self.assertEqual("validated", self.document_status(document))
+
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM archivos_procesados").fetchone()[0])
+
+    def test_legacy_duplicate_invoice_is_linked_to_case_period(self):
+        document = self.add_confirmed_invoice()
+        document_review.record_candidates(
+            self.connection, document.id_document,
+            {"num_factura": "INV-1", "cups_o_referencia": "CUPS-1"},
+            source="manual",
+        )
+        self.connection.execute(
+            """INSERT INTO facturas
+               (id_comunidad,tipo_suministro,num_factura,cups_o_referencia,
+                importe_total,archivo_origen)
+               VALUES (?, 'GAS', 'INV-1', 'CUPS-1', 128.10, 'legacy.pdf')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+
+        case = expedient_service.get_case(self.connection, self.case.id_case)
+        invoice = self.connection.execute(
+            "SELECT id_periodo FROM facturas WHERE num_factura='INV-1'"
+        ).fetchone()
+        marker = self.connection.execute(
+            "SELECT id_factura FROM archivos_procesados"
+        ).fetchone()
+        self.assertEqual(case.period_id, invoice["id_periodo"])
+        self.assertEqual(1, marker["id_factura"])
+        self.assertEqual("validated", self.document_status(document))
+
     def test_unconfirmed_required_value_cannot_be_applied(self):
         document = self.add_confirmed_invoice()
         self.connection.execute(
@@ -234,6 +291,31 @@ class ExpedientFlowTest(unittest.TestCase):
             self.connection, issue.id_issue, consumption="15", reason="Estimación aprobada", approved_by="Jose",
         )
         case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        self.assertEqual(115.0, self.connection.execute(
+            "SELECT valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura DESC"
+        ).fetchone()[0])
+        self.assertEqual("validated", self.document_status(document))
+
+    def test_normalized_owner_code_allows_counter_reset_approval(self):
+        document = self.add_confirmed_reading(final=5)
+        self.connection.execute(
+            "UPDATE propietarios SET codigo_vivienda='A.' WHERE id_comunidad=?",
+            (self.community_id,),
+        )
+        self.connection.commit()
+
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        document_review.approve_counter_reset_estimate(
+            self.connection, issue.id_issue, consumption="15",
+            reason="Estimación aprobada", approved_by="Jose",
+        )
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+
         self.assertEqual(115.0, self.connection.execute(
             "SELECT valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura DESC"
         ).fetchone()[0])

@@ -275,7 +275,7 @@ def apply_confirmed_readings(
     por un reinicio de contador). El llamador conserva la transacción completa.
     """
     owners = {
-        _normalizar_vivienda(row["codigo_vivienda"]): row["id_propietario"]
+        _normalizar_vivienda(row["codigo_vivienda"]): row
         for row in con.execute(
             "SELECT id_propietario,codigo_vivienda FROM propietarios WHERE id_comunidad=?",
             (community_id,),
@@ -290,8 +290,8 @@ def apply_confirmed_readings(
         service = str(reading.get("tipo") or "").strip().upper()
         if not property_code or service not in {"ACS", "CALEFACCION"}:
             raise ValueError("La lectura confirmada debe incluir vivienda y tipo válidos")
-        owner_id = owners.get(_normalizar_vivienda(property_code))
-        if owner_id is None:
+        owner = owners.get(_normalizar_vivienda(property_code))
+        if owner is None:
             _create_reading_issue(
                 con, case_id, document_id, "UNMATCHED_OWNER",
                 f"reading.{property_code}.{service}",
@@ -299,12 +299,13 @@ def apply_confirmed_readings(
             )
             pending_review = True
             continue
+        owner_id = owner["id_propietario"]
 
         initial_date = _confirmed_date(reading.get("fecha_ant"))
         final_date = _confirmed_date(reading.get("fecha_act"))
         initial_value = _confirmed_number(reading.get("val_ant"))
         final_value = _confirmed_number(reading.get("val_act"))
-        field_name = f"reading.{property_code}.{service}"
+        field_name = f"reading.{owner['codigo_vivienda']}.{service}"
         reset_status = _counter_reset_status(con, document_id, field_name)
 
         if final_value < initial_value:
