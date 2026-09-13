@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import sys
 import tempfile
 import unittest
@@ -124,6 +125,129 @@ class ExpedientFlowTest(unittest.TestCase):
             "fecha_fin": "2026-01-31",
             "importe_total": "20.00",
         })
+
+    def add_confirmed_invoice(self, total="128.10"):
+        result = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case, source_path=self.source_path,
+            archive_root=self.archive_root, document_kind="invoice",
+            candidates={"tipo_suministro": "GAS", "fecha_factura": "2026-01-31",
+                        "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31",
+                        "termino_fijo": "28.10", "termino_variable": "100.00",
+                        "importe_total": total},
+            required_fields=(),
+        )
+        return result.document
+
+    def add_confirmed_reading(self, final=120):
+        self.connection.execute(
+            """INSERT OR IGNORE INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?, 'A', 'Vecino A')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        result = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case, source_path=self.reading_file,
+            archive_root=self.archive_root, document_kind="reading",
+            candidates={"vecinos": json.dumps([
+                {"vivienda": "A", "tipo": "ACS", "fecha_ant": "2026-01-01",
+                 "val_ant": 100, "fecha_act": "2026-01-31", "val_act": final}
+            ])}, required_fields=(),
+        )
+        return result.document
+
+    def document_status(self, document):
+        return self.connection.execute(
+            "SELECT status FROM source_documents WHERE id_document=?",
+            (document.id_document,),
+        ).fetchone()[0]
+
+    def test_confirmed_invoice_is_available_to_case_excel_export(self):
+        document = self.add_confirmed_invoice()
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        invoice = self.connection.execute("SELECT * FROM facturas").fetchone()
+        case = expedient_service.get_case(self.connection, self.case.id_case)
+        self.assertEqual(128.10, invoice["importe_total"])
+        self.assertEqual(case.period_id, invoice["id_periodo"])
+        self.assertIsNotNone(case.period_id)
+        self.assertEqual({"fixed": 28.10, "variable": 100.0, "total": 128.10}, {
+            row[0]: row[1] for row in self.connection.execute(
+                "SELECT component_key, amount FROM invoice_components")
+        })
+        self.assertEqual("validated", self.document_status(document))
+
+    def test_confirmed_reading_is_available_as_reading_not_invoice(self):
+        document = self.add_confirmed_reading()
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        self.assertEqual([100.0, 120.0], [row[0] for row in self.connection.execute(
+            "SELECT valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura")])
+        self.assertEqual("validated", self.document_status(document))
+
+    def test_applying_same_document_twice_does_not_duplicate_canonical_rows(self):
+        for document in (self.add_confirmed_invoice(), self.add_confirmed_reading()):
+            for _ in range(2):
+                case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        self.assertEqual(2, self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0])
+
+    def test_unconfirmed_required_value_cannot_be_applied(self):
+        document = self.add_confirmed_invoice()
+        self.connection.execute(
+            "UPDATE extraction_candidates SET validation_status='candidate' WHERE field_name='importe_total'"
+        )
+        with self.assertRaises(ValueError):
+            case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        self.assertNotEqual("validated", self.document_status(document))
+
+    def test_unconfirmed_optional_values_are_not_written_as_zero(self):
+        document = self.add_confirmed_invoice()
+        document_review.record_candidates(
+            self.connection, document.id_document, {"consumo_total": "999"},
+            source="analysis", validation_status="candidate",
+        )
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        self.assertIsNone(self.connection.execute("SELECT consumo_total FROM facturas").fetchone()[0])
+
+    def test_failed_source_validation_rolls_back_canonical_insertion(self):
+        document = self.add_confirmed_invoice()
+        self.connection.execute("""CREATE TEMP TRIGGER fail_source_validation
+            BEFORE UPDATE OF status ON source_documents WHEN NEW.status='validated'
+            BEGIN SELECT RAISE(ABORT, 'validation failure'); END""")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "validation failure"):
+            case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM archivos_procesados").fetchone()[0])
+        self.assertNotEqual("validated", self.document_status(document))
+
+    def test_counter_reset_creates_review_without_approving_negative_use(self):
+        document = self.add_confirmed_reading(final=5)
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        final = self.connection.execute(
+            "SELECT valor_acumulado,estado FROM lecturas_vecino ORDER BY fecha_lectura DESC"
+        ).fetchone()
+        self.assertEqual((5.0, "contador_averiado"), tuple(final))
+        self.assertEqual("COUNTER_RESET", self.open_issue_code())
+        self.assertEqual("under_review", self.document_status(document))
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        document_review.approve_counter_reset_estimate(
+            self.connection, issue.id_issue, consumption="15", reason="Estimación aprobada", approved_by="Jose",
+        )
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        self.assertEqual(115.0, self.connection.execute(
+            "SELECT valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura DESC"
+        ).fetchone()[0])
+        self.assertEqual("validated", self.document_status(document))
+
+    def test_document_from_another_case_cannot_be_applied(self):
+        document = self.add_confirmed_invoice()
+        other_case = expedient_service.create_case(
+            self.connection, self.community_id, name="Otro expediente",
+            start_date=date(2026, 2, 1), end_date=date(2026, 2, 28),
+        )
+        with self.assertRaises(LookupError):
+            case_ingestion.apply_confirmed_source(self.connection, other_case.id_case, document.id_document)
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
 
     def test_reading_document_creates_no_invoice_missing_field_issues(self):
         result = case_ingestion.add_analysed_document_to_case(

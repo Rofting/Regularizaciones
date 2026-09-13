@@ -22,12 +22,14 @@ import re
 import sqlite3
 import shutil
 import argparse
+import math
 from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
 from gestor_bd import conectar, crear_bd, marcar_archivo_procesado, archivo_ya_procesado
 from lector_pdf import procesar_archivo
+import document_review
 
 BASE_DIR        = Path(__file__).parent.parent
 RUTA_BD         = BASE_DIR / "data" / "gestion.db"
@@ -256,6 +258,184 @@ def importar_lecturas_pdf(ruta_pdf: str, ruta_bd: str,
 # ---------------------------------------------------------------------------
 # UTILIDADES
 # ---------------------------------------------------------------------------
+
+def apply_confirmed_readings(
+    con: sqlite3.Connection,
+    *,
+    case_id: int,
+    document_id: int,
+    community_id: int,
+    period_id: int,
+    source_path: str,
+    readings: list[dict],
+) -> bool:
+    """Aplica lecturas ya confirmadas sin confirmar ni reemplazar datos dudosos.
+
+    Devuelve ``True`` cuando la fuente sigue pendiente de revisión (por ejemplo,
+    por un reinicio de contador). El llamador conserva la transacción completa.
+    """
+    owners = {
+        _normalizar_vivienda(row["codigo_vivienda"]): row["id_propietario"]
+        for row in con.execute(
+            "SELECT id_propietario,codigo_vivienda FROM propietarios WHERE id_comunidad=?",
+            (community_id,),
+        )
+    }
+    pending_review = False
+
+    for reading in readings:
+        if not isinstance(reading, dict):
+            raise ValueError("Cada lectura confirmada debe ser un objeto")
+        property_code = str(reading.get("vivienda") or "").strip()
+        service = str(reading.get("tipo") or "").strip().upper()
+        if not property_code or service not in {"ACS", "CALEFACCION"}:
+            raise ValueError("La lectura confirmada debe incluir vivienda y tipo válidos")
+        owner_id = owners.get(_normalizar_vivienda(property_code))
+        if owner_id is None:
+            _create_reading_issue(
+                con, case_id, document_id, "UNMATCHED_OWNER",
+                f"reading.{property_code}.{service}",
+                "La vivienda de la lectura no existe entre los propietarios",
+            )
+            pending_review = True
+            continue
+
+        initial_date = _confirmed_date(reading.get("fecha_ant"))
+        final_date = _confirmed_date(reading.get("fecha_act"))
+        initial_value = _confirmed_number(reading.get("val_ant"))
+        final_value = _confirmed_number(reading.get("val_act"))
+        field_name = f"reading.{property_code}.{service}"
+        reset_status = _counter_reset_status(con, document_id, field_name)
+
+        if final_value < initial_value:
+            if reset_status == "resolved":
+                # La aprobación ya sustituyó el valor final por una lectura virtual.
+                continue
+            if reset_status == "open":
+                pending_review = True
+                continue
+            initial_ok = _insert_confirmed_reading(
+                con, owner_id, period_id, service, initial_date, initial_value,
+                "real", source_path,
+            )
+            final_ok = _insert_confirmed_reading(
+                con, owner_id, period_id, service, final_date, final_value,
+                "contador_averiado", source_path,
+                "lectura inferior a la anterior; pendiente de estimación aprobada",
+            )
+            if not initial_ok or not final_ok:
+                _create_reading_issue(
+                    con, case_id, document_id, "READING_CONFLICT", field_name,
+                    "La lectura confirmada contradice una lectura canónica existente",
+                )
+            else:
+                counter_field = (
+                    "estado_contador_acs" if service == "ACS" else "estado_contador_cal"
+                )
+                con.execute(
+                    f"UPDATE propietarios SET {counter_field}='averiado' WHERE id_propietario=?",
+                    (owner_id,),
+                )
+                _create_reading_issue(
+                    con, case_id, document_id, "COUNTER_RESET", field_name,
+                    "El contador disminuye y requiere una estimación aprobada",
+                    f"{initial_value} -> {final_value}",
+                )
+            pending_review = True
+            continue
+
+        initial_ok = _insert_confirmed_reading(
+            con, owner_id, period_id, service, initial_date, initial_value,
+            "real", source_path,
+        )
+        final_ok = _insert_confirmed_reading(
+            con, owner_id, period_id, service, final_date, final_value,
+            "real", source_path,
+        )
+        if not initial_ok or not final_ok:
+            _create_reading_issue(
+                con, case_id, document_id, "READING_CONFLICT", field_name,
+                "La lectura confirmada contradice una lectura canónica existente",
+            )
+            pending_review = True
+
+    return pending_review
+
+
+def _confirmed_date(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("La fecha de una lectura confirmada es obligatoria")
+    normalized = value.strip()
+    try:
+        return datetime.strptime(normalized, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        raise ValueError("La fecha de una lectura confirmada no es válida") from None
+
+
+def _confirmed_number(value: object) -> float:
+    if isinstance(value, bool) or value is None:
+        raise ValueError("El valor de una lectura confirmada es obligatorio")
+    try:
+        number = float(str(value).strip().replace(",", "."))
+    except ValueError:
+        raise ValueError("El valor de una lectura confirmada debe ser numérico") from None
+    if not math.isfinite(number):
+        raise ValueError("El valor de una lectura confirmada debe ser finito")
+    return number
+
+
+def _insert_confirmed_reading(
+    con: sqlite3.Connection,
+    owner_id: int,
+    period_id: int,
+    service: str,
+    reading_date: str,
+    value: float,
+    state: str,
+    source_path: str,
+    notes: str | None = None,
+) -> bool:
+    existing = con.execute(
+        """SELECT valor_acumulado FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
+        (owner_id, service, reading_date),
+    ).fetchone()
+    if existing is not None:
+        return abs(existing["valor_acumulado"] - value) <= 0.01
+    con.execute(
+        """INSERT INTO lecturas_vecino
+           (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente,notas)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (owner_id, period_id, service, reading_date, value, state, source_path, notes),
+    )
+    return True
+
+
+def _counter_reset_status(
+    con: sqlite3.Connection, document_id: int, field_name: str
+) -> str | None:
+    row = con.execute(
+        """SELECT status FROM review_issues
+           WHERE id_document=? AND code='COUNTER_RESET' AND field_name=?
+           ORDER BY id_issue DESC LIMIT 1""",
+        (document_id, field_name),
+    ).fetchone()
+    return row["status"] if row is not None else None
+
+
+def _create_reading_issue(
+    con: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    code: str,
+    field_name: str,
+    message: str,
+    detected_value: str | None = None,
+) -> None:
+    document_review.create_review_issue(
+        con, case_id, document_id, code=code, field_name=field_name,
+        message=message, detected_value=detected_value,
+    )
 
 def _normalizar_vivienda(codigo: str) -> str:
     """

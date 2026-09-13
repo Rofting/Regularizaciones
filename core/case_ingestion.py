@@ -1,5 +1,6 @@
 import sqlite3
 import json
+from decimal import Decimal, InvalidOperation
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import count
@@ -8,6 +9,8 @@ from typing import Callable, Collection, Iterator, Mapping
 
 import document_review
 import expedient_service
+import gestor_bd
+from importar_lecturas_metrigest import apply_confirmed_readings
 from expedient_models import RegularizationCase, SourceDocument, document_from_row
 from source_analysis import SourceAnalysis, analyse_source
 
@@ -201,6 +204,195 @@ def assert_case_belongs_to_community(
     if case.community_id != community_id:
         raise LookupError("El expediente seleccionado pertenece a otra comunidad")
     return case
+
+
+def apply_confirmed_source(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+) -> SourceDocument:
+    """Copia exclusivamente las extracciones confirmadas a las tablas canónicas.
+
+    La fuente sólo pasa a ``validated`` después de insertar sus datos canónicos
+    y de registrar su identidad para que los reintentos sean idempotentes.
+    """
+    with _transaction(connection):
+        document = _source_document(connection, document_id)
+        if document.id_case != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        if document.status == "validated":
+            return document
+
+        case = expedient_service.get_case(connection, case_id)
+        period_id = expedient_service.link_case_to_period(connection, case_id)
+        values = _confirmed_candidate_values(connection, document_id)
+        marker_name = f"source_document:{document_id}"
+        already_applied = connection.execute(
+            "SELECT id_factura FROM archivos_procesados WHERE nombre_archivo=?",
+            (marker_name,),
+        ).fetchone()
+
+        if document.document_kind == "invoice":
+            _apply_confirmed_invoice(
+                connection, case, period_id, document, values, already_applied,
+            )
+        elif document.document_kind == "reading":
+            _apply_confirmed_readings(
+                connection, case, period_id, document, values, already_applied,
+            )
+        else:
+            raise ValueError("Sólo se pueden aplicar facturas o lecturas confirmadas")
+
+        if _has_open_document_issues(connection, document_id):
+            return _source_document(connection, document_id)
+
+        if already_applied is None:
+            invoice_row = connection.execute(
+                "SELECT id_factura FROM facturas WHERE archivo_origen=? ORDER BY id_factura LIMIT 1",
+                (str(document.archived_path),),
+            ).fetchone()
+            gestor_bd.marcar_archivo_procesado(
+                connection,
+                marker_name,
+                hash_md5=document.sha256,
+                id_factura=invoice_row["id_factura"] if invoice_row is not None else None,
+                notas=f"Fuente confirmada del expediente {case_id}",
+                commit=False,
+            )
+        connection.execute(
+            "UPDATE source_documents SET status='validated' WHERE id_document=?",
+            (document_id,),
+        )
+        return _source_document(connection, document_id)
+
+
+def _confirmed_candidate_values(
+    connection: sqlite3.Connection, document_id: int,
+) -> dict[str, str]:
+    rows = connection.execute(
+        """SELECT field_name,value FROM extraction_candidates
+           WHERE id_document=? AND validation_status='validated'
+             AND value IS NOT NULL AND trim(value)<>''""",
+        (document_id,),
+    ).fetchall()
+    return {row["field_name"]: row["value"] for row in rows}
+
+
+def _required_confirmed(values: Mapping[str, str], *fields: str) -> None:
+    missing = [field for field in fields if field not in values]
+    if missing:
+        raise ValueError(
+            "Faltan valores confirmados requeridos: " + ", ".join(missing)
+        )
+
+
+def _confirmed_number(values: Mapping[str, str], field: str) -> float | None:
+    value = values.get(field)
+    if value is None:
+        return None
+    try:
+        number = Decimal(value.replace(",", "."))
+    except (AttributeError, InvalidOperation):
+        raise ValueError(f"El valor confirmado de {field} debe ser numérico") from None
+    if not number.is_finite():
+        raise ValueError(f"El valor confirmado de {field} debe ser finito")
+    return float(number)
+
+
+def _apply_confirmed_invoice(
+    connection: sqlite3.Connection,
+    case: RegularizationCase,
+    period_id: int,
+    document: SourceDocument,
+    values: Mapping[str, str],
+    already_applied: sqlite3.Row | None,
+) -> None:
+    _required_confirmed(values, "tipo_suministro", "importe_total")
+    if already_applied is not None:
+        return
+
+    numeric_fields = (
+        "consumo_total", "termino_fijo", "termino_variable", "impuestos", "iva",
+    )
+    invoice = {
+        "id_comunidad": case.community_id,
+        "id_periodo": period_id,
+        "tipo_suministro": values["tipo_suministro"].strip().upper(),
+        "importe_total": _confirmed_number(values, "importe_total"),
+        "archivo_origen": str(document.archived_path),
+    }
+    for field in (
+        "proveedor", "cups_o_referencia", "num_factura", "fecha_factura",
+        "fecha_inicio", "fecha_fin", "unidad_consumo",
+    ):
+        if field in values:
+            invoice[field] = values[field]
+    for field in numeric_fields:
+        if field in values:
+            invoice[field] = _confirmed_number(values, field)
+
+    invoice_id = gestor_bd.insertar_factura(
+        connection, invoice, commit=False, preserve_missing_as_null=True,
+    )
+    if invoice_id is None:
+        existing = connection.execute(
+            """SELECT id_factura FROM facturas
+               WHERE id_comunidad=? AND num_factura IS ? AND cups_o_referencia IS ?""",
+            (case.community_id, invoice.get("num_factura"), invoice.get("cups_o_referencia")),
+        ).fetchone()
+        if existing is None:
+            raise ValueError("No se ha podido identificar la factura canónica")
+        invoice_id = existing["id_factura"]
+
+    for component_key, candidate_name in (
+        ("fixed", "termino_fijo"),
+        ("variable", "termino_variable"),
+        ("total", "importe_total"),
+    ):
+        amount = _confirmed_number(values, candidate_name)
+        if amount is None:
+            continue
+        connection.execute(
+            """INSERT OR IGNORE INTO invoice_components
+               (id_factura,component_key,amount,unit)
+               VALUES (?, ?, ?, 'EUR')""",
+            (invoice_id, component_key, amount),
+        )
+
+
+def _apply_confirmed_readings(
+    connection: sqlite3.Connection,
+    case: RegularizationCase,
+    period_id: int,
+    document: SourceDocument,
+    values: Mapping[str, str],
+    already_applied: sqlite3.Row | None,
+) -> None:
+    _required_confirmed(values, "vecinos")
+    if already_applied is not None:
+        return
+    try:
+        readings = json.loads(values["vecinos"])
+    except json.JSONDecodeError:
+        raise ValueError("Las lecturas confirmadas no tienen un formato válido") from None
+    if not isinstance(readings, list):
+        raise ValueError("Las lecturas confirmadas deben ser una lista")
+    apply_confirmed_readings(
+        connection,
+        case_id=case.id_case,
+        document_id=document.id_document,
+        community_id=case.community_id,
+        period_id=period_id,
+        source_path=str(document.archived_path),
+        readings=readings,
+    )
+
+
+def _has_open_document_issues(connection: sqlite3.Connection, document_id: int) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM review_issues WHERE id_document=? AND status='open'",
+        (document_id,),
+    ).fetchone() is not None
 
 
 def add_document_to_case(

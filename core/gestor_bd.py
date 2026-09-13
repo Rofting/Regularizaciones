@@ -346,12 +346,23 @@ def obtener_o_crear_periodo(con: sqlite3.Connection, id_comunidad: int,
     return cur.lastrowid
 
 
-def insertar_factura(con: sqlite3.Connection, datos: dict) -> int | None:
+def insertar_factura(
+    con: sqlite3.Connection,
+    datos: dict,
+    *,
+    commit: bool = True,
+    preserve_missing_as_null: bool = False,
+) -> int | None:
     """
     Inserta una factura. Devuelve id_factura o None si ya existía (duplicado).
     'datos' debe tener al menos: id_comunidad, tipo_suministro, importe_total.
     Anti-duplicados por (id_comunidad, num_factura, cups_o_referencia).
     """
+    def optional_number(name: str) -> float | None:
+        if preserve_missing_as_null:
+            return datos.get(name)
+        return datos.get(name, 0.0)
+
     try:
         cur = con.execute("""
             INSERT INTO facturas (
@@ -380,17 +391,18 @@ def insertar_factura(con: sqlite3.Connection, datos: dict) -> int | None:
             "fecha_inicio":      datos.get("fecha_inicio"),
             "fecha_fin":         datos.get("fecha_fin"),
             "dias_facturados":   datos.get("dias_facturados"),
-            "consumo_total":     datos.get("consumo_total", 0.0),
+            "consumo_total":     optional_number("consumo_total"),
             "unidad_consumo":    datos.get("unidad_consumo"),
-            "termino_fijo":      datos.get("termino_fijo", 0.0),
-            "termino_variable":  datos.get("termino_variable", 0.0),
-            "impuestos":         datos.get("impuestos", 0.0),
-            "iva":               datos.get("iva", 0.0),
+            "termino_fijo":      optional_number("termino_fijo"),
+            "termino_variable":  optional_number("termino_variable"),
+            "impuestos":         optional_number("impuestos"),
+            "iva":               optional_number("iva"),
             "importe_total":     datos.get("importe_total"),
             "archivo_origen":    datos.get("archivo_origen"),
             "notas":             datos.get("notas"),
         })
-        con.commit()
+        if commit:
+            con.commit()
         return cur.lastrowid
     except sqlite3.IntegrityError:
         return None  # duplicado — ya estaba en la BD
@@ -431,14 +443,16 @@ def insertar_lectura_vecino(con: sqlite3.Connection, datos: dict) -> int | None:
 
 def marcar_archivo_procesado(con: sqlite3.Connection, nombre: str,
                               hash_md5: str = None, id_factura: int = None,
-                              resultado: str = "ok", notas: str = None) -> None:
+                              resultado: str = "ok", notas: str = None,
+                              *, commit: bool = True) -> None:
     """Registra un PDF como procesado para no volver a ingerirlo."""
     try:
         con.execute("""
             INSERT INTO archivos_procesados (nombre_archivo, hash_md5, id_factura, resultado, notas)
             VALUES (?, ?, ?, ?, ?)
         """, (nombre, hash_md5, id_factura, resultado, notas))
-        con.commit()
+        if commit:
+            con.commit()
     except sqlite3.IntegrityError:
         pass  # ya estaba registrado
 
