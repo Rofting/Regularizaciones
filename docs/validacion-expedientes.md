@@ -30,6 +30,61 @@ las fuentes, los perfiles runtime y las plantillas instaladas son locales.
 6. **Confirmar valor y motivo; el sistema conserva la auditoría.**
 7. **Esperar el estado Listo para cálculo antes de usar las salidas posteriores.**
 
+## Flujo unificado de fuentes
+
+Sigue este recorrido para un expediente nuevo. Todos los originales se conservan
+sin cambios; la aplicación trabaja con sus copias archivadas dentro del
+expediente.
+
+1. Crea o selecciona la comunidad con **+ Comunidad**. Para una comunidad que
+   aún no existe, elige **Registro rápido** o **Alta guiada desde fuentes** y
+   completa su código y nombre.
+2. Selecciona la comunidad y usa **Crear expediente** para indicar el nombre y
+   las fechas inicial y final del período que vas a regularizar.
+3. En **Añadir fuentes**, pulsa **Añadir carpeta** para incorporar todos los
+   PDF, XLSX, XLS y CSV visibles de una carpeta, o **Añadir archivos** para
+   escoger documentos concretos. La carpeta puede contener una mezcla de
+   facturas, lecturas y listados de propietarios; no hace falta separarlos
+   antes.
+4. Lee el cuadro **Fuentes analizadas** al finalizar: agrupa las copias nuevas
+   y duplicadas como *facturas detectadas*, *lecturas*, *listados de
+   propietarios*, *otros documentos* y *documentos por revisar*. Una lectura
+   o un listado no recibe los campos obligatorios de una factura. Cada
+   *documento por revisar* abre una sola incidencia de clasificación; no
+   confirmes que es una factura salvo que el original lo demuestre.
+5. Abre **Resolver incidencias**. Antes de confirmar, usa **Ver contexto** para
+   consultar página/fragmento de PDF u hoja/celda de Excel cuando estén
+   disponibles, y **Abrir archivo** para ver la copia archivada. Escribe el
+   valor confirmado y el motivo o fuente que lo respalda. Para una clasificación
+   desconocida, selecciona el tipo correcto y explica el motivo; la app vuelve
+   a analizar la copia para crear sólo los datos que requiere ese tipo.
+6. Si cambian los originales, se corrige el extractor o quieres actualizar las
+   propuestas automáticas, usa **Reanalizar fuentes**. Esta acción reutiliza las
+   copias archivadas del expediente: no reimporta ni modifica los originales y
+   conserva las correcciones confirmadas manualmente. Revisa de nuevo su resumen
+   y sus incidencias.
+7. Con cero incidencias abiertas y el estado **Listo para cálculo**, pulsa
+   **Generar Excel oficial**, revisa el libro publicado y después **Calcular
+   reparto final**. Continúa con **Generar cartas**, revisa conceptos,
+   destinatarios y una muestra de los archivos antes de enviarlos manualmente.
+   Excel, reparto y cartas siguen bloqueados mientras quede una incidencia
+   abierta.
+
+## Empezar con una base vacía de forma segura
+
+Para una aceptación manual que requiera una base limpia, primero termina el
+trabajo en curso y cierra la aplicación para que no quede otra sesión usando la
+base. No borres, renombres ni sustituyas `data/gestion.db` desde el explorador.
+Al volver a abrir la aplicación, entra en **Configurar rutas** y selecciona
+**Nueva base segura**. Confirma el diálogo sólo si quieres iniciar de cero.
+
+La acción crea y verifica una copia de seguridad de la base anterior en la
+carpeta `backups` situada junto a la base configurada antes de publicar una
+base vacía. La ruta de esa copia aparece al terminar. La base anterior nunca se
+elimina silenciosamente: si la copia o la nueva base no superan la verificación,
+el reinicio se cancela y la base anterior se conserva. Conserva la ruta indicada
+para poder recuperar el contexto de la prueba anterior.
+
 ## Alta guiada desde fuentes
 
 El asistente permite crear una comunidad sin disponer de un Excel manual

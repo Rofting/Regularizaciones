@@ -402,6 +402,59 @@ class ExpedientFlowTest(unittest.TestCase):
 
         self.assertEqual(0, result.open_issue_count)
 
+    def test_mixed_classified_sources_create_only_the_unknown_review(self):
+        second_reading = Path(self.directory.name) / "lecturas-b.csv"
+        second_reading.write_text("contador;lectura\nB;24\n", encoding="utf-8")
+        sources = (
+            (
+                self.source_path,
+                SourceAnalysis.invoice({
+                    "fecha_inicio": "2026-01-01",
+                    "fecha_fin": "2026-01-31",
+                    "importe_total": "123.45",
+                }),
+            ),
+            (self.reading_file, SourceAnalysis.reading()),
+            (second_reading, SourceAnalysis.reading()),
+            (self.unknown_file, SourceAnalysis.unknown()),
+        )
+
+        results = tuple(
+            case_ingestion.add_analysed_document_to_case(
+                self.connection,
+                self.case.id_case,
+                source_path=source_path,
+                archive_root=self.archive_root,
+                analysis=analysis,
+            )
+            for source_path, analysis in sources
+        )
+        kind_counts = {
+            row["document_kind"]: row["count"]
+            for row in self.connection.execute(
+                """SELECT document_kind, COUNT(*) AS count
+                   FROM source_documents WHERE id_case = ?
+                   GROUP BY document_kind""",
+                (self.case.id_case,),
+            )
+        }
+        open_issues = self.connection.execute(
+            """SELECT source_documents.document_kind, review_issues.code,
+                      review_issues.field_name
+                 FROM review_issues
+                 JOIN source_documents
+                   ON source_documents.id_document = review_issues.id_document
+                 WHERE review_issues.id_case = ? AND review_issues.status = 'open'""",
+            (self.case.id_case,),
+        ).fetchall()
+
+        self.assertEqual({"invoice": 1, "reading": 2, "unknown": 1}, kind_counts)
+        self.assertEqual(1, results[-1].open_issue_count)
+        self.assertEqual(
+            [("unknown", "DOCUMENT_CLASSIFICATION_REQUIRED", "document_kind")],
+            [tuple(issue) for issue in open_issues],
+        )
+
     def test_unknown_document_creates_one_classification_issue(self):
         result = case_ingestion.add_analysed_document_to_case(
             self.connection,
