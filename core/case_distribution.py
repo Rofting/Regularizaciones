@@ -141,6 +141,8 @@ def _case_and_profile(
     ).fetchone()[0]
     if open_issues:
         raise DistributionBlockedError("Hay incidencias abiertas antes del reparto")
+    if document_review.case_has_unapplied_sources(connection, id_case):
+        raise DistributionBlockedError("Hay fuentes pendientes de confirmar y aplicar antes del reparto")
     try:
         document_review.assert_case_final_readings_approved(connection, id_case)
     except ValueError as error:
@@ -299,7 +301,7 @@ def _consumption_weights(
     for owner_id in owner_ids:
         rows = connection.execute(
             """SELECT fecha_lectura,valor_acumulado,estado,approved_by,approved_at
-               FROM lecturas_vecino
+               FROM period_readings
                WHERE id_propietario=? AND id_periodo=? AND tipo=?
                  AND fecha_lectura IN (?,?)
                ORDER BY fecha_lectura""",

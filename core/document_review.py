@@ -75,7 +75,8 @@ def _counter_reset_target(
     """Obtiene la pareja canónica de lecturas que una incidencia puede corregir."""
     if issue["code"] != _COUNTER_RESET_CODE:
         raise LookupError("La incidencia no corresponde a un reinicio de contador")
-    prefix, separator, remainder = str(issue["field_name"]).partition("reading.")
+    field_name = str(issue["field_name"]).partition("|")[0]
+    prefix, separator, remainder = field_name.partition("reading.")
     if prefix or not separator:
         raise LookupError("La incidencia no apunta a una lectura de propietario")
     property_code, separator, service = remainder.rpartition(".")
@@ -95,21 +96,34 @@ def _counter_reset_target(
     ).fetchone()
     if owner is None:
         raise LookupError("La lectura no pertenece a un propietario del expediente")
+    target = connection.execute("""SELECT a.fecha_lectura AS initial_date,b.fecha_lectura AS final_date
+        FROM counter_reset_targets t
+        JOIN lecturas_vecino a ON a.id_lectura=t.initial_reading_id
+        JOIN lecturas_vecino b ON b.id_lectura=t.final_reading_id
+        WHERE t.id_issue=? AND a.id_propietario=? AND b.id_propietario=?
+          AND a.tipo=? AND b.tipo=?""",
+        (issue['id_issue'], owner['id_propietario'], owner['id_propietario'], service, service)).fetchone()
+    if target is None and connection.execute(
+        "SELECT 1 FROM counter_reset_targets WHERE id_issue=?", (issue['id_issue'],)
+    ).fetchone():
+        raise LookupError("La pareja de lecturas de la incidencia no pertenece al propietario y servicio")
+    initial_date = target['initial_date'] if target else case['fecha_inicio']
+    final_date = target['final_date'] if target else case['fecha_fin']
     readings = connection.execute(
         """SELECT id_lectura,fecha_lectura,valor_acumulado,estado,metodo_estimacion,
                   fuente,notas,approved_by,approved_at
-           FROM lecturas_vecino
+           FROM period_readings
            WHERE id_propietario=? AND id_periodo=? AND tipo=?
              AND fecha_lectura IN (?,?)
            ORDER BY fecha_lectura""",
         (
             owner["id_propietario"], case["id_periodo"], service,
-            case["fecha_inicio"], case["fecha_fin"],
+            initial_date, final_date,
         ),
     ).fetchall()
     by_date = {row["fecha_lectura"]: row for row in readings}
-    initial = by_date.get(case["fecha_inicio"])
-    final = by_date.get(case["fecha_fin"])
+    initial = by_date.get(initial_date)
+    final = by_date.get(final_date)
     if initial is None or final is None:
         raise LookupError("No se encuentran las lecturas inicial y final del período")
     if final["estado"] != "contador_averiado" or final["valor_acumulado"] >= initial["valor_acumulado"]:
@@ -474,7 +488,18 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
             (issue_id,),
         )
         resolved = _issue_row(connection, issue_id)
+        _reapply_reviewed_document(connection, issue['id_case'], issue['id_document'])
     return review_issue_from_row(resolved)
+
+
+def _reapply_reviewed_document(connection, case_id, document_id):
+    document = connection.execute("SELECT confirmed_by FROM source_documents WHERE id_document=?",
+                                  (document_id,)).fetchone()
+    marker = connection.execute("SELECT 1 FROM archivos_procesados WHERE nombre_archivo=?",
+                                (f'source_document:{document_id}',)).fetchone()
+    if document['confirmed_by'] or marker:
+        from case_ingestion import apply_confirmed_source
+        apply_confirmed_source(connection, case_id, document_id)
 
 
 def approve_counter_reset_estimate(
@@ -539,7 +564,7 @@ def approve_counter_reset_estimate(
                WHERE id_lectura=?""",
             (corrected_text, notes, normalized_approver, final["id_lectura"]),
         )
-        owner_state = "estado_contador_acs" if issue["field_name"].endswith(".ACS") else "estado_contador_cal"
+        owner_state = "estado_contador_acs" if issue["field_name"].partition("|")[0].endswith(".ACS") else "estado_contador_cal"
         connection.execute(
             f"UPDATE propietarios SET {owner_state}='ok' WHERE id_propietario=?",
             (owner["id_propietario"],),
@@ -550,6 +575,7 @@ def approve_counter_reset_estimate(
             (issue_id,),
         )
         resolved = _issue_row(connection, issue_id)
+        _reapply_reviewed_document(connection, issue['id_case'], issue['id_document'])
     return review_issue_from_row(resolved)
 
 
@@ -614,7 +640,7 @@ def assert_case_final_readings_approved(
     if case["id_periodo"] is None:
         return
     unresolved = connection.execute(
-        """SELECT COUNT(*) FROM lecturas_vecino AS reading
+        """SELECT COUNT(*) FROM period_readings AS reading
            JOIN propietarios AS owner ON owner.id_propietario=reading.id_propietario
            WHERE owner.id_comunidad=? AND reading.id_periodo=?
              AND reading.fecha_lectura=?
@@ -645,6 +671,9 @@ def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> Regular
         if open_count:
             raise ValueError(f"{open_count} incidencia abierta(s) por resolver")
 
+        if case_has_unapplied_sources(connection, case_id):
+            raise ValueError("Hay fuentes pendientes de confirmar y aplicar a los datos canónicos")
+
         assert_case_final_readings_approved(connection, case_id)
         case = get_case(connection, case_id)
         if case.status == "draft":
@@ -657,7 +686,21 @@ def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> Regular
             case = set_case_status(connection, case_id, "ready_for_calculation")
 
         connection.execute(
-            "UPDATE source_documents SET status = 'validated' WHERE id_case = ?",
+            """UPDATE source_documents SET status = 'validated' WHERE id_case = ?
+               AND (classification_confidence IS NULL OR document_kind='other')""",
             (case_id,),
         )
     return case
+
+
+def case_has_unapplied_sources(connection: sqlite3.Connection, case_id: int) -> bool:
+    """Analysed sources may only pass readiness after canonical application."""
+    return connection.execute("""SELECT 1 FROM source_documents d
+        WHERE d.id_case=? AND d.classification_confidence IS NOT NULL
+          AND d.document_kind<>'other' AND (
+            d.status<>'validated' OR d.document_kind='unknown'
+            OR NOT EXISTS (SELECT 1 FROM archivos_procesados a
+                           WHERE a.nombre_archivo='source_document:' || d.id_document)
+            OR EXISTS (SELECT 1 FROM extraction_candidates c WHERE c.id_document=d.id_document
+                       AND c.validation_status='candidate' AND c.value IS NOT NULL AND trim(c.value)<>'')
+          ) LIMIT 1""", (case_id,)).fetchone() is not None

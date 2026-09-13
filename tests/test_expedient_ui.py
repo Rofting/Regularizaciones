@@ -286,7 +286,7 @@ class SourceActionsTest(unittest.TestCase):
     def ingest(self):
         from source_analysis import SourceAnalysis
         paths = [self.root / "invoice.pdf", self.root / "readings.csv", self.root / "unknown.csv"]
-        for path, content in zip(paths, ("pdf fixture", "Fecha;Lectura;Contador\n2026-01-01;100;A", "foo;bar\nx;y")):
+        for path, content in zip(paths, ("pdf fixture", "vivienda;tipo;fecha_ant;val_ant;fecha_act;val_act\nA;ACS;2026-01-01;100;2026-12-31;120", "foo;bar\nx;y")):
             path.write_text(content, encoding="utf-8")
         expedient_ui.open_add_sources_dialog(self.app, self.case.id_case)
         with patch("expedient_ui.filedialog.askopenfilenames", return_value=tuple(map(str, paths))), patch(

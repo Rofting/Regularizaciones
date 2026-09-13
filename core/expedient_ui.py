@@ -82,6 +82,10 @@ def show_issue_context(app: "AppGestionFincas", issue: ReviewIssue) -> None:
             (issue.id_document, issue.field_name),
         ).fetchone()
         context = row["source_context"] if row else None
+        if not context:
+            row = connection.execute("SELECT source_context FROM source_documents WHERE id_document=?",
+                                     (issue.id_document,)).fetchone()
+            context = row['source_context'] if row else None
     finally:
         connection.close()
     messagebox.showinfo(
@@ -1485,6 +1489,76 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
     ).pack(anchor="w", padx=22)
 
 
+def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
+    """Show extracted values and explicitly apply each reviewed source."""
+    dialog = _dialog(app, "Confirmar fuentes", 850, 720)
+    panel = ctk.CTkScrollableFrame(dialog)
+    panel.pack(fill="both", expand=True, padx=16, pady=16)
+
+    def render():
+        for widget in panel.winfo_children():
+            widget.destroy()
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            documents = connection.execute("""SELECT id_document,original_name,document_kind,status
+                FROM source_documents WHERE id_case=? AND document_kind IN ('invoice','reading','owners')
+                ORDER BY id_document""", (case_id,)).fetchall()
+            for document in documents:
+                group = ctk.CTkFrame(panel)
+                group.pack(fill="x", pady=8)
+                ctk.CTkLabel(group, text=f"{document['original_name']} · {document['document_kind']} · {document['status']}",
+                             wraplength=740).pack(anchor="w", padx=12, pady=8)
+                candidates = connection.execute("""SELECT field_name,value,validation_status
+                    FROM extraction_candidates WHERE id_document=? ORDER BY field_name""",
+                    (document['id_document'],)).fetchall()
+                for candidate in candidates:
+                    ctk.CTkLabel(group, text=f"{candidate['field_name']}: {candidate['value'] or 'Pendiente'}",
+                                 wraplength=740, justify="left").pack(anchor="w", padx=12, pady=3)
+                    ctk.CTkButton(group, text=f"Corregir {candidate['field_name']}",
+                        command=lambda document_id=document['id_document'], field=candidate['field_name']:
+                            correct(document_id, field)).pack(anchor="w", padx=12, pady=2)
+                ctk.CTkButton(group, text="Confirmar fuente",
+                    command=lambda document_id=document['id_document']: confirm(document_id)).pack(anchor="e", padx=12, pady=10)
+            if not documents:
+                ctk.CTkLabel(panel, text="No hay fuentes reconocidas pendientes de confirmación.").pack(pady=16)
+        finally:
+            connection.close()
+
+    def correct(document_id, field):
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            issue = document_review.create_review_issue(connection, case_id, document_id,
+                code="SOURCE_VALUE_REVIEW", field_name=field,
+                message="Comprueba el valor extraído en el documento original.")
+        finally:
+            connection.close()
+        dialog.destroy()
+        open_issue_dialog(app, issue)
+
+    def confirm(document_id):
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            case_ingestion.confirm_source_candidates(connection, case_id, document_id,
+                                                      confirmed_by="usuario_local")
+            if not document_review.list_open_issues(connection, case_id) and not document_review.case_has_unapplied_sources(connection, case_id):
+                document_review.validate_case_ready(connection, case_id)
+        except ValueError as error:
+            # Required canonical fields may not have been part of a legacy
+            # extractor's requirement list; make every missing value editable.
+            document = connection.execute("SELECT document_kind FROM source_documents WHERE id_document=?", (document_id,)).fetchone()
+            fields = {"invoice": ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"),
+                      "reading": ("vecinos",), "owners": ("propietarios",)}
+            document_review.create_missing_field_issues(connection, case_id, document_id, fields.get(document['document_kind'], ()))
+            messagebox.showwarning("Fuente pendiente de revisión", str(error), parent=app)
+        finally:
+            connection.close()
+        app._refrescar_lista_expedientes(select_case_id=case_id)
+        app._refrescar_expediente()
+        render()
+
+    render()
+
+
 def open_archived_file(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     try:
         if sys.platform != "win32":
@@ -1682,7 +1756,7 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
                     case_ingestion.reanalyze_case_documents(connection, issue.id_case)
             remaining = len(document_review.list_open_issues(connection, issue.id_case))
             ready = None
-            if not remaining:
+            if not remaining and not document_review.case_has_unapplied_sources(connection, issue.id_case):
                 ready = document_review.validate_case_ready(connection, issue.id_case)
             if route == "classify_unknown":
                 connection.commit()

@@ -39,6 +39,16 @@ def _is_period_header(value) -> bool:
     )
 
 
+def reading_columns(headers) -> tuple[int, tuple[int, ...]] | None:
+    """Identify the legacy table without assuming service or exact dates."""
+    labels = [_key(value) for value in headers]
+    if "COD" not in labels or "PROPIEDAD" not in labels:
+        return None
+    return labels.index("PROPIEDAD"), tuple(
+        index for index, value in enumerate(headers) if _is_period_header(value)
+    )
+
+
 def import_readings_xls(
     connection: sqlite3.Connection,
     id_comunidad: int,
@@ -54,15 +64,13 @@ def import_readings_xls(
     sheet = xlrd.open_workbook(path).sheet_by_index(0)
     header_row = None
     for row_index in range(sheet.nrows):
-        labels = [_key(sheet.cell_value(row_index, column)) for column in range(sheet.ncols)]
-        if "COD" in labels and "PROPIEDAD" in labels:
+        columns = reading_columns(sheet.row_values(row_index))
+        if columns is not None:
             header_row = row_index
             break
     if header_row is None:
         raise ValueError("No se encuentran las cabeceras Cod. y Propiedad")
-    headers = [sheet.cell_value(header_row, column) for column in range(sheet.ncols)]
-    property_column = next(index for index, value in enumerate(headers) if _key(value) == "PROPIEDAD")
-    period_columns = [index for index, value in enumerate(headers) if _is_period_header(value)]
+    property_column, period_columns = columns
     if len(period_columns) < 2:
         raise ValueError("No se encuentran dos columnas de lectura por periodo")
     initial_column, final_column = period_columns[0], period_columns[-1]

@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 
 MIGRATION_1_SQL = (
@@ -397,6 +397,56 @@ def _migration_7(connection: sqlite3.Connection) -> None:
                ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'
                CHECK(origin IN ('automatic', 'manual'))"""
         )
+        _reconcile_legacy_generated_issues(connection)
+
+
+def _reconcile_legacy_generated_issues(connection: sqlite3.Connection) -> None:
+    """Recognize the old generator's exact signature, never a reviewed outcome."""
+    connection.execute(
+        """UPDATE review_issues SET origin='automatic'
+           WHERE origin='manual' AND status='open' AND resolved_at IS NULL
+             AND code='MISSING_REQUIRED_FIELD' AND detected_value IS NULL
+             AND field_name IN ('fecha_inicio','fecha_fin','importe_total')
+             AND message='Falta el campo requerido: ' || field_name
+             AND NOT EXISTS (SELECT 1 FROM schema_migrations m
+                             WHERE m.version=7 AND review_issues.created_at>=m.applied_at)
+             AND NOT EXISTS (SELECT 1 FROM manual_corrections c
+                             WHERE c.id_issue=review_issues.id_issue)
+             AND EXISTS (SELECT 1 FROM source_documents d
+                         WHERE d.id_document=review_issues.id_document
+                           AND d.classification_confidence IS NULL)
+             AND NOT EXISTS (SELECT 1 FROM extraction_candidates c
+                             WHERE c.id_document=review_issues.id_document
+                               AND c.field_name=review_issues.field_name
+                               AND (c.source LIKE 'manual%' OR c.validation_status='rejected'))"""
+    )
+
+
+def _migration_8(connection: sqlite3.Connection) -> None:
+    _reconcile_legacy_generated_issues(connection)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(source_documents)")}
+    for name in ("source_context", "confirmed_by", "confirmed_at"):
+        if name not in columns:
+            connection.execute(f"ALTER TABLE source_documents ADD COLUMN {name} TEXT")
+    connection.execute("""CREATE TABLE IF NOT EXISTS reading_periods (
+        id_lectura INTEGER NOT NULL REFERENCES lecturas_vecino(id_lectura) ON DELETE CASCADE,
+        id_periodo INTEGER NOT NULL REFERENCES periodos(id_periodo),
+        PRIMARY KEY (id_lectura,id_periodo))""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS counter_reset_targets (
+        id_issue INTEGER PRIMARY KEY REFERENCES review_issues(id_issue) ON DELETE CASCADE,
+        initial_reading_id INTEGER NOT NULL REFERENCES lecturas_vecino(id_lectura),
+        final_reading_id INTEGER NOT NULL REFERENCES lecturas_vecino(id_lectura))""")
+    # The legacy period stays on the original row. Additional associations share
+    # that same reading (including its explicit approval) without moving it.
+    connection.execute("""CREATE VIEW IF NOT EXISTS period_readings AS
+        SELECT id_lectura,id_propietario,id_periodo,tipo,fecha_lectura,
+               valor_acumulado,estado,metodo_estimacion,fuente,notas,
+               approved_by,approved_at FROM lecturas_vecino
+        UNION
+        SELECT l.id_lectura,l.id_propietario,p.id_periodo,l.tipo,l.fecha_lectura,
+               l.valor_acumulado,l.estado,l.metodo_estimacion,l.fuente,l.notas,
+               l.approved_by,l.approved_at
+        FROM lecturas_vecino l JOIN reading_periods p ON p.id_lectura=l.id_lectura""")
 
 
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -407,6 +457,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     5: _migration_5,
     6: _migration_6,
     7: _migration_7,
+    8: _migration_8,
 }
 
 

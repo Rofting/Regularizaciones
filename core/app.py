@@ -235,6 +235,9 @@ class AppGestionFincas(ctk.CTk):
             height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs(),
         )
         self.botones["Reanalizar fuentes"].pack(fill="x", padx=12, pady=(0, 5))
+        ctk.CTkButton(nav, text="Confirmar fuentes", command=self._accion_confirmar_fuentes,
+                      height=31, corner_radius=8, font=UIM.fuente(10),
+                      **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
         ctk.CTkButton(nav, text="Abrir salidas", command=self._abrir_salidas, height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs()).pack(fill="x", padx=12)
 
         work = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=14, border_width=1, border_color=C["borde"])
@@ -1090,6 +1093,13 @@ class AppGestionFincas(ctk.CTk):
                 connection.close()
         expedient_ui.open_add_sources_dialog(self, self.id_expediente)
 
+    def _accion_confirmar_fuentes(self):
+        if self._procesando or not self._validar_expediente_activo():
+            return
+        ui = MOD.get("expedient_ui")
+        if ui:
+            ui.open_confirm_sources_dialog(self, self.id_expediente)
+
     def _accion_reanalizar_fuentes(self):
         if self._procesando or not self._validar_expediente_activo():
             return
@@ -1144,7 +1154,7 @@ class AppGestionFincas(ctk.CTk):
         finally:
             connection.close()
         if not issues:
-            self.log("No hay incidencias pendientes en este expediente.", "ok")
+            self._accion_confirmar_fuentes()
             return
         self._refrescar_bandeja_incidencias(issues)
         self.log(

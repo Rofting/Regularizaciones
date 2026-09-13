@@ -128,9 +128,9 @@ def _persist_analysis(
         required_fields = _required_fields_for_kind(analysis, effective_kind)
         connection.execute(
             """UPDATE source_documents
-               SET document_kind = ?, classification_confidence = ?
+               SET document_kind = ?, classification_confidence = ?, source_context = ?
                WHERE id_document = ? AND id_case = ?""",
-            (effective_kind, analysis.confidence.strip(), document.id_document, case_id),
+            (effective_kind, analysis.confidence.strip(), _compact_context(analysis), document.id_document, case_id),
         )
         if reanalysis:
             _replace_unvalidated_candidates_not_in_analysis(
@@ -239,13 +239,15 @@ def apply_confirmed_source(
             _apply_confirmed_readings(
                 connection, case, period_id, document, values, already_applied,
             )
+        elif document.document_kind == "owners":
+            _apply_confirmed_owners(connection, case, values)
         else:
-            raise ValueError("Sólo se pueden aplicar facturas o lecturas confirmadas")
+            raise ValueError("Sólo se pueden aplicar facturas, lecturas o propietarios confirmados")
 
         has_open_issues = _has_open_document_issues(connection, document_id)
         if already_applied is None and (
             (document.document_kind == "invoice" and canonical_invoice_id is not None)
-            or (document.document_kind == "reading" and not has_open_issues)
+            or (document.document_kind in ("reading", "owners") and not has_open_issues)
         ):
             gestor_bd.marcar_archivo_procesado(
                 connection,
@@ -263,6 +265,57 @@ def apply_confirmed_source(
             (document_id,),
         )
         return _source_document(connection, document_id)
+
+
+def confirm_source_candidates(connection: sqlite3.Connection, case_id: int,
+                              document_id: int, *, confirmed_by: str) -> SourceDocument:
+    """Explicit user confirmation of the displayed candidates and canonical application."""
+    if not confirmed_by.strip():
+        raise ValueError("La persona que confirma la fuente es obligatoria")
+    with _transaction(connection):
+        document = _source_document(connection, document_id)
+        if document.id_case != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        if _has_open_document_issues(connection, document_id):
+            raise ValueError("Resuelve las incidencias de la fuente antes de confirmarla")
+        connection.execute("""UPDATE extraction_candidates SET validation_status='validated'
+            WHERE id_document=? AND validation_status='candidate'
+              AND value IS NOT NULL AND trim(value)<>''""", (document_id,))
+        if document.document_kind == "invoice":
+            _required_confirmed(_confirmed_candidate_values(connection, document_id),
+                                "tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total")
+        result = apply_confirmed_source(connection, case_id, document_id)
+        connection.execute("""UPDATE source_documents SET confirmed_by=?,confirmed_at=datetime('now')
+            WHERE id_document=?""", (confirmed_by.strip(), document_id))
+        return result
+
+
+def _apply_confirmed_owners(connection: sqlite3.Connection, case: RegularizationCase,
+                            values: Mapping[str, str]) -> None:
+    _required_confirmed(values, "propietarios")
+    rows = json.loads(values["propietarios"])
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("La fuente debe contener propietarios confirmados")
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("codigo_vivienda") or not row.get("nombre_propietario"):
+            raise ValueError("Cada propietario necesita vivienda y nombre")
+        fields = {key: row[key] for key in ("nombre_propietario", "coeficiente", "email") if key in row}
+        if "coeficiente" in fields:
+            coefficient = _confirmed_number({"coeficiente": str(fields["coeficiente"])}, "coeficiente")
+            if coefficient is None or coefficient < 0:
+                raise ValueError("El coeficiente debe ser un número no negativo")
+            fields["coeficiente"] = coefficient
+        owner = connection.execute("SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda=?",
+                                   (case.community_id, row["codigo_vivienda"])).fetchone()
+        if owner:
+            assignments = ','.join(f'{key}=?' for key in fields)
+            connection.execute(f"UPDATE propietarios SET {assignments} WHERE id_propietario=?",
+                               (*fields.values(), owner[0]))
+        else:
+            columns = ','.join(fields)
+            placeholders = ','.join('?' for _ in fields)
+            connection.execute(f"INSERT INTO propietarios(id_comunidad,codigo_vivienda,{columns}) VALUES (?,?,{placeholders})",
+                               (case.community_id, row["codigo_vivienda"], *fields.values()))
 
 
 def _confirmed_candidate_values(
@@ -420,14 +473,19 @@ def _apply_confirmed_readings(
     already_applied: sqlite3.Row | None,
 ) -> None:
     _required_confirmed(values, "vecinos")
-    if already_applied is not None:
-        return
     try:
         readings = json.loads(values["vecinos"])
     except json.JSONDecodeError:
         raise ValueError("Las lecturas confirmadas no tienen un formato válido") from None
-    if not isinstance(readings, list):
-        raise ValueError("Las lecturas confirmadas deben ser una lista")
+    if not isinstance(readings, list) or not readings:
+        raise ValueError("Las lecturas confirmadas deben ser una lista no vacía")
+    # Older spreadsheets carry month labels but no exact dates or service.
+    # Only explicitly reviewed source fields may fill these missing row values.
+    for reading in readings:
+        if isinstance(reading, dict):
+            for key, field in (("tipo", "tipo"), ("fecha_ant", "fecha_inicio"), ("fecha_act", "fecha_fin")):
+                if not reading.get(key) and field in values:
+                    reading[key] = values[field]
     apply_confirmed_readings(
         connection,
         case_id=case.id_case,

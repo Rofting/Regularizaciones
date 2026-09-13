@@ -303,10 +303,12 @@ def apply_confirmed_readings(
 
         initial_date = _confirmed_date(reading.get("fecha_ant"))
         final_date = _confirmed_date(reading.get("fecha_act"))
+        if final_date <= initial_date:
+            raise ValueError("Las fechas de lectura no forman un intervalo válido")
         initial_value = _confirmed_number(reading.get("val_ant"))
         final_value = _confirmed_number(reading.get("val_act"))
         field_name = f"reading.{owner['codigo_vivienda']}.{service}"
-        reset_status = _counter_reset_status(con, document_id, field_name)
+        reset_status = _counter_reset_status(con, document_id, field_name, initial_date, final_date)
 
         if final_value < initial_value:
             if reset_status == "resolved":
@@ -337,11 +339,19 @@ def apply_confirmed_readings(
                     f"UPDATE propietarios SET {counter_field}='averiado' WHERE id_propietario=?",
                     (owner_id,),
                 )
-                _create_reading_issue(
-                    con, case_id, document_id, "COUNTER_RESET", field_name,
+                issue = _create_reading_issue(
+                    con, case_id, document_id, "COUNTER_RESET",
+                    f"{field_name}|{initial_date}/{final_date}",
                     "El contador disminuye y requiere una estimación aprobada",
                     f"{initial_value} -> {final_value}",
                 )
+                targets = con.execute("""SELECT id_lectura,fecha_lectura FROM lecturas_vecino
+                    WHERE id_propietario=? AND tipo=? AND fecha_lectura IN (?,?)""",
+                    (owner_id, service, initial_date, final_date)).fetchall()
+                by_date = {row['fecha_lectura']: row['id_lectura'] for row in targets}
+                con.execute("""INSERT OR IGNORE INTO counter_reset_targets
+                    (id_issue,initial_reading_id,final_reading_id) VALUES (?,?,?)""",
+                    (issue.id_issue, by_date[initial_date], by_date[final_date]))
             pending_review = True
             continue
 
@@ -397,29 +407,43 @@ def _insert_confirmed_reading(
     notes: str | None = None,
 ) -> bool:
     existing = con.execute(
-        """SELECT valor_acumulado FROM lecturas_vecino
+        """SELECT id_lectura,valor_acumulado,estado,approved_by,approved_at FROM lecturas_vecino
            WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
         (owner_id, service, reading_date),
     ).fetchone()
     if existing is not None:
-        return abs(existing["valor_acumulado"] - value) <= 0.01
-    con.execute(
+        if abs(existing["valor_acumulado"] - value) > 0.01:
+            return False
+        if state == "real" and (existing['estado'] == 'contador_averiado' or
+                (existing['estado'] == 'estimado' and not (existing['approved_by'] and existing['approved_at']))):
+            return False
+        con.execute("INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+                    (existing['id_lectura'], period_id))
+        return True
+    cursor = con.execute(
         """INSERT INTO lecturas_vecino
            (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente,notas)
            VALUES (?,?,?,?,?,?,?,?)""",
         (owner_id, period_id, service, reading_date, value, state, source_path, notes),
     )
+    con.execute("INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+                (cursor.lastrowid, period_id))
     return True
 
 
 def _counter_reset_status(
-    con: sqlite3.Connection, document_id: int, field_name: str
+    con: sqlite3.Connection, document_id: int, field_name: str,
+    initial_date: str, final_date: str,
 ) -> str | None:
     row = con.execute(
-        """SELECT status FROM review_issues
-           WHERE id_document=? AND code='COUNTER_RESET' AND field_name=?
-           ORDER BY id_issue DESC LIMIT 1""",
-        (document_id, field_name),
+        """SELECT i.status FROM review_issues i
+           LEFT JOIN counter_reset_targets t ON t.id_issue=i.id_issue
+           LEFT JOIN lecturas_vecino a ON a.id_lectura=t.initial_reading_id
+           LEFT JOIN lecturas_vecino b ON b.id_lectura=t.final_reading_id
+           WHERE i.id_document=? AND i.code='COUNTER_RESET' AND i.field_name IN (?,?)
+             AND (t.id_issue IS NULL OR (a.fecha_lectura=? AND b.fecha_lectura=?))
+           ORDER BY i.id_issue DESC LIMIT 1""",
+        (document_id, field_name, f"{field_name}|{initial_date}/{final_date}", initial_date, final_date),
     ).fetchone()
     return row["status"] if row is not None else None
 
@@ -432,8 +456,8 @@ def _create_reading_issue(
     field_name: str,
     message: str,
     detected_value: str | None = None,
-) -> None:
-    document_review.create_review_issue(
+):
+    return document_review.create_review_issue(
         con, case_id, document_id, code=code, field_name=field_name,
         message=message, detected_value=detected_value,
     )

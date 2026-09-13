@@ -25,10 +25,11 @@ las fuentes, los perfiles runtime y las plantillas instaladas son locales.
    Comunidad** y elige **Registro rápido** o **Alta guiada desde fuentes**.
 2. **Pulsar Crear expediente y elegir fecha inicial/final.** Puede usarse cualquier rango, incluido uno arbitrario de seis meses.
 3. **Pulsar Añadir fuentes; los originales permanecen intactos.**
-4. **Elegir el tipo de fuente y seleccionar archivos.**
+4. **Seleccionar archivos o una carpeta; revisar el tipo detectado.**
 5. **Pulsar Resolver incidencias; cada incidencia abre su copia archivada.**
 6. **Confirmar valor y motivo; el sistema conserva la auditoría.**
-7. **Esperar el estado Listo para cálculo antes de usar las salidas posteriores.**
+7. **Pulsar Confirmar fuentes y revisar los valores extraídos de cada documento.**
+8. **Esperar el estado Listo para cálculo antes de usar las salidas posteriores.**
 
 ## Flujo unificado de fuentes
 
@@ -58,17 +59,32 @@ expediente.
    valor confirmado y el motivo o fuente que lo respalda. Para una clasificación
    desconocida, selecciona el tipo correcto y explica el motivo; la app vuelve
    a analizar la copia para crear sólo los datos que requiere ese tipo.
-6. Si cambian los originales, se corrige el extractor o quieres actualizar las
+6. Pulsa **Confirmar fuentes** para revisar los valores extraídos, usar
+   **Corregir** si procede y confirmar cada fuente. Este paso incorpora sus
+   valores a las facturas, lecturas o propietarios que consume el cálculo.
+   También es necesario cuando el análisis no ha generado incidencias.
+   Los listados de lecturas con columnas de meses piden el servicio y las
+   fechas exactas inicial y final antes de aplicar sus filas.
+7. Si cambian los originales, se corrige el extractor o quieres actualizar las
    propuestas automáticas, usa **Reanalizar fuentes**. Esta acción reutiliza las
    copias archivadas del expediente: no reimporta ni modifica los originales y
    conserva las correcciones confirmadas manualmente. Revisa de nuevo su resumen
    y sus incidencias.
-7. Con cero incidencias abiertas y el estado **Listo para cálculo**, pulsa
+8. Con cero incidencias abiertas, las fuentes confirmadas y el estado **Listo
+   para cálculo**, pulsa
    **Generar Excel oficial**, revisa el libro publicado y después **Calcular
    reparto final**. Continúa con **Generar cartas**, revisa conceptos,
    destinatarios y una muestra de los archivos antes de enviarlos manualmente.
-   Excel, reparto y cartas siguen bloqueados mientras quede una incidencia
-   abierta.
+   Excel y reparto siguen bloqueados mientras quede una incidencia abierta o
+   una propuesta nueva pendiente de confirmar. Una corrección posterior vuelve
+   a aplicar la fuente; si contradice una lectura canónica, abre una incidencia
+   de conflicto para revisarla.
+
+Al actualizar una base antigua, la migración reconoce las incidencias abiertas
+del generador anterior por su mensaje exacto de campo ausente y por la ausencia
+de correcciones o decisiones manuales. **Reanalizar fuentes** puede regenerar
+esas incidencias según el tipo correcto del documento. Las incidencias manuales
+con mensajes propios y los resultados ya revisados se conservan.
 
 ## Empezar con una base vacía de forma segura
 
@@ -82,7 +98,9 @@ La acción crea y verifica una copia de seguridad de la base anterior en la
 carpeta `backups` situada junto a la base configurada antes de publicar una
 base vacía. La ruta de esa copia aparece al terminar. La base anterior nunca se
 elimina silenciosamente: si la copia o la nueva base no superan la verificación,
-el reinicio se cancela y la base anterior se conserva. Conserva la ruta indicada
+el reinicio se cancela y la base anterior se conserva. La verificación exige
+integridad SQLite, tablas, columnas y versiones de migración completas; una
+base vacía sin inicializar no se publica. Conserva la ruta indicada
 para poder recuperar el contexto de la prueba anterior.
 
 ## Alta guiada desde fuentes
@@ -132,8 +150,8 @@ completar sólo una parte de esas fechas.
    `MISSING_REQUIRED_FIELD`.
 4. Añade las facturas y lecturas del período que no se incorporaron durante el
    alta o la importación inicial.
-5. Abre **Resolver incidencias** y confirma valor y motivo hasta alcanzar
-   **Listo para cálculo**.
+5. Abre **Resolver incidencias**, confirma valor y motivo y después revisa
+   **Confirmar fuentes** hasta alcanzar **Listo para cálculo**.
 6. Pulsa **Generar Excel oficial**. Revisa el libro publicado; se crea desde la
    base de datos validada, no desde cambios manuales en una salida anterior.
 7. Pulsa **Calcular reparto final**. Comprueba que los conceptos activos y el
@@ -144,11 +162,14 @@ completar sólo una parte de esas fechas.
 ## Comprobaciones de aceptación
 
 - Un rango arbitrario de seis meses se puede abrir y conservar como expediente.
-- Al añadir una factura PDF se crean para confirmar los tres campos `fecha_inicio`, `fecha_fin` e `importe_total`.
+- Al añadir una factura PDF, las fechas y el importe extraídos aparecen en
+  **Confirmar fuentes**; las ausencias abren incidencias y también se exige el
+  tipo de suministro antes de incorporarla al cálculo.
 - Cancelar o dejar en blanco una confirmación no escribe cambios.
 - Volver a añadir una fuente no duplica la fuente ni sobrescribe una corrección ya confirmada.
 - Cambiar de comunidad impide utilizar un expediente antiguo.
-- Una incidencia sin resolver bloquea el estado **Listo para cálculo**.
+- Una incidencia sin resolver o una fuente sin confirmar y aplicar bloquea
+  el estado **Listo para cálculo**.
 - Los originales no se modifican: durante la resolución se abre únicamente la copia archivada.
 - El resumen del alta guiada no está disponible mientras falten propietarios,
   lecturas o respuestas obligatorias.

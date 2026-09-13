@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import db_migrations
+
 
 class DatabaseResetError(RuntimeError):
     """El reinicio no se completó y la base de datos original se conserva."""
@@ -40,7 +42,7 @@ def reset_database(
         backup_root.mkdir(parents=True, exist_ok=True)
         backup_path = _reserve_backup_path(database_path, backup_root)
         _copy_database(database_path, backup_path)
-        _verify_database(backup_path)
+        _verify_database(backup_path, expected_schema=_schema_signature(database_path))
     except DatabaseResetError:
         raise
     except (OSError, sqlite3.Error) as error:
@@ -92,10 +94,40 @@ def _copy_database(source_path: Path, destination_path: Path) -> None:
             source.backup(destination)
 
 
-def _verify_database(database_path: Path) -> None:
+def _schema_signature(database_path: Path) -> dict[str, tuple[str, ...]]:
+    with closing(sqlite3.connect(database_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+        return _connection_schema(connection)
+
+
+def _connection_schema(connection) -> dict[str, tuple[str, ...]]:
+    names = connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'").fetchall()
+    return {row[0]: tuple(column[1] for column in connection.execute(
+        'PRAGMA table_info("' + row[0].replace('"', '""') + '")')) for row in names}
+
+
+def _expected_application_schema():
+    from gestor_bd import TABLAS
+    with closing(sqlite3.connect(":memory:")) as connection:
+        for statement in TABLAS:
+            connection.execute(statement)
+        db_migrations.migrate(connection)
+        return _connection_schema(connection)
+
+
+def _verify_database(database_path: Path, *, expected_schema=None) -> None:
     database_uri = database_path.resolve().as_uri() + "?mode=ro"
     with closing(sqlite3.connect(database_uri, uri=True)) as connection:
         result = connection.execute("PRAGMA integrity_check").fetchall()
+        actual_schema = _connection_schema(connection)
+        expected = expected_schema if expected_schema is not None else _expected_application_schema()
+        missing = [table for table, columns in expected.items()
+                   if not set(columns).issubset(actual_schema.get(table, ()))]
+        if not expected or missing:
+            raise DatabaseResetError(f"El esquema de {database_path} está incompleto: {', '.join(missing)}")
+        if expected_schema is None:
+            versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+            if versions != set(db_migrations.MIGRATIONS):
+                raise DatabaseResetError("El esquema no tiene la versión de migraciones esperada")
     if result != [("ok",)]:
         raise DatabaseResetError(
             f"La comprobación de integridad falló para {database_path}: {result}"

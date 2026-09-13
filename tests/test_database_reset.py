@@ -13,6 +13,7 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import database_reset
+import gestor_bd
 
 
 class DatabaseResetTest(unittest.TestCase):
@@ -29,6 +30,9 @@ class DatabaseResetTest(unittest.TestCase):
     @staticmethod
     def _write_marker(path, marker):
         with closing(sqlite3.connect(path)) as connection:
+            for statement in gestor_bd.TABLAS:
+                connection.execute(statement)
+            gestor_bd.aplicar_migraciones(connection)
             connection.execute("CREATE TABLE marker (value TEXT NOT NULL)")
             connection.execute("INSERT INTO marker(value) VALUES (?)", (marker,))
             connection.commit()
@@ -77,6 +81,20 @@ class DatabaseResetTest(unittest.TestCase):
             )
 
         self.assertEqual("old", self.read_marker(self.database))
+
+    def test_reset_requires_all_application_columns_and_migration_versions(self):
+        for statement in ("ALTER TABLE source_documents DROP COLUMN confirmed_by",
+                          "DELETE FROM schema_migrations WHERE version=8"):
+            with self.subTest(statement=statement):
+                def incomplete_initialise(path):
+                    self.initialise(path)
+                    with closing(sqlite3.connect(path)) as connection:
+                        connection.execute(statement)
+                        connection.commit()
+                with self.assertRaisesRegex(database_reset.DatabaseResetError, "esquema"):
+                    database_reset.reset_database(self.database, backup_root=self.backups,
+                                                  initialise=incomplete_initialise)
+                self.assertEqual("old", self.read_marker(self.database))
 
     def test_reset_generates_unique_backup_names(self):
         first = database_reset.reset_database(
