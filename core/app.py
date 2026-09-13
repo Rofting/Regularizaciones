@@ -97,7 +97,7 @@ def _importar_modulos():
                    "excel_writer", "carta_writer", "importar_lecturas_metrigest",
                    "importar_excel_maestro", "letter_settings", "regularization_flow",
                    "expedient_service", "document_review", "case_ingestion",
-                   "expedient_ui", "case_workflow_actions"]:
+                   "expedient_ui", "case_workflow_actions", "database_reset"]:
         try:
             modulos[nombre] = __import__(nombre)
         except ImportError:
@@ -230,6 +230,11 @@ class AppGestionFincas(ctk.CTk):
             self.workflow_step_rows[key] = row
             self.etapas[key] = row._marker
         ctk.CTkButton(nav, text="Gestionar períodos", command=self._nuevo_periodo, height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(18, 5))
+        self.botones["Reanalizar fuentes"] = ctk.CTkButton(
+            nav, text="Reanalizar fuentes", command=self._accion_reanalizar_fuentes,
+            height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs(),
+        )
+        self.botones["Reanalizar fuentes"].pack(fill="x", padx=12, pady=(0, 5))
         ctk.CTkButton(nav, text="Abrir salidas", command=self._abrir_salidas, height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs()).pack(fill="x", padx=12)
 
         work = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=14, border_width=1, border_color=C["borde"])
@@ -1084,6 +1089,36 @@ class AppGestionFincas(ctk.CTk):
             finally:
                 connection.close()
         expedient_ui.open_add_sources_dialog(self, self.id_expediente)
+
+    def _accion_reanalizar_fuentes(self):
+        if self._procesando or not self._validar_expediente_activo():
+            return
+        ingestion, database, ui = (MOD.get(name) for name in ("case_ingestion", "gestor_bd", "expedient_ui"))
+        if not all((ingestion, database, ui)):
+            self.log("No está disponible el análisis de fuentes.", "error")
+            return
+        case_id, community_id = self.id_expediente, self.id_comunidad
+        database_path = str(self.ruta_bd_expedientes)
+
+        def work():
+            connection = database.conectar(database_path)
+            try:
+                ingestion.assert_case_belongs_to_community(connection, case_id, community_id)
+                results = ingestion.reanalyze_case_documents(connection, case_id)
+            finally:
+                connection.close()
+            summary = ui.source_summary(result.document.document_kind for result in results)
+            self.log(f"Fuentes reanalizadas: {summary}", "ok")
+
+            def completed():
+                self._refrescar_lista_expedientes(select_case_id=case_id)
+                self._refrescar_expediente()
+                messagebox.showinfo("Fuentes reanalizadas", summary, parent=self)
+
+            self.after(0, completed)
+
+        self._estado("Reanalizando fuentes", procesando=True)
+        self._en_hilo(work)
 
     def _accion_resolver_incidencias(self):
         review = MOD.get("document_review")
@@ -2982,12 +3017,82 @@ class AppGestionFincas(ctk.CTk):
                       border_width=1, border_color=C["exito"]).grid(
                           row=len(campos), column=0, columnspan=2, pady=18)
 
+    def _accion_nueva_base_segura(self, settings_dialog=None):
+        if self._procesando:
+            messagebox.showwarning("Espera", "Termina la operación en curso antes de crear una nueva base.", parent=self)
+            return
+        reset, database = MOD.get("database_reset"), MOD.get("gestor_bd")
+        if not reset or not database:
+            messagebox.showerror("Nueva base segura", "No está disponible el reinicio seguro.", parent=self)
+            return
+        database_path = Path(self.ruta_bd_expedientes)
+        if not messagebox.askyesno(
+            "Nueva base segura",
+            "Se guardará una copia de seguridad verificada de la base actual y se creará una base vacía.\n"
+            "Las comunidades, expedientes y correcciones actuales quedarán en esa copia. "
+            "Los archivos originales y las salidas se conservarán.\n\n"
+            f"Base: {database_path}\n\n¿Crear la nueva base?",
+            parent=settings_dialog or self, default="no", icon="warning",
+        ):
+            return
+
+        def work():
+            try:
+                def initialise(path):
+                    # The replacement must have no live handles before Windows
+                    # can publish it. sqlite3's context manager does not close.
+                    connection = sqlite3.connect(path)
+                    try:
+                        with connection:
+                            connection.execute("PRAGMA foreign_keys = ON")
+                            connection.execute("PRAGMA journal_mode = DELETE")
+                            for sql in (*database.TABLAS, *database.INDICES):
+                                connection.execute(sql)
+                            database.aplicar_migraciones(connection)
+                    finally:
+                        connection.close()
+
+                result = reset.reset_database(
+                    database_path, backup_root=database_path.parent / "backups",
+                    initialise=initialise,
+                )
+            except Exception as error:
+                self.log(f"No se pudo crear la nueva base: {error}", "error")
+                self.after(0, lambda detail=str(error): messagebox.showerror("Nueva base segura", detail, parent=self))
+                return
+
+            def completed():
+                # Only discard live selections after a verified replacement exists.
+                self.id_comunidad = self.id_periodo = None
+                self.comunidad_actual.set("")
+                self.periodo_actual.set("")
+                self._ids_comunidad, self._ids_periodo = {}, {}
+                self.cb_comunidad.configure(values=[])
+                self.cb_periodo.configure(values=[])
+                self._limpiar_contexto_expediente()
+                self._cargar_comunidades()
+                self._actualizar_banner()
+                ui = MOD.get("expedient_ui")
+                if ui:
+                    self._actualizar_workspace(ui.guided_workspace_state(
+                        has_case=False, document_count=0, open_issue_count=0, case_status="",
+                    ))
+                if settings_dialog is not None:
+                    settings_dialog.destroy()
+                self.log(f"Nueva base creada. Copia de seguridad: {result.backup_path}", "ok")
+                messagebox.showinfo("Nueva base segura", f"La nueva base está lista.\n\nCopia de seguridad:\n{result.backup_path}", parent=self)
+
+            self.after(0, completed)
+
+        self._estado("Creando copia de seguridad y nueva base", procesando=True)
+        self._en_hilo(work)
+
     def _configurar_rutas(self):
         """Muestra las rutas actuales y permite cambiarlas."""
-        ventana = self._preparar_dialogo("Configuración de Rutas", 660, 350)
+        ventana = self._preparar_dialogo("Ajustes", 760, 450)
 
         rutas = [
-            ("Base de datos:",      str(RUTA_BD)),
+            ("Base de datos:",      str(self.ruta_bd_expedientes)),
             ("Carpeta entrada/:",   str(RUTA_ENTRADA)),
             ("Carpeta procesados/:",str(RUTA_PROCESADOS)),
             ("Excels Maestros/:",   str(RUTA_EXCELS)),
@@ -3007,6 +3112,14 @@ class AppGestionFincas(ctk.CTk):
                      font=UIM.fuente(11),
                      text_color=C["texto_sec"]).grid(
             row=len(rutas), column=0, columnspan=2, pady=14, padx=20)
+        ctk.CTkButton(
+            ventana, text="Nueva base segura", command=lambda: self._accion_nueva_base_segura(ventana),
+            height=36, corner_radius=8, font=UIM.fuente(11), **UIM.secondary_button_kwargs(),
+        ).grid(row=len(rutas) + 1, column=0, columnspan=2, sticky="w", padx=20, pady=(8, 4))
+        ctk.CTkLabel(
+            ventana, text="Guarda una copia de seguridad verificada y empieza con una base vacía.",
+            font=UIM.fuente(11), text_color=C["texto_sec"],
+        ).grid(row=len(rutas) + 2, column=0, columnspan=2, sticky="w", padx=20, pady=4)
 
 
 # ---------------------------------------------------------------------------
