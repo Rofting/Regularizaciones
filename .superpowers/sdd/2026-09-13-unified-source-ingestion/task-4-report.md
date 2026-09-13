@@ -35,3 +35,21 @@ La ejecución final del mismo comando completó cuatro pruebas correctamente:
 - rutas de respaldo únicas.
 
 También se ejecutó `git diff --check` sin errores de espacios.
+
+## Addendum de revisión
+
+La revisión detectó dos rutas de seguridad no cubiertas inicialmente. Se
+añadieron primero sus regresiones y la ejecución dirigida falló como se
+esperaba: una colisión forzada reutilizaba y sobrescribía el respaldo ya
+existente, y un fallo de `mkstemp` escapaba como `PermissionError`.
+
+La reserva de respaldos ahora crea el nombre candidato en modo exclusivo
+(`"xb"`) y vuelve a generar un candidato al encontrar uno existente, antes de
+que SQLite abra el fichero de destino. La asignación del fichero de reemplazo
+se incluye ahora en el bloque que convierte errores a `DatabaseResetError`, y
+la limpieza sólo se intenta cuando se llegó a asignar una ruta temporal.
+
+Las dos regresiones comprueban respectivamente que un respaldo irremplazable
+conserva su contenido tras una colisión forzada, y que un fallo de asignación
+temporal devuelve `DatabaseResetError`, conserva un respaldo válido y no cambia
+la base original. La verificación dirigida final ejecutó seis pruebas con éxito.

@@ -90,6 +90,41 @@ class DatabaseResetTest(unittest.TestCase):
         self.assertTrue(first.backup_path.exists())
         self.assertTrue(second.backup_path.exists())
 
+    def test_reset_preserves_existing_backup_when_a_generated_name_collides(self):
+        self.backups.mkdir()
+        irreplaceable_backup = self.backups / "irreplaceable.db"
+        fresh_backup = self.backups / "fresh.db"
+        self._write_marker(irreplaceable_backup, "irreplaceable backup")
+
+        with patch.object(
+            database_reset,
+            "_backup_path",
+            side_effect=(irreplaceable_backup, fresh_backup),
+        ):
+            result = database_reset.reset_database(
+                self.database, backup_root=self.backups, initialise=self.initialise
+            )
+
+        self.assertEqual(fresh_backup, result.backup_path)
+        self.assertEqual("irreplaceable backup", self.read_marker(irreplaceable_backup))
+        self.assertEqual("old", self.read_marker(fresh_backup))
+
+    def test_reset_wraps_temporary_allocation_failure_and_preserves_backup(self):
+        with patch.object(
+            database_reset.tempfile,
+            "mkstemp",
+            side_effect=PermissionError("temporary directory unavailable"),
+        ):
+            with self.assertRaises(database_reset.DatabaseResetError):
+                database_reset.reset_database(
+                    self.database, backup_root=self.backups, initialise=self.initialise
+                )
+
+        backup_paths = list(self.backups.glob("*.db"))
+        self.assertEqual(1, len(backup_paths))
+        self.assertEqual("old", self.read_marker(backup_paths[0]))
+        self.assertEqual("old", self.read_marker(self.database))
+
 
 if __name__ == "__main__":
     unittest.main()

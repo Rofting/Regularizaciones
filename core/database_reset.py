@@ -38,7 +38,7 @@ def reset_database(
 
     try:
         backup_root.mkdir(parents=True, exist_ok=True)
-        backup_path = _backup_path(database_path, backup_root)
+        backup_path = _reserve_backup_path(database_path, backup_root)
         _copy_database(database_path, backup_path)
         _verify_database(backup_path)
     except DatabaseResetError:
@@ -48,16 +48,19 @@ def reset_database(
             f"No se pudo crear o verificar la copia de seguridad de {database_path}: {error}"
         ) from error
 
-    replacement_path = _temporary_database_path(database_path)
+    replacement_path: Path | None = None
     try:
+        replacement_path = _temporary_database_path(database_path)
         initialise(replacement_path)
         _verify_database(replacement_path)
         os.replace(replacement_path, database_path)
     except DatabaseResetError:
-        _remove_temporary_database(replacement_path)
+        if replacement_path is not None:
+            _remove_temporary_database(replacement_path)
         raise
     except Exception as error:
-        _remove_temporary_database(replacement_path)
+        if replacement_path is not None:
+            _remove_temporary_database(replacement_path)
         raise DatabaseResetError(
             f"No se pudo inicializar o validar la nueva base de datos: {error}"
         ) from error
@@ -69,6 +72,17 @@ def _backup_path(database_path: Path, backup_root: Path) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     suffix = database_path.suffix or ".db"
     return backup_root / f"{database_path.stem}-{timestamp}-{uuid4().hex}{suffix}"
+
+
+def _reserve_backup_path(database_path: Path, backup_root: Path) -> Path:
+    while True:
+        candidate = _backup_path(database_path, backup_root)
+        try:
+            with candidate.open("xb"):
+                pass
+        except FileExistsError:
+            continue
+        return candidate
 
 
 def _copy_database(source_path: Path, destination_path: Path) -> None:
