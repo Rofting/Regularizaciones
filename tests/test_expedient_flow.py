@@ -204,6 +204,32 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM archivos_procesados").fetchone()[0])
         self.assertEqual("under_review", self.document_status(document))
 
+    def test_pending_invoice_retry_applies_confirmed_manual_correction(self):
+        document = self.add_confirmed_invoice()
+        issue = document_review.create_review_issue(
+            self.connection, self.case.id_case, document.id_document,
+            code="CHECK", field_name="importe_total", message="Confirmar total",
+        )
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+        document_review.resolve_issue(
+            self.connection, issue.id_issue, value="228.10",
+            reason="Total confirmado", resolved_by="Jose",
+        )
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        self.assertEqual(228.10, self.connection.execute(
+            "SELECT importe_total FROM facturas"
+        ).fetchone()[0])
+        self.assertEqual(228.10, self.connection.execute(
+            "SELECT amount FROM invoice_components WHERE component_key='total'"
+        ).fetchone()[0])
+        self.assertEqual("validated", self.document_status(document))
+
     def test_validated_source_without_marker_is_applied_to_canonical_data(self):
         document = self.add_confirmed_invoice()
         document_review.validate_case_ready(self.connection, self.case.id_case)
@@ -319,6 +345,40 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertEqual(115.0, self.connection.execute(
             "SELECT valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura DESC"
         ).fetchone()[0])
+        self.assertEqual("validated", self.document_status(document))
+
+    def test_unmatched_owner_reading_retries_after_owner_resolution(self):
+        document = self.add_confirmed_reading()
+        self.connection.execute(
+            "DELETE FROM propietarios WHERE id_comunidad=? AND codigo_vivienda='A'",
+            (self.community_id,),
+        )
+        self.connection.commit()
+
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+        self.assertEqual("under_review", self.document_status(document))
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0])
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM archivos_procesados").fetchone()[0])
+
+        self.connection.execute(
+            """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?, 'A', 'Vecino A')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        document_review.resolve_issue(
+            self.connection, issue.id_issue, value="A",
+            reason="Propietario incorporado", resolved_by="Jose",
+        )
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+
+        self.assertEqual(2, self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0])
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM archivos_procesados").fetchone()[0])
         self.assertEqual("validated", self.document_status(document))
 
     def test_document_from_another_case_cannot_be_applied(self):

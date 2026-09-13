@@ -242,17 +242,20 @@ def apply_confirmed_source(
         else:
             raise ValueError("Sólo se pueden aplicar facturas o lecturas confirmadas")
 
-        if already_applied is None:
-            if document.document_kind != "invoice" or canonical_invoice_id is not None:
-                gestor_bd.marcar_archivo_procesado(
-                    connection,
-                    marker_name,
-                    hash_md5=document.sha256,
-                    id_factura=canonical_invoice_id,
-                    notas=f"Fuente confirmada del expediente {case_id}",
-                    commit=False,
-                )
-        if _has_open_document_issues(connection, document_id):
+        has_open_issues = _has_open_document_issues(connection, document_id)
+        if already_applied is None and (
+            (document.document_kind == "invoice" and canonical_invoice_id is not None)
+            or (document.document_kind == "reading" and not has_open_issues)
+        ):
+            gestor_bd.marcar_archivo_procesado(
+                connection,
+                marker_name,
+                hash_md5=document.sha256,
+                id_factura=canonical_invoice_id,
+                notas=f"Fuente confirmada del expediente {case_id}",
+                commit=False,
+            )
+        if has_open_issues:
             return _source_document(connection, document_id)
 
         connection.execute(
@@ -304,9 +307,6 @@ def _apply_confirmed_invoice(
     already_applied: sqlite3.Row | None,
 ) -> int | None:
     _required_confirmed(values, "tipo_suministro", "importe_total")
-    if already_applied is not None:
-        return already_applied["id_factura"]
-
     numeric_fields = (
         "consumo_total", "termino_fijo", "termino_variable", "impuestos", "iva",
     )
@@ -327,9 +327,13 @@ def _apply_confirmed_invoice(
         if field in values:
             invoice[field] = _confirmed_number(values, field)
 
-    invoice_id = gestor_bd.insertar_factura(
-        connection, invoice, commit=False, preserve_missing_as_null=True,
-    )
+    invoice_id = already_applied["id_factura"] if already_applied is not None else None
+    if invoice_id is not None:
+        _update_confirmed_invoice(connection, invoice_id, invoice)
+    else:
+        invoice_id = gestor_bd.insertar_factura(
+            connection, invoice, commit=False, preserve_missing_as_null=True,
+        )
     if invoice_id is None:
         existing = connection.execute(
             """SELECT id_factura,id_periodo,tipo_suministro,importe_total FROM facturas
@@ -373,12 +377,38 @@ def _apply_confirmed_invoice(
         if amount is None:
             continue
         connection.execute(
-            """INSERT OR IGNORE INTO invoice_components
+            """INSERT INTO invoice_components
                (id_factura,component_key,amount,unit)
-               VALUES (?, ?, ?, 'EUR')""",
+               VALUES (?, ?, ?, 'EUR')
+               ON CONFLICT(id_factura,component_key) DO UPDATE SET
+                   amount=excluded.amount,unit=excluded.unit""",
             (invoice_id, component_key, amount),
         )
     return invoice_id
+
+
+def _update_confirmed_invoice(
+    connection: sqlite3.Connection, invoice_id: int, values: Mapping[str, object],
+) -> None:
+    """Actualiza sólo los campos confirmados de la misma factura canónica."""
+    updates = {
+        "id_periodo": values["id_periodo"],
+        "tipo_suministro": values["tipo_suministro"],
+        "importe_total": values["importe_total"],
+        "archivo_origen": values["archivo_origen"],
+    }
+    for field in (
+        "proveedor", "cups_o_referencia", "num_factura", "fecha_factura",
+        "fecha_inicio", "fecha_fin", "unidad_consumo", "consumo_total",
+        "termino_fijo", "termino_variable", "impuestos", "iva",
+    ):
+        if field in values:
+            updates[field] = values[field]
+    assignments = ", ".join(f"{field}=?" for field in updates)
+    connection.execute(
+        f"UPDATE facturas SET {assignments} WHERE id_factura=?",
+        (*updates.values(), invoice_id),
+    )
 
 
 def _apply_confirmed_readings(
