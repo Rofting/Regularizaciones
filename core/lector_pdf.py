@@ -935,6 +935,7 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
     if not clave_prov:
         return {"ok": False, "motivo": "PROVEEDOR_NO_IDENTIFICADO",
                 "detalle": f"Ningún proveedor reconocido en {nombre}",
+                "fragment": re.sub(r"\s+", " ", texto).strip()[:1000],
                 "nombre_archivo": nombre, "hash_md5": hash_md5}
 
     # ----------------------------------------------------------------

@@ -90,6 +90,37 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual(1, load.call_count)
         lector_pdf.cargar_proveedores.cache_clear()
 
+    def test_unknown_provider_invoice_with_number_date_and_total_is_classified(self):
+        result = source_analysis.analyse_pdf(
+            Path("naturgy.pdf"),
+            pdf_processor=lambda *_args, **_kwargs: {
+                "ok": False,
+                "motivo": "PROVEEDOR_NO_IDENTIFICADO",
+                "detalle": "Ningún proveedor reconocido",
+                "fragment": (
+                    "Factura N.º FE26390022198715 Fecha de emisión: 08/06/2026 "
+                    "Total a pagar 326,98 €"
+                ),
+            },
+        )
+
+        self.assertEqual("invoice", result.kind)
+        self.assertEqual("medium", result.confidence)
+        self.assertEqual("326,98", result.candidates["importe_total"])
+
+    def test_unstructured_unknown_pdf_remains_classification_review(self):
+        result = source_analysis.analyse_pdf(
+            Path("nota.pdf"),
+            pdf_processor=lambda *_args, **_kwargs: {
+                "ok": False,
+                "motivo": "PROVEEDOR_NO_IDENTIFICADO",
+                "fragment": "Aviso interno",
+            },
+        )
+
+        self.assertEqual("unknown", result.kind)
+        self.assertIn("PROVEEDOR_NO_IDENTIFICADO", result.review_message)
+
 
 if __name__ == "__main__":
     unittest.main()
