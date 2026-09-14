@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,21 @@ class SourceAnalysisTest(unittest.TestCase):
             with self.subTest(header=header):
                 result = source_analysis.classify_headers((header, "Nombre"), suffix=".csv")
                 self.assertEqual("owners", result.kind)
+
+    @mock.patch("lector_pdf.procesar_archivo")
+    def test_default_pdf_analysis_uses_project_provider_configuration(self, processor):
+        processor.return_value = {
+            "ok": True,
+            "tipo": "FACTURA",
+            "datos": {"fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31", "importe_total": 42.5},
+        }
+
+        source_analysis.analyse_pdf(Path("invoice.pdf"), community_code="658")
+
+        processor.assert_called_once_with(
+            "invoice.pdf", "658",
+            ruta_proveedores=str(PROJECT_ROOT / "config" / "proveedores.json"),
+        )
 
 
 if __name__ == "__main__":

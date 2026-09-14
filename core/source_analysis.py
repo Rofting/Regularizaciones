@@ -102,8 +102,13 @@ def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = 
     """Classify a PDF using the existing provider/reading parser."""
     if pdf_processor is None:
         from lector_pdf import procesar_archivo
-        pdf_processor = procesar_archivo
-    result = pdf_processor(path, community_code)
+        provider_config = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+        result = procesar_archivo(
+            str(path), community_code,
+            ruta_proveedores=str(provider_config),
+        )
+    else:
+        result = pdf_processor(path, community_code)
     if not isinstance(result, Mapping) or not result.get("ok"):
         return SourceAnalysis.unknown()
     raw_data = result.get("datos")
