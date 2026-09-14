@@ -79,6 +79,20 @@ class FakeWidget:
             yield from child.descendants()
 
 
+class IssuePageTest(unittest.TestCase):
+    def test_issue_page_limits_first_view_to_ten_of_fifty_five(self):
+        visible, page, pages = expedient_ui.issue_page(tuple(range(55)), page=1)
+
+        self.assertEqual(10, len(visible))
+        self.assertEqual((1, 6), (page, pages))
+
+    def test_issue_page_normalizes_out_of_range_page(self):
+        visible, page, pages = expedient_ui.issue_page(tuple(range(11)), page=9)
+
+        self.assertEqual((2, 2), (page, pages))
+        self.assertEqual(1, len(visible))
+
+
 class OnboardingSummaryDataTest(unittest.TestCase):
     def setUp(self):
         self.configuration = OnboardingConfiguration(

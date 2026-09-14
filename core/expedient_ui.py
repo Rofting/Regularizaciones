@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypeVar
 
 import customtkinter as ctk
 
@@ -28,6 +28,20 @@ if TYPE_CHECKING:
 
 
 _SOURCE_SUFFIXES = frozenset({".pdf", ".xlsx", ".xls", ".csv"})
+_Issue = TypeVar("_Issue")
+
+
+def issue_page(
+    issues: Sequence[_Issue], page: int, page_size: int = 10,
+) -> tuple[tuple[_Issue, ...], int, int]:
+    """Return one bounded, one-based page without losing the total page count."""
+    if page_size < 1:
+        raise ValueError("El tamaño de página debe ser positivo")
+    items = tuple(issues)
+    total_pages = max(1, (len(items) + page_size - 1) // page_size)
+    normalised_page = min(max(int(page), 1), total_pages)
+    start = (normalised_page - 1) * page_size
+    return items[start:start + page_size], normalised_page, total_pages
 
 
 def source_summary(kinds) -> str:
