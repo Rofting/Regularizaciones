@@ -297,6 +297,42 @@
       "cups_comunidades": {
         "644": "50297001701027952"
       }
+    },
+    "MANTENIMIENTOS_ZARAGOZA": {
+      "nombre_display": "Instalaciones Zaragoza S.L. — Mantenimiento y reparaciones",
+      "tipo_suministro": "MANTENIMIENTO",
+      "unidad_consumo": null,
+      "_notas": "Factura de mantenimiento preventivo o reparación. La fecha de prestación no siempre figura y debe revisarse si no se extrae.",
+      "firmas_identificacion": [
+        "INSTALACIONES ZARAGOZA S.L.",
+        "MANTENIMIENTO DE SALAS DE CALDERAS",
+        "presupuestos@mantenimientoszaragoza.com"
+      ],
+      "regex": {
+        "num_factura": "Factura\\s+N[úu]mero\\s*#?\\s*(?P<valor>[A-Z]\\d+)",
+        "fecha_factura": "Fecha\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "importe_total": "[A-Z]\\d+\\s*-\\s*(?P<valor>[\\d.,]+)\\s*(?:€|�)"
+      },
+      "cups_comunidades": {}
+    },
+    "NATURGY_CLIENTES_GAS": {
+      "nombre_display": "Naturgy Clientes S.A.U. — Gas mercado libre",
+      "tipo_suministro": "GAS",
+      "unidad_consumo": "kWh",
+      "_notas": "Factura de gas de Naturgy Clientes. El CUPS se valida sólo cuando la comunidad lo tenga confirmado en este perfil.",
+      "firmas_identificacion": [
+        "Naturgy Clientes, S.A.U.",
+        "naturgyclientes@naturgy.com",
+        "Período gas:"
+      ],
+      "regex": {
+        "num_factura": "N[.º°o]\\s*de\\s*factura:\\s*(?P<valor>[A-Z0-9]+)",
+        "fecha_factura": "Fecha\\s+de\\s+emisi[oó]n:\\s*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "fecha_inicio": "Per[ií]odo\\s+gas:\\s+del\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "fecha_fin": "Per[ií]odo\\s+gas:\\s+del\\s+\\d{2}/\\d{2}/\\d{4}\\s+al\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "importe_total": "Total\\s+a\\s+pagar\\s+(?P<valor>[\\d.,\\s]+)\\s*(?:€|�)"
+      },
+      "cups_comunidades": {}
     }
   }
 }

@@ -64,6 +64,88 @@ class SourceAnalysisTest(unittest.TestCase):
 
         self.assertTrue(providers)
 
+    @mock.patch("lector_pdf.procesar_archivo")
+    def test_analyse_pdf_passes_a_preloaded_catalog_to_the_reader(self, processor):
+        providers = {"proveedores": {}}
+        processor.return_value = {"ok": True, "tipo": "FACTURA", "datos": {}}
+
+        source_analysis.analyse_pdf(
+            Path("invoice.pdf"),
+            community_code="658", providers=providers,
+        )
+
+        processor.assert_called_once_with(
+            "invoice.pdf", "658",
+            ruta_proveedores=str(PROJECT_ROOT / "config" / "proveedores.json"),
+            proveedores=providers,
+        )
+
+    def test_provider_catalog_is_loaded_once_per_path(self):
+        lector_pdf.cargar_proveedores.cache_clear()
+        config = str(PROJECT_ROOT / "config" / "proveedores.json")
+        with mock.patch("lector_pdf.json.load", wraps=lector_pdf.json.load) as load:
+            lector_pdf.cargar_proveedores(config)
+            lector_pdf.cargar_proveedores(config)
+
+        self.assertEqual(1, load.call_count)
+        lector_pdf.cargar_proveedores.cache_clear()
+
+    def test_unknown_provider_invoice_with_number_date_and_total_is_classified(self):
+        result = source_analysis.analyse_pdf(
+            Path("naturgy.pdf"),
+            pdf_processor=lambda *_args, **_kwargs: {
+                "ok": False,
+                "motivo": "PROVEEDOR_NO_IDENTIFICADO",
+                "detalle": "Ningún proveedor reconocido",
+                "fragment": (
+                    "Factura N.º FE26390022198715 Fecha de emisión: 08/06/2026 "
+                    "Total a pagar 326,98 €"
+                ),
+            },
+        )
+
+        self.assertEqual("invoice", result.kind)
+        self.assertEqual("medium", result.confidence)
+        self.assertEqual("326,98", result.candidates["importe_total"])
+
+    def test_unstructured_unknown_pdf_remains_classification_review(self):
+        result = source_analysis.analyse_pdf(
+            Path("nota.pdf"),
+            pdf_processor=lambda *_args, **_kwargs: {
+                "ok": False,
+                "motivo": "PROVEEDOR_NO_IDENTIFICADO",
+                "fragment": "Aviso interno",
+            },
+        )
+
+        self.assertEqual("unknown", result.kind)
+        self.assertIn("PROVEEDOR_NO_IDENTIFICADO", result.review_message)
+
+    def test_catalogue_identifies_mantenimientos_zaragoza_invoice(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "INSTALACIONES ZARAGOZA S.L. MANTENIMIENTO DE SALAS DE CALDERAS",
+            "F2524083.pdf", providers,
+        )
+
+        self.assertEqual("MANTENIMIENTOS_ZARAGOZA", key)
+        self.assertEqual("MANTENIMIENTO", config["tipo_suministro"])
+
+    def test_catalogue_identifies_naturgy_clientes_gas_invoice(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "Naturgy Clientes, S.A.U. Estás en mercado libre. "
+            "Período gas: del 26/04/2026 al 29/05/2026",
+            "naturgy.pdf", providers,
+        )
+
+        self.assertEqual("NATURGY_CLIENTES_GAS", key)
+        self.assertEqual("GAS", config["tipo_suministro"])
+
 
 if __name__ == "__main__":
     unittest.main()

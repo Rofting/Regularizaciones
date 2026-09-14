@@ -158,6 +158,9 @@ class AppGestionFincas(ctk.CTk):
         self.ruta_bd_expedientes = RUTA_BD
         self.ruta_archivo_expedientes = BASE_DIR / "data" / "expedientes"
         self._procesando        = False
+        self._issues_page       = 1
+        self._issues_case_id    = None
+        self._issues_current    = ()
 
         self._crear_ui_v3()
         self._cargar_comunidades()
@@ -1302,6 +1305,10 @@ class AppGestionFincas(ctk.CTk):
 
     def _refrescar_bandeja_incidencias(self, issues=()):
         issues = tuple(issues)
+        self._issues_current = issues
+        if self._issues_case_id != self.id_expediente:
+            self._issues_case_id = self.id_expediente
+            self._issues_page = 1
 
         def update_tray():
             tray = getattr(self, "bandeja_incidencias", None)
@@ -1332,7 +1339,34 @@ class AppGestionFincas(ctk.CTk):
                 return
 
             expedient_ui = MOD.get("expedient_ui")
-            for issue in issues:
+            visible_issues, current_page, total_pages = expedient_ui.issue_page(
+                issues, self._issues_page,
+            )
+            self._issues_page = current_page
+            controls = ctk.CTkFrame(tray, fg_color="transparent")
+            controls.pack(fill="x", padx=4, pady=(2, 6))
+            ctk.CTkLabel(
+                controls,
+                text=f"{len(issues)} pendientes · Página {current_page}/{total_pages}",
+                font=UIM.fuente(10), text_color=C["texto_sec"],
+            ).pack(side="left")
+            if total_pages > 1:
+                def change_page(target_page):
+                    self._issues_page = target_page
+                    self._refrescar_bandeja_incidencias(self._issues_current)
+
+                ctk.CTkButton(
+                    controls, text="Anterior", width=72, height=26,
+                    corner_radius=7, command=lambda: change_page(current_page - 1),
+                    **UIM.secondary_button_kwargs(),
+                ).pack(side="right", padx=(5, 0))
+                ctk.CTkButton(
+                    controls, text="Siguiente", width=72, height=26,
+                    corner_radius=7, command=lambda: change_page(current_page + 1),
+                    **UIM.secondary_button_kwargs(),
+                ).pack(side="right")
+
+            for issue in visible_issues:
                 row = ctk.CTkFrame(
                     tray,
                     fg_color=C["panel"],
@@ -1398,6 +1432,9 @@ class AppGestionFincas(ctk.CTk):
 
     def _limpiar_contexto_expediente(self):
         self.id_expediente = None
+        self._issues_page = 1
+        self._issues_case_id = None
+        self._issues_current = ()
         self.expediente_actual.set("")
         self.expediente_seleccionado.set("")
         self._ids_expediente = {}

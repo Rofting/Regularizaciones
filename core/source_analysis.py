@@ -45,8 +45,9 @@ class SourceAnalysis:
         object.__setattr__(self, "required_fields", tuple(self.required_fields))
 
     @classmethod
-    def invoice(cls, candidates: Mapping[str, str | None] | None = None, *, locator=None) -> "SourceAnalysis":
-        return cls("invoice", "high", candidates or {}, INVOICE_FIELDS, locator)
+    def invoice(cls, candidates: Mapping[str, str | None] | None = None, *, locator=None,
+                confidence: str = "high") -> "SourceAnalysis":
+        return cls("invoice", confidence, candidates or {}, INVOICE_FIELDS, locator)
 
     @classmethod
     def reading(cls, candidates: Mapping[str, str | None] | None = None, *, locator=None) -> "SourceAnalysis":
@@ -62,6 +63,33 @@ class SourceAnalysis:
             "unknown", "low", {}, (), locator,
             message or "No se ha podido identificar el tipo de documento; revise la clasificación.",
         )
+
+
+_GENERIC_INVOICE_MARKERS = (
+    re.compile(r"\bfactura\b", re.IGNORECASE),
+    re.compile(r"n[.º°o]*\s*(?:de\s*)?factura", re.IGNORECASE),
+)
+_GENERIC_DATE_PATTERN = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
+_GENERIC_TOTAL_PATTERN = re.compile(
+    r"(?:total\s+(?:a\s+pagar|factura|importe)|importe\s+total)\D{0,32}"
+    r"(?P<valor>\d{1,3}(?:\.\d{3})*,\d{2}|\d+\.\d{2})",
+    re.IGNORECASE,
+)
+
+
+def classify_generic_invoice_text(text: str, *, locator: SourceLocator | None = None) -> SourceAnalysis | None:
+    """Recognise an invoice without guessing a provider-specific supply type."""
+    normalised = " ".join(str(text or "").split())
+    if not normalised or not any(marker.search(normalised) for marker in _GENERIC_INVOICE_MARKERS):
+        return None
+    if not _GENERIC_DATE_PATTERN.search(normalised):
+        return None
+    total = _GENERIC_TOTAL_PATTERN.search(normalised)
+    if total is None:
+        return None
+    return SourceAnalysis.invoice(
+        {"importe_total": total.group("valor")}, locator=locator, confidence="medium",
+    )
 
 
 def _normalise_header(value: object) -> str:
@@ -98,19 +126,32 @@ def _locator_from_mapping(result: Mapping[str, object], data: Mapping[str, objec
     )
 
 
-def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = None) -> SourceAnalysis:
+def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = None,
+                providers: Mapping[str, object] | None = None) -> SourceAnalysis:
     """Classify a PDF using the existing provider/reading parser."""
     if pdf_processor is None:
         from lector_pdf import procesar_archivo
         provider_config = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
-        result = procesar_archivo(
-            str(path), community_code,
-            ruta_proveedores=str(provider_config),
-        )
+        processor_args = {"ruta_proveedores": str(provider_config)}
+        if providers is not None:
+            processor_args["proveedores"] = providers
+        result = procesar_archivo(str(path), community_code, **processor_args)
     else:
         result = pdf_processor(path, community_code)
-    if not isinstance(result, Mapping) or not result.get("ok"):
+    if not isinstance(result, Mapping):
         return SourceAnalysis.unknown()
+    if not result.get("ok"):
+        locator = _locator_from_mapping(result, {})
+        reason = _string_value(result.get("motivo"))
+        detail = _string_value(result.get("detalle"))
+        if reason == "PROVEEDOR_NO_IDENTIFICADO":
+            generic = classify_generic_invoice_text(
+                _string_value(result.get("fragment")) or "", locator=locator,
+            )
+            if generic is not None:
+                return generic
+        message = ": ".join(part for part in (reason, detail) if part)
+        return SourceAnalysis.unknown(message or None, locator=locator)
     raw_data = result.get("datos")
     data = raw_data if isinstance(raw_data, Mapping) else {}
     candidates = {
@@ -334,12 +375,16 @@ def _tabular_rows(path):
     raise ValueError("Formato tabular no compatible")
 
 
-def analyse_source(path: Path, *, community_code: str, pdf_processor=None) -> SourceAnalysis:
+def analyse_source(path: Path, *, community_code: str, pdf_processor=None,
+                   providers: Mapping[str, object] | None = None) -> SourceAnalysis:
     """Dispatch a supported source file to the appropriate analyser."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return analyse_pdf(path, pdf_processor=pdf_processor, community_code=community_code)
+        return analyse_pdf(
+            path, pdf_processor=pdf_processor, community_code=community_code,
+            providers=providers,
+        )
     if suffix in _TABULAR_SUFFIXES:
         return analyse_tabular(path)
     return SourceAnalysis.unknown()

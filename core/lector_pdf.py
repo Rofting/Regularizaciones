@@ -26,6 +26,7 @@ import json
 import zipfile
 import hashlib
 import calendar
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 
@@ -34,7 +35,8 @@ from pathlib import Path
 # CARGA DE CONFIGURACIÓN
 # ---------------------------------------------------------------------------
 
-def cargar_proveedores(ruta_json: str = None) -> dict:
+@lru_cache(maxsize=None)
+def cargar_proveedores(ruta_json: str | None = None) -> dict:
     """Carga proveedores.json desde la configuración del proyecto.
 
     Se conserva la antigua ubicación junto al lector como compatibilidad para
@@ -886,7 +888,8 @@ def extraer_lecturas_metrigest(texto_paginas: list[str], config: dict) -> dict:
 
 
 def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
-                     con_bd=None, ruta_proveedores: str = None) -> dict:
+                     con_bd=None, ruta_proveedores: str = None,
+                     proveedores: dict | None = None) -> dict:
     """
     Procesa un archivo de factura o resumen Metrigest.
 
@@ -926,12 +929,13 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
                 "requiere_ocr": True}
 
     # 2. Cargar proveedores e identificar proveedor
-    proveedores = cargar_proveedores(ruta_proveedores)
+    proveedores = proveedores if proveedores is not None else cargar_proveedores(ruta_proveedores)
     clave_prov, config_prov = identificar_proveedor(texto, nombre, proveedores)
 
     if not clave_prov:
         return {"ok": False, "motivo": "PROVEEDOR_NO_IDENTIFICADO",
                 "detalle": f"Ningún proveedor reconocido en {nombre}",
+                "fragment": re.sub(r"\s+", " ", texto).strip()[:1000],
                 "nombre_archivo": nombre, "hash_md5": hash_md5}
 
     # ----------------------------------------------------------------
