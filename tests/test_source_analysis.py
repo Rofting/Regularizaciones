@@ -121,6 +121,31 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual("unknown", result.kind)
         self.assertIn("PROVEEDOR_NO_IDENTIFICADO", result.review_message)
 
+    def test_catalogue_identifies_mantenimientos_zaragoza_invoice(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "INSTALACIONES ZARAGOZA S.L. MANTENIMIENTO DE SALAS DE CALDERAS",
+            "F2524083.pdf", providers,
+        )
+
+        self.assertEqual("MANTENIMIENTOS_ZARAGOZA", key)
+        self.assertEqual("MANTENIMIENTO", config["tipo_suministro"])
+
+    def test_catalogue_identifies_naturgy_clientes_gas_invoice(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "Naturgy Clientes, S.A.U. Estás en mercado libre. "
+            "Período gas: del 26/04/2026 al 29/05/2026",
+            "naturgy.pdf", providers,
+        )
+
+        self.assertEqual("NATURGY_CLIENTES_GAS", key)
+        self.assertEqual("GAS", config["tipo_suministro"])
+
 
 if __name__ == "__main__":
     unittest.main()
