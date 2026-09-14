@@ -179,6 +179,87 @@ class ExpedientServiceTest(unittest.TestCase):
             ).fetchone()[0],
         )
 
+    def test_list_archived_path_candidates_returns_only_verified_duplicates(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Copias a elegir",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path.write_bytes(b"%PDF-1.4 copies to choose")
+        archive_root = Path(self.directory.name) / "expedientes"
+        document, _ = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        first_copy = document.archived_path.with_name(f"658_{document.archived_path.name}")
+        document.archived_path.rename(first_copy)
+        second_copy = first_copy.with_name(f"copy_{first_copy.name}")
+        shutil.copy2(first_copy, second_copy)
+        (archive_root / str(case.id_case) / "fuentes" / "otro.pdf").write_bytes(b"otro")
+
+        candidates = expedient_service.list_archived_path_candidates(
+            self.connection, archive_root=archive_root, case_id=case.id_case,
+        )
+
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(document.id_document, candidates[0].document_id)
+        self.assertEqual((first_copy, second_copy), candidates[0].candidate_paths)
+
+    def test_select_archived_path_requires_a_verified_candidate(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Elegir copia",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path.write_bytes(b"%PDF-1.4 selected copy")
+        archive_root = Path(self.directory.name) / "expedientes"
+        document, _ = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        selected_path = document.archived_path.with_name(f"658_{document.archived_path.name}")
+        document.archived_path.rename(selected_path)
+        shutil.copy2(selected_path, selected_path.with_name(f"copy_{selected_path.name}"))
+
+        selected = expedient_service.select_archived_source_path(
+            self.connection, document.id_document, selected_path,
+            archive_root=archive_root,
+        )
+
+        self.assertEqual(selected_path, selected)
+        self.assertEqual(
+            str(selected_path), self.connection.execute(
+                "SELECT archived_path FROM source_documents WHERE id_document=?",
+                (document.id_document,),
+            ).fetchone()[0],
+        )
+
+    def test_list_archived_path_candidates_ignores_an_external_candidate(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Enlace externo",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path.write_bytes(b"%PDF-1.4 external symbolic link")
+        archive_root = Path(self.directory.name) / "expedientes"
+        document, _ = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        external_copy = Path(self.directory.name) / "external.pdf"
+        external_copy.write_bytes(source_path.read_bytes())
+        document.archived_path.unlink()
+        internal_copy = document.archived_path.with_name("copia-interna.pdf")
+        internal_copy.write_bytes(source_path.read_bytes())
+        # Windows CI does not grant symlink privileges. Simulate a directory
+        # link exposing an external file so the containment check is covered.
+        with patch.object(Path, "iterdir", return_value=iter((internal_copy, external_copy))):
+            candidates = expedient_service.list_archived_path_candidates(
+                self.connection, archive_root=archive_root, case_id=case.id_case,
+            )
+
+        self.assertEqual((), candidates)
+
     def test_register_source_document_rejects_outer_transaction_without_side_effects(self):
         case = expedient_service.create_case(
             self.connection, self.community_id, name="Transacción externa",

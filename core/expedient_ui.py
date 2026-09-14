@@ -1573,6 +1573,111 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
     render()
 
 
+def open_archived_path_resolution_dialog(app: "AppGestionFincas", case_id: int) -> None:
+    """Permite elegir una copia ya verificada sin mover ni borrar fuentes."""
+    dialog = _dialog(app, "Resolver copias archivadas", 860, 680)
+    ctk.CTkLabel(
+        dialog,
+        text="Elige la copia correcta",
+        font=UIM.fuente(20, "bold"),
+        text_color=C["texto"],
+    ).pack(anchor="w", padx=22, pady=(20, 3))
+    ctk.CTkLabel(
+        dialog,
+        text=(
+            "Se muestran solo archivos con la misma huella que el documento registrado. "
+            "Elegir una copia actualiza la referencia del expediente; no mueve ni borra archivos."
+        ),
+        font=UIM.fuente(11), text_color=C["texto_sec"], justify="left", wraplength=790,
+    ).pack(anchor="w", padx=22, pady=(0, 12))
+    panel = ctk.CTkScrollableFrame(dialog, fg_color=C["fondo"])
+    panel.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+    def open_candidate(path: Path) -> None:
+        try:
+            if sys.platform != "win32":
+                raise OSError("Abrir el archivo solo está disponible en Windows.")
+            os.startfile(str(path))
+        except Exception as exc:
+            messagebox.showerror("No se pudo abrir la copia", str(exc), parent=dialog)
+
+    def render() -> None:
+        for widget in panel.winfo_children():
+            widget.destroy()
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            candidates = expedient_service.list_archived_path_candidates(
+                connection, archive_root=app.ruta_archivo_expedientes, case_id=case_id,
+            )
+        finally:
+            connection.close()
+
+        if not candidates:
+            ctk.CTkLabel(
+                panel,
+                text="No hay copias duplicadas pendientes en este expediente.",
+                font=UIM.fuente(12), text_color=C["texto_sec"],
+            ).pack(anchor="w", padx=14, pady=20)
+            return
+
+        for item in candidates:
+            group = ctk.CTkFrame(
+                panel, fg_color=C["panel"], corner_radius=11,
+                border_width=1, border_color=C["borde"],
+            )
+            group.pack(fill="x", padx=3, pady=6)
+            ctk.CTkLabel(
+                group, text=item.original_name, font=UIM.fuente(12, "bold"),
+                text_color=C["texto"], anchor="w", wraplength=720,
+            ).pack(fill="x", padx=14, pady=(12, 2))
+            ctk.CTkLabel(
+                group,
+                text=f"Hay {len(item.candidate_paths)} copias idénticas. Abre una si necesitas comprobarla.",
+                font=UIM.fuente(10), text_color=C["texto_sec"], anchor="w",
+            ).pack(fill="x", padx=14, pady=(0, 7))
+            for candidate in item.candidate_paths:
+                row = ctk.CTkFrame(group, fg_color=C["panel_2"], corner_radius=8)
+                row.pack(fill="x", padx=14, pady=3)
+                ctk.CTkLabel(
+                    row, text=candidate.name, font=UIM.fuente(10), text_color=C["texto"],
+                    anchor="w", wraplength=420,
+                ).pack(side="left", fill="x", expand=True, padx=10, pady=8)
+                ctk.CTkButton(
+                    row, text="Abrir", width=68, height=29, corner_radius=7,
+                    **UIM.secondary_button_kwargs(),
+                    command=lambda path=candidate: open_candidate(path),
+                ).pack(side="right", padx=(4, 7), pady=5)
+                ctk.CTkButton(
+                    row, text="Usar esta copia", width=126, height=29, corner_radius=7,
+                    fg_color=C["primario"], hover_color=C["primario_hover"],
+                    command=lambda document_id=item.document_id, path=candidate: select(document_id, path),
+                ).pack(side="right", padx=(0, 4), pady=5)
+
+    def select(document_id: int, path: Path) -> None:
+        if not messagebox.askyesno(
+            "Confirmar copia",
+            f"Se usará esta copia para el expediente:\n\n{path.name}\n\nNo se moverá ni borrará ningún archivo.",
+            parent=dialog,
+        ):
+            return
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            selected = expedient_service.select_archived_source_path(
+                connection, document_id, path, archive_root=app.ruta_archivo_expedientes,
+            )
+        except (LookupError, ValueError, RuntimeError, OSError) as exc:
+            messagebox.showerror("No se pudo actualizar la ruta", str(exc), parent=dialog)
+            return
+        finally:
+            connection.close()
+        app.log(f"Ruta archivada recuperada: {selected.name}", "ok")
+        app._refrescar_lista_expedientes(select_case_id=case_id)
+        app._refrescar_expediente()
+        render()
+
+    render()
+
+
 def open_archived_file(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     try:
         if sys.platform != "win32":
