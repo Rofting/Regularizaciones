@@ -990,46 +990,10 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
         codigo_comunidad = codigo_por_cif
         validacion["nivel_2_cif"] = validacion.get("nivel_2_cif") or "ok"
 
-        # --- RENOMBRADO AUTOMÁTICO ---
-        # Si el archivo no empieza ya con "CODIGO_", lo renombramos para unificar.
-        if not nombre.startswith(f"{codigo_comunidad}_"):
-            nuevo_nombre = f"{codigo_comunidad}_{nombre}"
-            nueva_ruta = os.path.join(os.path.dirname(ruta_archivo), nuevo_nombre)
-            try:
-                os.rename(ruta_archivo, nueva_ruta)
-                print(f"       Rebautizado automático: {nombre} ➔ {nuevo_nombre}")
-                ruta_archivo = nueva_ruta
-                nombre = nuevo_nombre
-            except Exception as e:
-                print(f"    ⚠️ No se pudo renombrar el archivo: {e}")
-
     elif cif_pdf:
         validacion["nivel_2_cif"] = "cif_no_en_bd"
-        # CIF encontrado pero no registrado en BD — continuamos con el código del archivo
-        # Si el archivo no tiene prefijo de comunidad, añadirlo si tenemos código
-        if codigo_comunidad and not nombre.startswith(f"{codigo_comunidad}_"):
-            nuevo_nombre = f"{codigo_comunidad}_{nombre}"
-            nueva_ruta = os.path.join(os.path.dirname(ruta_archivo), nuevo_nombre)
-            try:
-                os.rename(ruta_archivo, nueva_ruta)
-                print(f"       Rebautizado automático: {nombre} ➔ {nuevo_nombre}")
-                ruta_archivo = nueva_ruta
-                nombre = nuevo_nombre
-            except Exception:
-                pass
     else:
         validacion["nivel_2_cif"] = "sin_cif_en_pdf"
-        # Sin CIF pero con código de comunidad pasado por argumento — renombrar si falta prefijo
-        if codigo_comunidad and not nombre.startswith(f"{codigo_comunidad}_"):
-            nuevo_nombre = f"{codigo_comunidad}_{nombre}"
-            nueva_ruta = os.path.join(os.path.dirname(ruta_archivo), nuevo_nombre)
-            try:
-                os.rename(ruta_archivo, nueva_ruta)
-                print(f"       Rebautizado automático: {nombre} ➔ {nuevo_nombre}")
-                ruta_archivo = nueva_ruta
-                nombre = nuevo_nombre
-            except Exception:
-                pass
 
     # Sin comunidad identificada por ningún medio → cuarentena
     if not codigo_comunidad:
@@ -1148,7 +1112,7 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
     datos["cups_o_referencia"] = cups_esperado or datos.get("cups")
     datos["archivo_origen"] = nombre
 
-    if not datos.get("importe_total") or datos["importe_total"] <= 0:
+    if datos.get("importe_total") is None or datos["importe_total"] == 0:
         return {
             "ok": False, "motivo": "IMPORTE_CERO",
             "detalle": f"No se extrajo importe_total en {nombre}",

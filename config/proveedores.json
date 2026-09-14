@@ -139,8 +139,7 @@
       "firmas_identificacion": [
         "METRIGEST",
         "metrigest.net",
-        "B99375867",
-        "ACS"
+        "B99375867"
       ],
       "regex_cabecera": {
         "comunidad": "C\\.P\\.\\s+(?P<valor>[^\\n]+)",
@@ -159,8 +158,7 @@
       "firmas_identificacion": [
         "METRIGEST",
         "metrigest.net",
-        "B99375867",
-        "CALEFACCION"
+        "B99375867"
       ],
       "regex_cabecera": {
         "comunidad": "C\\.P\\.\\s+(?P<valor>[^\\n]+)",
@@ -304,7 +302,8 @@
       "unidad_consumo": null,
       "_notas": "Factura de mantenimiento preventivo o reparación. La fecha de prestación no siempre figura y debe revisarse si no se extrae.",
       "firmas_identificacion": [
-        "INSTALACIONES ZARAGOZA S.L.",
+        "INSTALACIONES\\s+ZARAGOZA\\s+S\\.L\\.",
+        "B99091316",
         "MANTENIMIENTO DE SALAS DE CALDERAS",
         "presupuestos@mantenimientoszaragoza.com"
       ],
@@ -331,6 +330,30 @@
         "fecha_inicio": "Per[ií]odo\\s+gas:\\s+del\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
         "fecha_fin": "Per[ií]odo\\s+gas:\\s+del\\s+\\d{2}/\\d{2}/\\d{4}\\s+al\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
         "importe_total": "Total\\s+a\\s+pagar\\s+(?P<valor>[\\d.,\\s]+)\\s*(?:€|�)"
+      },
+      "cups_comunidades": {}
+    },
+    "TOTALENERGIES_GAS": {
+      "nombre_display": "TotalEnergies Electricidad y Gas España S.A.U. — Gas",
+      "tipo_suministro": "GAS",
+      "unidad_consumo": "kWh",
+      "_notas": "Facturas y abonos de gas de TotalEnergies. Los importes negativos se conservan para que los abonos se repartan como crédito.",
+      "firmas_identificacion": [
+        "TotalEnergies",
+        "totalenergies\\.es"
+      ],
+      "regex": {
+        "num_factura": "N[º°o�]\\s*Factura:\\s*(?P<valor>[A-Z]+\\d+)",
+        "fecha_factura": "FECHA\\s+FACTURA:\\s*(?P<valor>\\d{1,2}\\s+de\\s+\\w+\\s+de\\s+\\d{4})",
+        "fecha_inicio": "(?:Periodo\\s+de\\s+facturaci[óo�]n:\\s*)?De\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})\\s+al",
+        "fecha_fin": "(?:Periodo\\s+de\\s+facturaci[óo�]n:\\s*)?De\\s+\\d{2}/\\d{2}/\\d{4}\\s+al\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "consumo_kwh": "Total\\s*\\(kWh\\):\\s*(?P<valor>[\\d.,]+)",
+        "termino_fijo": "T[ée�]rmino\\s+Fijo(?:\\s+Distribuidora)?\\s+(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "termino_variable": "T[ée�]rmino\\s+Variable\\s+Distribuidora\\s+(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "impuestos": "Impuesto\\s+Hidrocarburo[^\\n]*?(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "iva": "Impuesto\\s+IVA[^\\n]*\\n\\s*(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "importe_total": "TOTAL\\s+(?:IMPORTE\\s+)?FACTURA\\s+(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "cups": "CUPS:\\s*(?P<valor>ES\\w+)"
       },
       "cups_comunidades": {}
     }

@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -145,6 +146,96 @@ class SourceAnalysisTest(unittest.TestCase):
 
         self.assertEqual("NATURGY_CLIENTES_GAS", key)
         self.assertEqual("GAS", config["tipo_suministro"])
+
+    def test_catalogue_identifies_totalenergies_gas_invoice(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "Factura gas TotalEnergies Electricidad y Gas España, S.A.U. "
+            "TOTAL IMPORTE FACTURA 6.988,29 €",
+            "FGAS_2600026546.pdf", providers,
+        )
+
+        self.assertEqual("TOTALENERGIES_GAS", key)
+        self.assertEqual("GAS", config["tipo_suministro"])
+
+    def test_totalenergies_profile_extracts_the_invoice_period_and_total(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["TOTALENERGIES_GAS"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "Nº Factura: FGAS2600026546 FECHA FACTURA: 28 de abril de 2026 "
+            "Periodo de facturación: De 31/03/2026 al 23/04/2026 "
+            "Total (kWh): 84.684,16 TOTAL IMPORTE FACTURA 6.988,29 €",
+            config,
+        )
+
+        self.assertEqual("2026-03-31", result["fecha_inicio"])
+        self.assertEqual("2026-04-23", result["fecha_fin"])
+        self.assertEqual(84684.16, result["consumo_kwh"])
+        self.assertEqual(6988.29, result["importe_total"])
+
+    def test_catalogue_keeps_mizar_invoices_under_instalaciones_zaragoza(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "Factura Número # F260009 MANTENIMIENTOS "
+            "INSTALACIONES ZARAGOZA\nS.L. B99091316 Aviso de fuga de ACS",
+            "MIZAR_F260009.pdf", providers,
+        )
+
+        self.assertEqual("MANTENIMIENTOS_ZARAGOZA", key)
+        self.assertEqual("MANTENIMIENTO", config["tipo_suministro"])
+
+    def test_totalenergies_credit_note_is_accepted_as_a_negative_invoice(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        text = (
+            "Factura gas TotalEnergies Electricidad y Gas España, S.A.U. "
+            "Nº Factura: ABOGAS2600002334 FECHA FACTURA: 8 de junio de 2026 "
+            "Periodo de facturación: De 31/03/2026 al 23/04/2026 "
+            "Total (kWh): 84.684,16 TOTAL IMPORTE FACTURA -6.988,29 €"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "credit.pdf"
+            path.touch()
+            with mock.patch("lector_pdf.extraer_texto", return_value=text):
+                result = lector_pdf.procesar_archivo(
+                    str(path), "658", proveedores=providers,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("FACTURA", result["tipo"])
+        self.assertEqual(-6988.29, result["datos"]["importe_total"])
+
+    def test_invoice_analysis_never_renames_the_archived_source_file(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        text = (
+            "Factura gas TotalEnergies Electricidad y Gas España, S.A.U. "
+            "CIF/NIF: H50385863 Nº Factura: FGAS2600026546 "
+            "FECHA FACTURA: 28 de abril de 2026 "
+            "Periodo de facturación: De 31/03/2026 al 23/04/2026 "
+            "Total (kWh): 84.684,16 TOTAL IMPORTE FACTURA 6.988,29 €"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "archived-source.pdf"
+            path.touch()
+            with mock.patch("lector_pdf.extraer_texto", return_value=text):
+                result = lector_pdf.procesar_archivo(
+                    str(path), "658", proveedores=providers,
+                )
+
+            self.assertTrue(path.exists())
+            self.assertFalse((path.parent / "658_archived-source.pdf").exists())
+
+        self.assertTrue(result["ok"])
 
 
 if __name__ == "__main__":
