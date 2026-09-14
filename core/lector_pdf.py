@@ -35,9 +35,18 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def cargar_proveedores(ruta_json: str = None) -> dict:
-    """Carga proveedores.json. Busca en la misma carpeta que este script si no se indica ruta."""
+    """Carga proveedores.json desde la configuración del proyecto.
+
+    Se conserva la antigua ubicación junto al lector como compatibilidad para
+    instalaciones ya configuradas, pero las instalaciones actuales guardan el
+    archivo en ``config/``.
+    """
     if ruta_json is None:
-        ruta_json = os.path.join(os.path.dirname(__file__), "proveedores.json")
+        legacy_path = os.path.join(os.path.dirname(__file__), "proveedores.json")
+        project_config = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "config", "proveedores.json"
+        )
+        ruta_json = legacy_path if os.path.exists(legacy_path) else project_config
     with open(ruta_json, encoding="utf-8") as f:
         return json.load(f)
 

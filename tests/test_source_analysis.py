@@ -10,6 +10,7 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import source_analysis
+import lector_pdf
 
 
 class SourceAnalysisTest(unittest.TestCase):
@@ -57,6 +58,11 @@ class SourceAnalysisTest(unittest.TestCase):
             "invoice.pdf", "658",
             ruta_proveedores=str(PROJECT_ROOT / "config" / "proveedores.json"),
         )
+
+    def test_legacy_pdf_reader_finds_project_provider_configuration(self):
+        providers = lector_pdf.cargar_proveedores()
+
+        self.assertTrue(providers)
 
 
 if __name__ == "__main__":
