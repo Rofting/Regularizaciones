@@ -64,6 +64,32 @@ class SourceAnalysisTest(unittest.TestCase):
 
         self.assertTrue(providers)
 
+    @mock.patch("lector_pdf.procesar_archivo")
+    def test_analyse_pdf_passes_a_preloaded_catalog_to_the_reader(self, processor):
+        providers = {"proveedores": {}}
+        processor.return_value = {"ok": True, "tipo": "FACTURA", "datos": {}}
+
+        source_analysis.analyse_pdf(
+            Path("invoice.pdf"),
+            community_code="658", providers=providers,
+        )
+
+        processor.assert_called_once_with(
+            "invoice.pdf", "658",
+            ruta_proveedores=str(PROJECT_ROOT / "config" / "proveedores.json"),
+            proveedores=providers,
+        )
+
+    def test_provider_catalog_is_loaded_once_per_path(self):
+        lector_pdf.cargar_proveedores.cache_clear()
+        config = str(PROJECT_ROOT / "config" / "proveedores.json")
+        with mock.patch("lector_pdf.json.load", wraps=lector_pdf.json.load) as load:
+            lector_pdf.cargar_proveedores(config)
+            lector_pdf.cargar_proveedores(config)
+
+        self.assertEqual(1, load.call_count)
+        lector_pdf.cargar_proveedores.cache_clear()
+
 
 if __name__ == "__main__":
     unittest.main()

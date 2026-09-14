@@ -98,15 +98,16 @@ def _locator_from_mapping(result: Mapping[str, object], data: Mapping[str, objec
     )
 
 
-def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = None) -> SourceAnalysis:
+def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = None,
+                providers: Mapping[str, object] | None = None) -> SourceAnalysis:
     """Classify a PDF using the existing provider/reading parser."""
     if pdf_processor is None:
         from lector_pdf import procesar_archivo
         provider_config = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
-        result = procesar_archivo(
-            str(path), community_code,
-            ruta_proveedores=str(provider_config),
-        )
+        processor_args = {"ruta_proveedores": str(provider_config)}
+        if providers is not None:
+            processor_args["proveedores"] = providers
+        result = procesar_archivo(str(path), community_code, **processor_args)
     else:
         result = pdf_processor(path, community_code)
     if not isinstance(result, Mapping) or not result.get("ok"):
@@ -334,12 +335,16 @@ def _tabular_rows(path):
     raise ValueError("Formato tabular no compatible")
 
 
-def analyse_source(path: Path, *, community_code: str, pdf_processor=None) -> SourceAnalysis:
+def analyse_source(path: Path, *, community_code: str, pdf_processor=None,
+                   providers: Mapping[str, object] | None = None) -> SourceAnalysis:
     """Dispatch a supported source file to the appropriate analyser."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return analyse_pdf(path, pdf_processor=pdf_processor, community_code=community_code)
+        return analyse_pdf(
+            path, pdf_processor=pdf_processor, community_code=community_code,
+            providers=providers,
+        )
     if suffix in _TABULAR_SUFFIXES:
         return analyse_tabular(path)
     return SourceAnalysis.unknown()
