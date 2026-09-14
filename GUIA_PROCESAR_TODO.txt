@@ -27,6 +27,9 @@ USO HABITUAL EN LA APP
    El período puede ser anual o de cualquier duración.
 2. Añade las facturas y lecturas/PDF disponibles. Si un valor no se puede
    confirmar, se abrirá su copia archivada para completar el dato y motivo.
+   Si incorporas o modificas perfiles en config/proveedores.json, reinicia la
+   aplicación y pulsa "Reanalizar fuentes" en el expediente: no vuelvas a
+   copiar ni a cargar los mismos archivos.
 3. Resuelve todas las incidencias. Sólo entonces queda listo para cálculo.
 4. Pulsa "Generar Excel oficial". El libro se recrea desde la base de datos;
    no se debe editar como fuente de cálculo.
