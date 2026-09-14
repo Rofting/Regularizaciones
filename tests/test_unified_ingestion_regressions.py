@@ -10,6 +10,7 @@ from tests import test_expedient_flow
 from tests.test_expedient_ui import FakeWidget
 import case_ingestion
 import case_distribution
+import case_letter_service
 import database_reset
 import db_migrations
 import document_review
@@ -222,7 +223,27 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             self.assertEqual((100, 120, 20) if case == self.case else (120, 140, 20),
                 tuple(workbook.active.cell(1, column).value for column in range(1, 4)))
             workbook.close()
+        for case, expected_history in (
+            (self.case, [("Febrero", 20.0)]),
+            (second_case, [(self.case.name, 20.0)]),
+        ):
+            context = excel_export_service._input_case_context(self.connection, case.id_case)
+            graph = case_letter_service._consumption_graphs(
+                self.connection, context, [{"id_propietario": owner_id}],
+            )[owner_id]
+            with self.subTest(case=case.name, graph="current"):
+                self.assertEqual(20.0, graph["owner_consumption"])
+                self.assertEqual([20.0], graph["neighbor_consumptions"])
+                self.assertEqual("m³", graph["unit"])
+            with self.subTest(case=case.name, graph="historical"):
+                self.assertEqual(expected_history, graph["history"])
         self.assertEqual(3, self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0])
+        original_period = excel_export_service._input_case_context(
+            self.connection, self.case.id_case,
+        )["id_periodo"]
+        self.assertEqual(original_period, self.connection.execute(
+            "SELECT id_periodo FROM lecturas_vecino WHERE fecha_lectura='2026-01-31'",
+        ).fetchone()[0])
 
     def test_counter_reset_approval_targets_source_interval_inside_case(self):
         self.connection.execute("UPDATE regularization_cases SET fecha_fin='2026-02-28' WHERE id_case=?", (self.case.id_case,))

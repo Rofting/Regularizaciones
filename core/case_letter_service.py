@@ -205,9 +205,11 @@ def _consumption_graphs(
     owners: list[dict[str, Any]],
 ) -> dict[int, dict[str, Any]]:
     """Prepara sólo la comparativa vecinal e histórico, nunca por períodos ajenos."""
+    # La vista combina el período original de lecturas_vecino con las
+    # asociaciones compartidas, conservando también las lecturas antiguas.
     readings = connection.execute(
         """SELECT l.id_propietario,l.fecha_lectura,l.valor_acumulado
-           FROM lecturas_vecino l JOIN propietarios p ON p.id_propietario=l.id_propietario
+           FROM period_readings l JOIN propietarios p ON p.id_propietario=l.id_propietario
            WHERE p.id_comunidad=? AND p.activo=1 AND l.id_periodo=? AND l.tipo='ACS'
              AND l.fecha_lectura IN (?,?)
            ORDER BY l.id_propietario,l.fecha_lectura""",
@@ -231,9 +233,9 @@ def _consumption_graphs(
         historical = connection.execute(
             """SELECT per.nombre,ini.valor_acumulado AS initial_value,fin.valor_acumulado AS final_value
                FROM periodos per
-               JOIN lecturas_vecino ini ON ini.id_periodo=per.id_periodo
+               JOIN period_readings ini ON ini.id_periodo=per.id_periodo
                    AND ini.id_propietario=? AND ini.tipo='ACS' AND ini.fecha_lectura=per.fecha_inicio
-               JOIN lecturas_vecino fin ON fin.id_periodo=per.id_periodo
+               JOIN period_readings fin ON fin.id_periodo=per.id_periodo
                    AND fin.id_propietario=? AND fin.tipo='ACS' AND fin.fecha_lectura=per.fecha_fin
                WHERE per.id_comunidad=? AND per.id_periodo<>? ORDER BY per.fecha_inicio""",
             (owner_id, owner_id, case["id_comunidad"], case["id_periodo"]),
