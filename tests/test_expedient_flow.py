@@ -516,6 +516,36 @@ class ExpedientFlowTest(unittest.TestCase):
 
         self.assertEqual("10.00", self.candidate_value(document.id_document, "importe_total"))
 
+    def test_reanalysis_repairs_an_archived_source_path_before_reading_it(self):
+        document = self.add_confirmed_invoice()
+        recovered_path = document.archived_path.with_name(
+            f"658_{document.archived_path.name}"
+        )
+        document.archived_path.rename(recovered_path)
+        analysed_paths = []
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            archive_root=self.archive_root,
+            analyser=lambda path: (
+                analysed_paths.append(path)
+                or SourceAnalysis.invoice({
+                    "fecha_inicio": "2026-01-01",
+                    "fecha_fin": "2026-01-31",
+                    "importe_total": "128.10",
+                })
+            ),
+        )
+
+        self.assertEqual([recovered_path], analysed_paths)
+        self.assertEqual(
+            str(recovered_path), self.connection.execute(
+                "SELECT archived_path FROM source_documents WHERE id_document=?",
+                (document.id_document,),
+            ).fetchone()[0],
+        )
+
     def test_reanalysis_removes_only_open_automatic_issues(self):
         result = case_ingestion.add_analysed_document_to_case(
             self.connection,
