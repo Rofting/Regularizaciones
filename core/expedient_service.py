@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Iterator
@@ -28,6 +29,14 @@ ALLOWED_TRANSITIONS = {
     "deliveries_generated": {"closed", "under_review"},
     "closed": {"under_review"},
 }
+
+
+@dataclass(frozen=True)
+class ArchivedPathRepairResult:
+    """Resultado de una recuperación conservadora de rutas archivadas."""
+
+    repaired_document_ids: tuple[int, ...]
+    unresolved_document_ids: tuple[int, ...]
 
 
 @contextmanager
@@ -238,6 +247,65 @@ def _sha256(path: Path) -> str:
 def _safe_filename(name: str) -> str:
     safe_name = re.sub(r"[^\w.-]", "_", name, flags=re.UNICODE).strip(".")
     return safe_name or "documento"
+
+
+def repair_archived_source_paths(
+    connection: sqlite3.Connection,
+    *,
+    archive_root: str | Path,
+    case_id: int | None = None,
+) -> ArchivedPathRepairResult:
+    """Repara sólo rutas ausentes con una única copia de igual SHA-256.
+
+    El escaneo queda restringido a ``<archive_root>/<expediente>/fuentes``.
+    Si hay cero o más de una copia con la misma huella, la fila no se toca.
+    """
+    query = (
+        "SELECT id_document,id_case,archived_path,sha256 FROM source_documents"
+        + (" WHERE id_case=?" if case_id is not None else "")
+        + " ORDER BY id_document"
+    )
+    rows = connection.execute(query, (() if case_id is None else (case_id,))).fetchall()
+    missing_rows = [row for row in rows if not Path(row["archived_path"]).is_file()]
+    if not missing_rows:
+        return ArchivedPathRepairResult((), ())
+
+    root = Path(archive_root)
+    candidates: dict[int, dict[str, list[Path]]] = {}
+    for document_case_id in sorted({int(row["id_case"]) for row in missing_rows}):
+        source_directory = root / str(document_case_id) / "fuentes"
+        hashes: dict[str, list[Path]] = {}
+        if source_directory.is_dir():
+            for candidate in source_directory.iterdir():
+                if not candidate.is_file():
+                    continue
+                try:
+                    hashes.setdefault(_sha256(candidate), []).append(candidate)
+                except OSError:
+                    continue
+        candidates[document_case_id] = hashes
+
+    repaired: list[int] = []
+    unresolved: list[int] = []
+    with _transaction(connection):
+        for row in missing_rows:
+            matching_paths = candidates[int(row["id_case"])].get(str(row["sha256"]), [])
+            if len(matching_paths) != 1:
+                unresolved.append(int(row["id_document"]))
+                continue
+            cursor = connection.execute(
+                """UPDATE source_documents SET archived_path=?
+                   WHERE id_document=? AND sha256=? AND archived_path=?""",
+                (
+                    str(matching_paths[0]), int(row["id_document"]), str(row["sha256"]),
+                    str(row["archived_path"]),
+                ),
+            )
+            if cursor.rowcount == 1:
+                repaired.append(int(row["id_document"]))
+            else:
+                unresolved.append(int(row["id_document"]))
+    return ArchivedPathRepairResult(tuple(repaired), tuple(unresolved))
 
 
 def register_source_document(connection: sqlite3.Connection, case_id: int, *,

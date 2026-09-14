@@ -600,8 +600,17 @@ def reanalyze_case_documents(
     case_id: int,
     *,
     analyser: Callable[[Path], SourceAnalysis] | None = None,
+    archive_root: str | Path | None = None,
 ) -> tuple[IngestionResult, ...]:
-    """Actualiza sólo los datos automáticos de las fuentes de un expediente."""
+    """Actualiza los datos automáticos y recupera rutas archivadas verificables."""
+    source_archive_root = (
+        Path(archive_root)
+        if archive_root is not None
+        else Path(__file__).resolve().parents[1] / "data" / "expedientes"
+    )
+    expedient_service.repair_archived_source_paths(
+        connection, archive_root=source_archive_root, case_id=case_id,
+    )
     active_analyser = analyser or _case_analyser(connection, case_id)
     documents = connection.execute(
         """SELECT id_document, id_case, original_name, archived_path, sha256,
