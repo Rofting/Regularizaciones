@@ -85,6 +85,38 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, case.id_case
         ).status)
 
+    def test_register_source_document_recovers_matching_orphaned_archive(self):
+        """A retry registers a valid archive left behind by an interrupted run."""
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Recuperación",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "interrumpida.pdf"
+        source_path.write_bytes(b"%PDF-1.4 recuperable")
+        archive_root = Path(self.directory.name) / "expedientes"
+
+        archived, created = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        self.assertTrue(created)
+        self.connection.execute(
+            "DELETE FROM source_documents WHERE id_document = ?", (archived.id_document,)
+        )
+        self.connection.commit()
+
+        recovered, recovered_created = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+
+        self.assertTrue(recovered_created)
+        self.assertEqual(archived.archived_path, recovered.archived_path)
+        self.assertEqual(source_path.read_bytes(), recovered.archived_path.read_bytes())
+        self.assertEqual(1, self.connection.execute(
+            "SELECT COUNT(*) FROM source_documents WHERE id_case = ?", (case.id_case,)
+        ).fetchone()[0])
+
     def test_register_source_document_rejects_outer_transaction_without_side_effects(self):
         case = expedient_service.create_case(
             self.connection, self.community_id, name="Transacción externa",

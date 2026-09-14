@@ -273,23 +273,25 @@ def register_source_document(connection: sqlite3.Connection, case_id: int, *,
 
             case = get_case(connection, case_id)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                dir=destination.parent, prefix=f".{destination.name}.",
-                suffix=".tmp", delete=False,
-            ) as staging_file:
-                staging_path = Path(staging_file.name)
-            shutil.copy2(source, staging_path)
             if destination.exists():
-                raise FileExistsError(f"Ya existe un archivo archivado en {destination}")
-            destination_descriptor = os.open(
-                destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            )
-            final_created = True
-            with os.fdopen(destination_descriptor, "wb") as destination_file:
-                with staging_path.open("rb") as staging_file:
-                    shutil.copyfileobj(staging_file, destination_file)
-            staging_path.unlink()
-            staging_path = None
+                if not destination.is_file() or _sha256(destination) != sha256:
+                    raise FileExistsError(f"Ya existe un archivo archivado distinto en {destination}")
+            else:
+                with tempfile.NamedTemporaryFile(
+                    dir=destination.parent, prefix=f".{destination.name}.",
+                    suffix=".tmp", delete=False,
+                ) as staging_file:
+                    staging_path = Path(staging_file.name)
+                shutil.copy2(source, staging_path)
+                destination_descriptor = os.open(
+                    destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                )
+                final_created = True
+                with os.fdopen(destination_descriptor, "wb") as destination_file:
+                    with staging_path.open("rb") as staging_file:
+                        shutil.copyfileobj(staging_file, destination_file)
+                staging_path.unlink()
+                staging_path = None
             cursor = connection.execute(
                 """INSERT INTO source_documents
                    (id_case, original_name, archived_path, sha256, document_kind, status)
