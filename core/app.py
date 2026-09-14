@@ -238,6 +238,9 @@ class AppGestionFincas(ctk.CTk):
             height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs(),
         )
         self.botones["Reanalizar fuentes"].pack(fill="x", padx=12, pady=(0, 5))
+        ctk.CTkButton(nav, text="Resolver copias", command=self._accion_resolver_copias_archivadas,
+                      height=31, corner_radius=8, font=UIM.fuente(10),
+                      **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
         ctk.CTkButton(nav, text="Confirmar fuentes", command=self._accion_confirmar_fuentes,
                       height=31, corner_radius=8, font=UIM.fuente(10),
                       **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
@@ -1132,6 +1135,13 @@ class AppGestionFincas(ctk.CTk):
 
         self._estado("Reanalizando fuentes", procesando=True)
         self._en_hilo(work)
+
+    def _accion_resolver_copias_archivadas(self):
+        if self._procesando or not self._validar_expediente_activo():
+            return
+        ui = MOD.get("expedient_ui")
+        if ui:
+            ui.open_archived_path_resolution_dialog(self, self.id_expediente)
 
     def _accion_resolver_incidencias(self):
         review = MOD.get("document_review")
