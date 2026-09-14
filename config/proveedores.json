@@ -342,6 +342,9 @@
         "TotalEnergies",
         "totalenergies\\.es"
       ],
+      "firmas_requeridas": [
+        "Factura\\s+gas"
+      ],
       "regex": {
         "num_factura": "N[º°o�]\\s*Factura:\\s*(?P<valor>[A-Z]+\\d+)",
         "fecha_factura": "FECHA\\s+FACTURA:\\s*(?P<valor>\\d{1,2}\\s+de\\s+\\w+\\s+de\\s+\\d{4})",

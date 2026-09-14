@@ -160,6 +160,19 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual("TOTALENERGIES_GAS", key)
         self.assertEqual("GAS", config["tipo_suministro"])
 
+    def test_totalenergies_electricity_document_is_not_classified_as_gas(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "Factura electricidad TotalEnergies Electricidad y Gas España, S.A.U. "
+            "TOTAL IMPORTE FACTURA 125,00 €",
+            "electricidad.pdf", providers,
+        )
+
+        self.assertIsNone(key)
+        self.assertIsNone(config)
+
     def test_totalenergies_profile_extracts_the_invoice_period_and_total(self):
         providers = lector_pdf.cargar_proveedores(
             str(PROJECT_ROOT / "config" / "proveedores.json")

@@ -564,6 +564,10 @@ def identificar_proveedor(texto: str, nombre_archivo: str, proveedores: dict) ->
         for firma in firmas:
             if not re.search(firma, texto, re.IGNORECASE):
                 continue
+            firmas_requeridas = config.get("firmas_requeridas", [])
+            if any(not re.search(requerida, texto, re.IGNORECASE)
+                   for requerida in firmas_requeridas):
+                continue
 
             # — Metrigest: ACS vs Calefacción —
             if "METRIGEST" in clave:
