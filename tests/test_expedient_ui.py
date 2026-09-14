@@ -1,6 +1,9 @@
 import sys
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
+from datetime import date
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -175,6 +178,25 @@ class OnboardingSummaryDataTest(unittest.TestCase):
 
 
 class SourceFolderAndIssueGuidanceTest(unittest.TestCase):
+    def test_source_summary_groups_detected_documents_by_kind(self):
+        self.assertTrue(hasattr(expedient_ui, "source_summary"))
+        self.assertEqual(
+            "1 factura detectada · 2 lecturas · 1 documento por revisar",
+            expedient_ui.source_summary(("invoice", "reading", "reading", "unknown")),
+        )
+
+    def test_issue_context_describes_pdf_page_or_excel_cell(self):
+        self.assertTrue(hasattr(expedient_ui, "issue_context_label"))
+        self.assertIn("Página 2", expedient_ui.issue_context_label('{"page": 2, "excerpt": "TOTAL"}'))
+        self.assertIn("TOTAL", expedient_ui.issue_context_label('{"page": 2, "excerpt": "TOTAL"}'))
+        self.assertIn("Datos!B4", expedient_ui.issue_context_label('{"sheet": "Datos", "cell": "B4"}'))
+
+    def test_issue_context_handles_old_text_and_missing_or_malformed_metadata(self):
+        self.assertTrue(hasattr(expedient_ui, "issue_context_label"))
+        for value in (None, "", "[]", "null", "{}"):
+            self.assertIn("Abrir archivo", expedient_ui.issue_context_label(value))
+        self.assertIn("Lectura final", expedient_ui.issue_context_label("Lectura final"))
+
     def test_source_folder_ignores_unsupported_and_hidden_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -199,6 +221,194 @@ class SourceFolderAndIssueGuidanceTest(unittest.TestCase):
         self.assertIn("Busca", guidance["what_to_find"])
         self.assertIn("dd/mm/aaaa", guidance["format"])
         self.assertIn("cálculo", guidance["why"])
+
+
+class SourceActionsTest(unittest.TestCase):
+    """Real ingestion/database, with only Tk drawing and PDF extraction replaced."""
+    def setUp(self):
+        import app
+        self.app_module = app
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.database_path = self.root / "gestion.db"
+        # Explicitly close the fixture connection, including on Windows.
+        with sqlite3.connect(self.database_path) as connection:
+            for sql in expedient_ui.gestor_bd.TABLAS:
+                connection.execute(sql)
+            expedient_ui.gestor_bd.aplicar_migraciones(connection)
+        connection.close()
+        self.connection = expedient_ui.gestor_bd.conectar(str(self.database_path))
+        self.addCleanup(self.connection.close)
+        community = expedient_ui.gestor_bd.obtener_o_crear_comunidad(self.connection, "TEST", "Prueba")
+        self.case = expedient_ui.expedient_service.create_case(
+            self.connection, community, name="2026", start_date=date(2026, 1, 1), end_date=date(2026, 12, 31),
+        )
+        self.dialog = FakeWidget()
+        self.app = Mock(_procesando=False)
+        self.app.id_expediente = self.case.id_case
+        self.app.id_comunidad = community
+        self.app.id_periodo = 12
+        self.app.ruta_bd_expedientes = self.database_path
+        self.app.ruta_archivo_expedientes = self.root / "archive"
+        self.workers, self.callbacks = [], []
+        self.app._en_hilo.side_effect = self.workers.append
+        self.app.after.side_effect = lambda delay, fn: self.callbacks.append(fn)
+        for target, replacement in (
+            ("_dialog", Mock(return_value=self.dialog)),
+            ("tk.StringVar", FakeVariable), ("UIM.fuente", Mock(return_value="font")),
+            *((f"ctk.{kind}", FakeWidget) for kind in (
+                "CTkFrame", "CTkScrollableFrame", "CTkLabel", "CTkEntry", "CTkButton", "CTkComboBox", "CTkSegmentedButton",
+            )),
+        ):
+            p = patch(f"expedient_ui.{target}", replacement)
+            p.start()
+            self.addCleanup(p.stop)
+        p = patch("expedient_ui.messagebox")
+        self.messages = p.start()
+        self.addCleanup(p.stop)
+        p = patch("app.messagebox", self.messages)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def click(self, text):
+        buttons = [w for w in self.dialog.descendants() if w.options.get("text") == text and "command" in w.options]
+        self.assertEqual(1, len(buttons), f"Missing button: {text}")
+        buttons[0].options["command"]()
+
+    def complete(self):
+        while self.callbacks or self.workers:
+            while self.callbacks:
+                self.callbacks.pop(0)()
+            if self.workers:
+                self.workers.pop(0)()
+
+    def ingest(self):
+        from source_analysis import SourceAnalysis
+        paths = [self.root / "invoice.pdf", self.root / "readings.csv", self.root / "unknown.csv"]
+        for path, content in zip(paths, ("pdf fixture", "vivienda;tipo;fecha_ant;val_ant;fecha_act;val_act\nA;ACS;2026-01-01;100;2026-12-31;120", "foo;bar\nx;y")):
+            path.write_text(content, encoding="utf-8")
+        expedient_ui.open_add_sources_dialog(self.app, self.case.id_case)
+        with patch("expedient_ui.filedialog.askopenfilenames", return_value=tuple(map(str, paths))), patch(
+            "source_analysis.analyse_pdf", return_value=SourceAnalysis.invoice({"importe_total": "123"}),
+        ):
+            self.click("Añadir archivos")
+            self.complete()
+
+    def test_mixed_sources_are_classified_before_missing_fields_and_summarized(self):
+        self.ingest()
+        rows = self.connection.execute("SELECT document_kind FROM source_documents ORDER BY id_document").fetchall()
+        self.assertEqual(["invoice", "reading", "unknown"], [row[0] for row in rows])
+        issues = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(["fecha_inicio", "fecha_fin", "document_kind"], [issue.field_name for issue in issues])
+        self.assertIn("1 factura detectada · 1 lectura · 1 documento por revisar", self.messages.showinfo.call_args.args[1])
+
+    def test_classification_override_only_appears_for_unknown_and_creates_invoice_fields(self):
+        self.ingest()
+        issue = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)[-1]
+        expedient_ui.open_issue_dialog(self.app, issue)
+        combos = [w for w in self.dialog.descendants() if "values" in w.options]
+        self.assertEqual(1, len(combos))
+        combos[0].options["variable"].set("Factura")
+        with patch("expedient_ui._field") as field:
+            self.dialog.destroy()
+            field.return_value.get.return_value = "Comprobado en el original"
+            expedient_ui.open_issue_dialog(self.app, issue)
+            combo = next(w for w in self.dialog.descendants() if "values" in w.options)
+            combo.options["variable"].set("Factura")
+            self.click("Guardar clasificación")
+        row = self.connection.execute("SELECT document_kind FROM source_documents WHERE id_document = ?", (issue.id_document,)).fetchone()
+        self.assertEqual("invoice", row[0])
+        pending = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual({"fecha_inicio", "fecha_fin", "importe_total"}, {i.field_name for i in pending if i.id_document == issue.id_document})
+
+    def test_context_button_reads_saved_document_context_for_a_missing_field(self):
+        self.ingest()
+        issue = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        with self.connection:
+            self.connection.execute("UPDATE extraction_candidates SET source_context = ? WHERE id_document = ?", ('{"page":2,"fragment":"TOTAL 123"}', issue.id_document))
+        expedient_ui.open_issue_dialog(self.app, issue)
+        self.click("Ver contexto")
+        self.assertIn("Página 2", self.messages.showinfo.call_args.args[1])
+        self.assertIn("TOTAL 123", self.messages.showinfo.call_args.args[1])
+        self.assertTrue(any(w.options.get("text") == "Abrir archivo" for w in self.dialog.descendants()))
+
+    def test_failed_manual_classification_keeps_the_issue_open_without_a_partial_correction(self):
+        self.ingest()
+        issue = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)[-1]
+        with patch("expedient_ui._field") as field, patch(
+            "case_ingestion.reanalyze_case_documents", side_effect=OSError("Source unavailable"),
+        ):
+            field.return_value.get.return_value = "Comprobado en el original"
+            expedient_ui.open_issue_dialog(self.app, issue)
+            combo = next(w for w in self.dialog.descendants() if "values" in w.options)
+            combo.options["variable"].set("Factura")
+            try:
+                self.click("Guardar clasificación")
+            except OSError:
+                pass  # Assert the durable state after a failed reanalysis.
+        row = self.connection.execute("SELECT status FROM review_issues WHERE id_issue = ?", (issue.id_issue,)).fetchone()
+        self.assertEqual("open", row[0])
+        self.assertEqual(0, self.connection.execute("SELECT count(*) FROM manual_corrections WHERE id_issue = ?", (issue.id_issue,)).fetchone()[0])
+        self.assertIn("Source unavailable", self.messages.showwarning.call_args.args[1])
+
+    def test_recognized_issue_has_no_manual_classification_selector(self):
+        self.ingest()
+        issue = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        expedient_ui.open_issue_dialog(self.app, issue)
+        self.assertFalse(any("values" in w.options for w in self.dialog.descendants()))
+
+    def test_safe_reset_initializes_a_complete_empty_temporary_database_and_keeps_backup(self):
+        self.assertTrue(hasattr(self.app_module.AppGestionFincas, "_accion_nueva_base_segura"))
+        self.connection.close()  # Windows requires all live connections closed for replacement.
+        self.messages.askyesno.return_value = True
+        self.app_module.AppGestionFincas._accion_nueva_base_segura(self.app)
+        self.complete()
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            self.assertEqual(0, connection.execute("SELECT count(*) FROM comunidades").fetchone()[0])
+            self.assertEqual(0, connection.execute("SELECT count(*) FROM regularization_cases").fetchone()[0])
+        backups = list((self.root / "backups").glob("*.db"))
+        self.assertEqual(1, len(backups))
+        with closing(sqlite3.connect(backups[0])) as connection:
+            self.assertEqual(1, connection.execute("SELECT count(*) FROM comunidades").fetchone()[0])
+        self.assertIn(str(backups[0]), self.messages.showinfo.call_args.args[1])
+
+    def test_reanalysis_action_updates_existing_case_and_reports_groups(self):
+        self.ingest()
+        from source_analysis import SourceAnalysis
+        self.assertTrue(hasattr(self.app_module.AppGestionFincas, "_accion_reanalizar_fuentes"))
+        with patch("source_analysis.analyse_pdf", return_value=SourceAnalysis.reading()):
+            self.app_module.AppGestionFincas._accion_reanalizar_fuentes(self.app)
+            self.complete()
+        self.assertEqual(3, self.connection.execute("SELECT count(*) FROM source_documents").fetchone()[0])
+        self.assertIn("2 lecturas", self.messages.showinfo.call_args.args[1])
+
+    def test_reset_cancellation_failure_and_success_preserve_or_clear_ui_at_the_right_time(self):
+        from database_reset import DatabaseResetError, ResetResult
+        self.assertTrue(hasattr(self.app_module.AppGestionFincas, "_accion_nueva_base_segura"))
+        result = ResetResult(self.root / "backup.db", self.database_path)
+        # Reset is deliberately substituted; no production database can be touched.
+        with patch("database_reset.reset_database", side_effect=DatabaseResetError("backup failed")) as reset:
+            self.messages.askyesno.return_value = False
+            self.app_module.AppGestionFincas._accion_nueva_base_segura(self.app)
+            self.complete()
+            self.assertFalse(reset.called)
+            self.messages.askyesno.return_value = True
+            self.app_module.AppGestionFincas._accion_nueva_base_segura(self.app)
+            self.complete()
+            self.assertEqual(self.case.id_case, self.app.id_expediente)
+            self.assertEqual(12, self.app.id_periodo)
+            self.assertFalse(self.app._limpiar_contexto_expediente.called)
+            reset.side_effect = None
+            reset.return_value = result
+            self.app_module.AppGestionFincas._accion_nueva_base_segura(self.app)
+            self.assertEqual(self.case.id_case, self.app.id_expediente)
+            self.complete()
+            self.assertIsNone(self.app.id_comunidad)
+            self.assertIsNone(self.app.id_periodo)
+            self.assertTrue(self.app._limpiar_contexto_expediente.called)
+            self.assertIn(str(result.backup_path), self.messages.showinfo.call_args.args[1])
+            self.assertEqual(self.database_path, reset.call_args.args[0])
 
 
 class GuidedWorkspaceStateTest(unittest.TestCase):

@@ -17,6 +17,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import load_workbook
 
+import document_review
 from excel_profiles import (
     ExcelProfile,
     calculate_profile_sha256,
@@ -179,6 +180,8 @@ def _case_context(connection: sqlite3.Connection, id_case: int) -> sqlite3.Row:
     ).fetchone()[0]
     if invalid_documents:
         raise ExportBlockedError("Hay fuentes del expediente pendientes de validación")
+    if document_review.case_has_unapplied_sources(connection, id_case):
+        raise ExportBlockedError("Hay fuentes pendientes de confirmar y aplicar antes de exportar")
     return row
 
 
@@ -294,7 +297,7 @@ def _validate_normalized_inputs(
             )
         for owner in owners:
             readings = connection.execute(
-                """SELECT fecha_lectura,valor_acumulado,estado FROM lecturas_vecino
+                """SELECT fecha_lectura,valor_acumulado,estado FROM period_readings
                    WHERE id_propietario=? AND id_periodo=? AND tipo=?
                    ORDER BY fecha_lectura""",
                 (owner[0], period_id, reading_type),
@@ -414,7 +417,7 @@ def _input_hash(
             connection,
             f"""SELECT p.codigo_vivienda,l.tipo,l.fecha_lectura,l.valor_acumulado,l.estado,
                        l.approved_by,l.approved_at
-                FROM lecturas_vecino l JOIN propietarios p ON p.id_propietario=l.id_propietario
+                FROM period_readings l JOIN propietarios p ON p.id_propietario=l.id_propietario
                 WHERE p.id_comunidad=? AND l.id_periodo=? AND l.tipo IN ({placeholders})
                 ORDER BY p.codigo_vivienda,l.tipo,l.fecha_lectura""",
             (case["id_comunidad"], period_id, *reading_types),
@@ -595,7 +598,7 @@ def _write_meter_readings(
     _clear_table(sheet, table)
     readings = connection.execute(
         """SELECT p.codigo_vivienda,l.fecha_lectura,l.valor_acumulado
-           FROM lecturas_vecino l JOIN propietarios p ON p.id_propietario=l.id_propietario
+           FROM period_readings l JOIN propietarios p ON p.id_propietario=l.id_propietario
            WHERE p.id_comunidad=? AND p.activo=1 AND l.id_periodo=? AND l.tipo=?
            ORDER BY p.codigo_vivienda,l.fecha_lectura""",
         (case["id_comunidad"], case["id_periodo"], module),
@@ -833,7 +836,7 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
                 )
             rows = connection.execute(
                 """SELECT p.id_propietario,l.fecha_lectura,l.valor_acumulado
-                   FROM propietarios p JOIN lecturas_vecino l
+                   FROM propietarios p JOIN period_readings l
                      ON l.id_propietario=p.id_propietario
                    WHERE p.id_comunidad=? AND p.activo=1
                      AND l.id_periodo=? AND l.tipo=?

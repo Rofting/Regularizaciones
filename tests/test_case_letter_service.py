@@ -379,6 +379,83 @@ class CaseLetterServiceTest(unittest.TestCase):
 
         self.assertNotEqual(first.id_letter_run, second.id_letter_run)
 
+    def test_generated_letters_receive_shared_boundary_graphs(self):
+        import case_letter_service
+
+        previous_period = self.connection.execute(
+            """INSERT INTO periodos(id_comunidad,nombre,fecha_inicio,fecha_fin)
+               VALUES (?, 'Anterior compartido', '2025-08-01', '2025-09-01')""",
+            (self.community_id,),
+        ).lastrowid
+        initial_readings = self.connection.execute(
+            "SELECT id_lectura FROM lecturas_vecino WHERE id_periodo=? AND fecha_lectura='2025-09-01'",
+            (self.period_id,),
+        ).fetchall()
+        for reading in initial_readings:
+            self.connection.execute("UPDATE lecturas_vecino SET id_periodo=? WHERE id_lectura=?",
+                                    (previous_period, reading[0]))
+            self.connection.execute("INSERT INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+                                    (reading[0], self.period_id))
+        self.connection.executemany(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado)
+               VALUES (?,?,'ACS','2025-08-01',?,'real')""",
+            [(self.owner_one, previous_period, 80), (self.owner_two, previous_period, 190)],
+        )
+        previous_case = self.connection.execute(
+            """INSERT INTO regularization_cases
+               (id_comunidad,nombre,fecha_inicio,fecha_fin,estado,id_periodo)
+               VALUES (?, 'Anterior compartido', '2025-08-01', '2025-09-01', 'reconciled', ?)""",
+            (self.community_id, previous_period),
+        ).lastrowid
+        current_period = self.period_id
+        self.period_id = previous_period
+        try:
+            self._result_rows()
+            self._reconcile_all()
+        finally:
+            self.period_id = current_period
+        self.connection.execute(
+            """INSERT INTO period_parameters
+               (id_comunidad,id_periodo,parameter_key,numeric_value,unit)
+               SELECT id_comunidad,?,parameter_key,numeric_value,unit
+               FROM period_parameters WHERE id_periodo=?""",
+            (previous_period, self.period_id),
+        )
+        previous_hash = calculate_case_input_hash(
+            self.connection, id_case=previous_case, project_root=self.root,
+        )
+        self.connection.execute(
+            """INSERT INTO excel_export_runs
+               (id_case,id_periodo,id_template_profile,input_sha256,template_sha256,status)
+               SELECT ?,?,id_template_profile,?,template_sha256,'validated'
+               FROM excel_export_runs WHERE id_case=?""",
+            (previous_case, previous_period, previous_hash, self.case_id),
+        )
+        self.connection.commit()
+
+        # The real writer still creates the documents; inspect the payload at
+        # its production call boundary, without substituting graph calculation.
+        for case_id, other_period_name in (
+            (previous_case, "2025-2026"), (self.case_id, "Anterior compartido"),
+        ):
+            with self.subTest(case_id=case_id), patch(
+                "case_letter_service.generar_carta", wraps=case_letter_service.generar_carta,
+            ) as writer:
+                result = case_letter_service.generate_case_letters(
+                    self.database_path, id_case=case_id, project_root=self.root,
+                )
+                self.assertEqual(2, result.generated_count)
+                self.assertEqual((), result.failures)
+                graphs = {call.args[0]["vecino"]["vivienda"]: call.args[0]["consumo_grafica"]
+                          for call in writer.call_args_list}
+                self.assertEqual({"A-1", "B-2"}, set(graphs))
+                for dwelling, consumption in (("A-1", 20.0), ("B-2", 10.0)):
+                    self.assertEqual(consumption, graphs[dwelling]["owner_consumption"])
+                    self.assertEqual([20.0, 10.0], graphs[dwelling]["neighbor_consumptions"])
+                    self.assertEqual([(other_period_name, consumption)], graphs[dwelling]["history"])
+        self.assertEqual(6, self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0])
+
     def test_negative_historical_consumption_is_omitted_not_replaced_with_zero(self):
         from case_letter_service import _consumption_graphs
 

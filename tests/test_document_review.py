@@ -113,6 +113,26 @@ class DocumentReviewTest(unittest.TestCase):
                          [("fecha_inicio", "open")])
         self.assertEqual(issues[0].archived_path, self.document.archived_path)
 
+    def test_candidate_context_is_persisted_without_changing_existing_callers(self):
+        document_review.record_candidates(
+            self.connection,
+            self.document.id_document,
+            {"importe_total": "123.45"},
+            source="analysis",
+            source_context='{"page":2}',
+            validation_status="candidate",
+        )
+
+        candidate = self.connection.execute(
+            """SELECT value, source, validation_status, source_context
+               FROM extraction_candidates
+               WHERE id_document = ? AND field_name = 'importe_total'""",
+            (self.document.id_document,),
+        ).fetchone()
+        self.assertEqual(
+            ("123.45", "analysis", "candidate", '{"page":2}'), tuple(candidate)
+        )
+
     def test_resolving_issue_persists_manual_correction_and_validates_candidate(self):
         issue = self._create_missing_date_issue()
 

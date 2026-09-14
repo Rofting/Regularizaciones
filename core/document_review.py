@@ -12,6 +12,10 @@ _savepoint_counter = count()
 _MISSING_FIELD_CODE = "MISSING_REQUIRED_FIELD"
 _COUNTER_RESET_CODE = "COUNTER_RESET"
 _INVOICE_OUTSIDE_PERIOD_CODE = "INVOICE_OUTSIDE_PERIOD"
+_CLASSIFICATION_REQUIRED_CODE = "DOCUMENT_CLASSIFICATION_REQUIRED"
+_AUTOMATIC_REVIEW_CODES = (_MISSING_FIELD_CODE, _CLASSIFICATION_REQUIRED_CODE)
+_VALIDATION_STATUSES = {"candidate", "validated", "rejected"}
+_ISSUE_ORIGINS = {"automatic", "manual"}
 
 
 @contextmanager
@@ -71,7 +75,8 @@ def _counter_reset_target(
     """Obtiene la pareja canónica de lecturas que una incidencia puede corregir."""
     if issue["code"] != _COUNTER_RESET_CODE:
         raise LookupError("La incidencia no corresponde a un reinicio de contador")
-    prefix, separator, remainder = str(issue["field_name"]).partition("reading.")
+    field_name = str(issue["field_name"]).partition("|")[0]
+    prefix, separator, remainder = field_name.partition("reading.")
     if prefix or not separator:
         raise LookupError("La incidencia no apunta a una lectura de propietario")
     property_code, separator, service = remainder.rpartition(".")
@@ -91,21 +96,34 @@ def _counter_reset_target(
     ).fetchone()
     if owner is None:
         raise LookupError("La lectura no pertenece a un propietario del expediente")
+    target = connection.execute("""SELECT a.fecha_lectura AS initial_date,b.fecha_lectura AS final_date
+        FROM counter_reset_targets t
+        JOIN lecturas_vecino a ON a.id_lectura=t.initial_reading_id
+        JOIN lecturas_vecino b ON b.id_lectura=t.final_reading_id
+        WHERE t.id_issue=? AND a.id_propietario=? AND b.id_propietario=?
+          AND a.tipo=? AND b.tipo=?""",
+        (issue['id_issue'], owner['id_propietario'], owner['id_propietario'], service, service)).fetchone()
+    if target is None and connection.execute(
+        "SELECT 1 FROM counter_reset_targets WHERE id_issue=?", (issue['id_issue'],)
+    ).fetchone():
+        raise LookupError("La pareja de lecturas de la incidencia no pertenece al propietario y servicio")
+    initial_date = target['initial_date'] if target else case['fecha_inicio']
+    final_date = target['final_date'] if target else case['fecha_fin']
     readings = connection.execute(
         """SELECT id_lectura,fecha_lectura,valor_acumulado,estado,metodo_estimacion,
                   fuente,notas,approved_by,approved_at
-           FROM lecturas_vecino
+           FROM period_readings
            WHERE id_propietario=? AND id_periodo=? AND tipo=?
              AND fecha_lectura IN (?,?)
            ORDER BY fecha_lectura""",
         (
             owner["id_propietario"], case["id_periodo"], service,
-            case["fecha_inicio"], case["fecha_fin"],
+            initial_date, final_date,
         ),
     ).fetchall()
     by_date = {row["fecha_lectura"]: row for row in readings}
-    initial = by_date.get(case["fecha_inicio"])
-    final = by_date.get(case["fecha_fin"])
+    initial = by_date.get(initial_date)
+    final = by_date.get(final_date)
     if initial is None or final is None:
         raise LookupError("No se encuentran las lecturas inicial y final del período")
     if final["estado"] != "contador_averiado" or final["valor_acumulado"] >= initial["valor_acumulado"]:
@@ -125,26 +143,43 @@ def _issue_row(connection: sqlite3.Connection, issue_id: int):
     ).fetchone()
 
 
-def record_candidates(connection: sqlite3.Connection, document_id: int,
-                      candidates: Mapping[str, str | None], *, source: str) -> None:
+def record_candidates(
+    connection: sqlite3.Connection,
+    document_id: int,
+    candidates: Mapping[str, str | None],
+    *,
+    source: str,
+    source_context: str | None = None,
+    validation_status: str | None = None,
+    preserve_validated: bool = False,
+) -> None:
+    """Guarda extracciones, sin reemplazar correcciones cuando se solicita."""
     normalized_source = source.strip()
     if not normalized_source:
         raise ValueError("La fuente del candidato es obligatoria")
+    if validation_status is not None and validation_status not in _VALIDATION_STATUSES:
+        raise ValueError("El estado de validación del candidato no es válido")
 
     with _transaction(connection):
         for field_name, value in candidates.items():
             normalized_value = _normalise_value(value)
+            candidate_status = validation_status or (
+                "validated" if normalized_value is not None else "candidate"
+            )
             connection.execute(
                 """INSERT INTO extraction_candidates
-                   (id_document, field_name, value, source, validation_status)
-                   VALUES (?, ?, ?, ?, ?)
+                   (id_document, field_name, value, source, validation_status, source_context)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id_document, field_name) DO UPDATE SET
                        value = excluded.value,
                        source = excluded.source,
-                       validation_status = excluded.validation_status""",
+                       validation_status = excluded.validation_status,
+                       source_context = excluded.source_context
+                   WHERE ? = 0
+                      OR extraction_candidates.validation_status NOT IN ('validated', 'rejected')""",
                 (
-                    document_id, field_name, normalized_value, normalized_source,
-                    "validated" if normalized_value is not None else "candidate",
+                    document_id, field_name, normalized_value, normalized_source, candidate_status,
+                    source_context, int(preserve_validated),
                 ),
             )
 
@@ -195,8 +230,8 @@ def create_missing_field_issues(connection: sqlite3.Connection, case_id: int,
             if candidate is None:
                 connection.execute(
                     """INSERT INTO review_issues
-                       (id_case, id_document, code, field_name, detected_value, message, status)
-                       VALUES (?, ?, ?, ?, NULL, ?, 'open')
+                       (id_case, id_document, code, field_name, detected_value, message, status, origin)
+                       VALUES (?, ?, ?, ?, NULL, ?, 'open', 'automatic')
                        ON CONFLICT(id_document, code, field_name, status) DO NOTHING""",
                     (
                         case_id, document_id, _MISSING_FIELD_CODE, field_name,
@@ -230,7 +265,7 @@ def create_missing_field_issues(connection: sqlite3.Connection, case_id: int,
     return tuple(review_issue_from_row(row) for row in rows)
 
 
-def create_review_issue(
+def _create_review_issue(
     connection: sqlite3.Connection,
     case_id: int,
     document_id: int,
@@ -239,13 +274,16 @@ def create_review_issue(
     field_name: str,
     message: str,
     detected_value: str | None = None,
+    origin: str,
 ) -> ReviewIssue:
-    """Registra de forma idempotente una incidencia genérica que sigue abierta."""
+    """Registra de forma idempotente una incidencia con procedencia explícita."""
     normalized_code = code.strip()
     normalized_field = field_name.strip()
     normalized_message = message.strip()
     if not normalized_code or not normalized_field or not normalized_message:
         raise ValueError("Código, campo y mensaje de la incidencia son obligatorios")
+    if origin not in _ISSUE_ORIGINS:
+        raise ValueError("El origen de la incidencia no es válido")
 
     with _transaction(connection):
         document = connection.execute(
@@ -255,8 +293,8 @@ def create_review_issue(
             raise LookupError("El documento no pertenece al expediente")
         connection.execute(
             """INSERT INTO review_issues
-               (id_case,id_document,code,field_name,detected_value,message,status)
-               VALUES (?,?,?,?,?,?,'open')
+               (id_case,id_document,code,field_name,detected_value,message,status,origin)
+               VALUES (?,?,?,?,?,?,'open',?)
                ON CONFLICT(id_document,code,field_name,status) DO NOTHING""",
             (
                 case_id,
@@ -265,6 +303,7 @@ def create_review_issue(
                 normalized_field,
                 _normalise_value(detected_value),
                 normalized_message,
+                origin,
             ),
         )
         connection.execute(
@@ -288,6 +327,100 @@ def create_review_issue(
             (document_id, normalized_code, normalized_field),
         ).fetchone()
     return review_issue_from_row(row)
+
+
+def create_review_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    code: str,
+    field_name: str,
+    message: str,
+    detected_value: str | None = None,
+) -> ReviewIssue:
+    """Registra una incidencia manual; sólo el análisis crea incidencias automáticas."""
+    return _create_review_issue(
+        connection,
+        case_id,
+        document_id,
+        code=code,
+        field_name=field_name,
+        message=message,
+        detected_value=detected_value,
+        origin="manual",
+    )
+
+
+def create_classification_required_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    message: str,
+) -> ReviewIssue:
+    """Crea la única incidencia abierta necesaria para una fuente desconocida."""
+    return _create_review_issue(
+        connection,
+        case_id,
+        document_id,
+        code=_CLASSIFICATION_REQUIRED_CODE,
+        field_name="document_kind",
+        message=message,
+        origin="automatic",
+    )
+
+
+def resolved_classification_kind(
+    connection: sqlite3.Connection, document_id: int
+) -> str | None:
+    """Devuelve una clasificación confirmada manualmente, si existe."""
+    row = connection.execute(
+        """SELECT candidates.value FROM review_issues AS issues
+           JOIN extraction_candidates AS candidates
+             ON candidates.id_document = issues.id_document
+            AND candidates.field_name = issues.field_name
+           WHERE issues.id_document = ?
+             AND issues.code = ? AND issues.field_name = 'document_kind'
+             AND issues.status = 'resolved'
+             AND candidates.source = 'manual'
+             AND candidates.validation_status = 'validated'
+             AND candidates.value IS NOT NULL AND trim(candidates.value) <> ''""",
+        (document_id, _CLASSIFICATION_REQUIRED_CODE),
+    ).fetchone()
+    return row["value"] if row is not None else None
+
+
+def has_closed_classification_outcome(
+    connection: sqlite3.Connection, document_id: int
+) -> bool:
+    """Una decisión cerrada no debe convertirse de nuevo en un bloqueo automático."""
+    return connection.execute(
+        """SELECT 1 FROM review_issues
+           WHERE id_document = ? AND code = ? AND field_name = 'document_kind'
+             AND status IN ('resolved', 'dismissed')""",
+        (document_id, _CLASSIFICATION_REQUIRED_CODE),
+    ).fetchone() is not None
+
+
+def clear_open_automatic_issues(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+) -> None:
+    """Elimina sólo incidencias abiertas que el análisis puede regenerar."""
+    with _transaction(connection):
+        document = connection.execute(
+            "SELECT id_case FROM source_documents WHERE id_document = ?", (document_id,)
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        connection.execute(
+            """DELETE FROM review_issues
+               WHERE id_case = ? AND id_document = ? AND status = 'open'
+                 AND origin = 'automatic' AND code IN (?, ?)""",
+            (case_id, document_id, *_AUTOMATIC_REVIEW_CODES),
+        )
 
 
 def list_open_issues(connection: sqlite3.Connection, case_id: int) -> tuple[ReviewIssue, ...]:
@@ -355,7 +488,18 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
             (issue_id,),
         )
         resolved = _issue_row(connection, issue_id)
+        _reapply_reviewed_document(connection, issue['id_case'], issue['id_document'])
     return review_issue_from_row(resolved)
+
+
+def _reapply_reviewed_document(connection, case_id, document_id):
+    document = connection.execute("SELECT confirmed_by FROM source_documents WHERE id_document=?",
+                                  (document_id,)).fetchone()
+    marker = connection.execute("SELECT 1 FROM archivos_procesados WHERE nombre_archivo=?",
+                                (f'source_document:{document_id}',)).fetchone()
+    if document['confirmed_by'] or marker:
+        from case_ingestion import apply_confirmed_source
+        apply_confirmed_source(connection, case_id, document_id)
 
 
 def approve_counter_reset_estimate(
@@ -420,7 +564,7 @@ def approve_counter_reset_estimate(
                WHERE id_lectura=?""",
             (corrected_text, notes, normalized_approver, final["id_lectura"]),
         )
-        owner_state = "estado_contador_acs" if issue["field_name"].endswith(".ACS") else "estado_contador_cal"
+        owner_state = "estado_contador_acs" if issue["field_name"].partition("|")[0].endswith(".ACS") else "estado_contador_cal"
         connection.execute(
             f"UPDATE propietarios SET {owner_state}='ok' WHERE id_propietario=?",
             (owner["id_propietario"],),
@@ -431,6 +575,7 @@ def approve_counter_reset_estimate(
             (issue_id,),
         )
         resolved = _issue_row(connection, issue_id)
+        _reapply_reviewed_document(connection, issue['id_case'], issue['id_document'])
     return review_issue_from_row(resolved)
 
 
@@ -495,7 +640,7 @@ def assert_case_final_readings_approved(
     if case["id_periodo"] is None:
         return
     unresolved = connection.execute(
-        """SELECT COUNT(*) FROM lecturas_vecino AS reading
+        """SELECT COUNT(*) FROM period_readings AS reading
            JOIN propietarios AS owner ON owner.id_propietario=reading.id_propietario
            WHERE owner.id_comunidad=? AND reading.id_periodo=?
              AND reading.fecha_lectura=?
@@ -526,6 +671,9 @@ def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> Regular
         if open_count:
             raise ValueError(f"{open_count} incidencia abierta(s) por resolver")
 
+        if case_has_unapplied_sources(connection, case_id):
+            raise ValueError("Hay fuentes pendientes de confirmar y aplicar a los datos canónicos")
+
         assert_case_final_readings_approved(connection, case_id)
         case = get_case(connection, case_id)
         if case.status == "draft":
@@ -538,7 +686,21 @@ def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> Regular
             case = set_case_status(connection, case_id, "ready_for_calculation")
 
         connection.execute(
-            "UPDATE source_documents SET status = 'validated' WHERE id_case = ?",
+            """UPDATE source_documents SET status = 'validated' WHERE id_case = ?
+               AND (classification_confidence IS NULL OR document_kind='other')""",
             (case_id,),
         )
     return case
+
+
+def case_has_unapplied_sources(connection: sqlite3.Connection, case_id: int) -> bool:
+    """Analysed sources may only pass readiness after canonical application."""
+    return connection.execute("""SELECT 1 FROM source_documents d
+        WHERE d.id_case=? AND d.classification_confidence IS NOT NULL
+          AND d.document_kind<>'other' AND (
+            d.status<>'validated' OR d.document_kind='unknown'
+            OR NOT EXISTS (SELECT 1 FROM archivos_procesados a
+                           WHERE a.nombre_archivo='source_document:' || d.id_document)
+            OR EXISTS (SELECT 1 FROM extraction_candidates c WHERE c.id_document=d.id_document
+                       AND c.validation_status='candidate' AND c.value IS NOT NULL AND trim(c.value)<>'')
+          ) LIMIT 1""", (case_id,)).fetchone() is not None

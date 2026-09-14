@@ -1,7 +1,9 @@
 import os
+import json
 import stat
 import sys
 import tkinter as tk
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +18,7 @@ import document_review
 import expedient_service
 import gestor_bd
 import ui_moderna as UIM
+from source_analysis import analyse_source
 from expedient_models import ReviewIssue
 from ui_moderna import C
 
@@ -25,6 +28,71 @@ if TYPE_CHECKING:
 
 
 _SOURCE_SUFFIXES = frozenset({".pdf", ".xlsx", ".xls", ".csv"})
+
+
+def source_summary(kinds) -> str:
+    """Agrupa los resultados del análisis para la revisión guiada."""
+    counts = Counter(kinds)
+    labels = (
+        ("invoice", "factura detectada", "facturas detectadas"),
+        ("reading", "lectura", "lecturas"),
+        ("owners", "listado de propietarios", "listados de propietarios"),
+        ("other", "otro documento", "otros documentos"),
+        ("unknown", "documento por revisar", "documentos por revisar"),
+    )
+    return " · ".join(
+        f"{counts[kind]} {singular if counts[kind] == 1 else plural}"
+        for kind, singular, plural in labels if counts[kind]
+    ) or "Sin documentos analizados"
+
+
+def issue_context_label(source_context: str | None) -> str:
+    """Describe metadatos nuevos y fragmentos históricos sin exigir un visor."""
+    fallback = "No hay contexto guardado. Usa Abrir archivo para consultar la fuente."
+    if not source_context:
+        return fallback
+    try:
+        context = json.loads(source_context)
+    except (ValueError, TypeError):
+        return str(source_context)
+    if not isinstance(context, dict):
+        return fallback
+    parts = []
+    if context.get("page"):
+        parts.append(f"Página {context['page']}")
+    position = "!".join(str(context[key]) for key in ("sheet", "cell") if context.get(key))
+    if position:
+        parts.append(position)
+    fragment = context.get("fragment") or context.get("excerpt")
+    if fragment:
+        parts.append(str(fragment))
+    return "\n\n".join(parts) or fallback
+
+
+def show_issue_context(app: "AppGestionFincas", issue: ReviewIssue) -> None:
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        # Missing fields may have no candidate of their own; prefer their field,
+        # then a fragment extracted from another field of the same document.
+        row = connection.execute(
+            """SELECT source_context FROM extraction_candidates
+               WHERE id_document = ? AND source_context IS NOT NULL
+                 AND trim(source_context) <> ''
+               ORDER BY (field_name = ?) DESC, field_name LIMIT 1""",
+            (issue.id_document, issue.field_name),
+        ).fetchone()
+        context = row["source_context"] if row else None
+        if not context:
+            row = connection.execute("SELECT source_context FROM source_documents WHERE id_document=?",
+                                     (issue.id_document,)).fetchone()
+            context = row['source_context'] if row else None
+    finally:
+        connection.close()
+    messagebox.showinfo(
+        "Contexto de la fuente",
+        f"{issue.archived_path.name}\n\n{issue_context_label(context)}",
+        parent=app,
+    )
 
 
 @dataclass(frozen=True)
@@ -169,6 +237,12 @@ def source_files_in_folder(folder: Path) -> list[Path]:
 def issue_guidance(field_name: str) -> dict[str, str]:
     """Traduce campos técnicos a instrucciones accionables de revisión."""
     guides = {
+        "document_kind": {
+            "label": "Tipo de documento",
+            "what_to_find": "Consulta el original y confirma si es una factura, una lectura o un listado de propietarios.",
+            "format": "Elige el tipo de fuente y explica la clasificación.",
+            "why": "Solo se solicita cuando el análisis automático no reconoce el documento.",
+        },
         "fecha_inicio": {
             "label": "Fecha de inicio del período facturado",
             "what_to_find": "Busca en la factura el inicio del período de suministro o consumo, normalmente junto a «Período facturado», «Desde» o «Fecha inicial».",
@@ -1271,21 +1345,14 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
         text_color=C["texto_sec"],
     ).pack(anchor="w", padx=22, pady=(0, 18))
 
-    labels = ("Facturas", "Lecturas", "Propietarios", "Otros")
-    selected_kind = tk.StringVar(value=labels[0])
-    ctk.CTkSegmentedButton(
-        panel,
-        values=list(labels),
-        variable=selected_kind,
-        height=38,
-        font=UIM.fuente(11, "bold"),
-        selected_color=C["primario"],
-        selected_hover_color=C["primario_hover"],
-        unselected_color=C["panel_2"],
-        unselected_hover_color=C["acento_suave_hover"],
+    ctk.CTkLabel(
+        panel, text="Detectamos facturas, lecturas y propietarios automáticamente.\nSolo tendrás que clasificar las fuentes que no se reconozcan.",
+        font=UIM.fuente(11), text_color=C["texto_sec"], justify="left",
     ).pack(fill="x", padx=22)
 
     def select_files(paths=None):
+        if app._procesando:
+            return
         if paths is None:
             paths = filedialog.askopenfilenames(
                 parent=dialog,
@@ -1314,19 +1381,16 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 f"Se han omitido {ignored_count} archivo(s) no compatible(s), oculto(s) o temporal(es).",
                 parent=dialog,
             )
-        kind_by_label = {
-            "Facturas": "invoice",
-            "Lecturas": "reading",
-            "Propietarios": "owners",
-            "Otros": "other",
-        }
-        document_kind = kind_by_label[selected_kind.get()]
         dialog.destroy()
+        database_path = str(app.ruta_bd_expedientes)
+        archive_root = app.ruta_archivo_expedientes
+        community_id = app.id_comunidad
 
         def add_all():
             created_count = 0
             duplicate_count = 0
             errors = []
+            kinds = []
             total = len(paths)
             for index, path in enumerate(paths, start=1):
                 filename = Path(path).name
@@ -1337,22 +1401,18 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 )
                 app.log(f"Fuente {index} de {total}: {filename}", "info")
                 try:
-                    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
-                    result = case_ingestion.add_document_to_case(
+                    connection = gestor_bd.conectar(database_path)
+                    case_ingestion.assert_case_belongs_to_community(connection, case_id, community_id)
+                    community = connection.execute(
+                        "SELECT codigo FROM comunidades WHERE id_comunidad = ?", (community_id,),
+                    ).fetchone()
+                    analysis = analyse_source(Path(path), community_code=community["codigo"])
+                    result = case_ingestion.add_analysed_document_to_case(
                         connection,
                         case_id,
                         source_path=path,
-                        archive_root=app.ruta_archivo_expedientes,
-                        document_kind=document_kind,
-                        candidates={
-                            "nombre_archivo": Path(path).name,
-                            "tipo_documento": document_kind,
-                        },
-                        required_fields=(
-                            ("fecha_inicio", "fecha_fin", "importe_total")
-                            if document_kind == "invoice"
-                            else ()
-                        ),
+                        archive_root=archive_root,
+                        analysis=analysis,
                     )
                 except Exception as exc:
                     errors.append((filename, str(exc)))
@@ -1368,6 +1428,7 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                     created_count += 1
                 else:
                     duplicate_count += 1
+                kinds.append(result.document.document_kind)
             app.log(
                 f"Fuentes añadidas: {created_count} nueva(s), "
                 f"{duplicate_count} duplicada(s), {len(errors)} con error",
@@ -1376,6 +1437,13 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
             def refresh_case():
                 app._refrescar_lista_expedientes(select_case_id=case_id)
                 app._refrescar_expediente()
+                messagebox.showinfo(
+                    "Fuentes analizadas",
+                    f"{source_summary(kinds)}\n\n{created_count} nuevas · {duplicate_count} duplicadas · {len(errors)} con error\n"
+                    "Revisa las incidencias del expediente para confirmar los datos pendientes."
+                    + ("\n\n" + "\n".join(f"{name}: {error}" for name, error in errors) if errors else ""),
+                    parent=app,
+                )
 
             app.after(0, refresh_case)
 
@@ -1421,6 +1489,76 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
     ).pack(anchor="w", padx=22)
 
 
+def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
+    """Show extracted values and explicitly apply each reviewed source."""
+    dialog = _dialog(app, "Confirmar fuentes", 850, 720)
+    panel = ctk.CTkScrollableFrame(dialog)
+    panel.pack(fill="both", expand=True, padx=16, pady=16)
+
+    def render():
+        for widget in panel.winfo_children():
+            widget.destroy()
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            documents = connection.execute("""SELECT id_document,original_name,document_kind,status
+                FROM source_documents WHERE id_case=? AND document_kind IN ('invoice','reading','owners')
+                ORDER BY id_document""", (case_id,)).fetchall()
+            for document in documents:
+                group = ctk.CTkFrame(panel)
+                group.pack(fill="x", pady=8)
+                ctk.CTkLabel(group, text=f"{document['original_name']} · {document['document_kind']} · {document['status']}",
+                             wraplength=740).pack(anchor="w", padx=12, pady=8)
+                candidates = connection.execute("""SELECT field_name,value,validation_status
+                    FROM extraction_candidates WHERE id_document=? ORDER BY field_name""",
+                    (document['id_document'],)).fetchall()
+                for candidate in candidates:
+                    ctk.CTkLabel(group, text=f"{candidate['field_name']}: {candidate['value'] or 'Pendiente'}",
+                                 wraplength=740, justify="left").pack(anchor="w", padx=12, pady=3)
+                    ctk.CTkButton(group, text=f"Corregir {candidate['field_name']}",
+                        command=lambda document_id=document['id_document'], field=candidate['field_name']:
+                            correct(document_id, field)).pack(anchor="w", padx=12, pady=2)
+                ctk.CTkButton(group, text="Confirmar fuente",
+                    command=lambda document_id=document['id_document']: confirm(document_id)).pack(anchor="e", padx=12, pady=10)
+            if not documents:
+                ctk.CTkLabel(panel, text="No hay fuentes reconocidas pendientes de confirmación.").pack(pady=16)
+        finally:
+            connection.close()
+
+    def correct(document_id, field):
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            issue = document_review.create_review_issue(connection, case_id, document_id,
+                code="SOURCE_VALUE_REVIEW", field_name=field,
+                message="Comprueba el valor extraído en el documento original.")
+        finally:
+            connection.close()
+        dialog.destroy()
+        open_issue_dialog(app, issue)
+
+    def confirm(document_id):
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            case_ingestion.confirm_source_candidates(connection, case_id, document_id,
+                                                      confirmed_by="usuario_local")
+            if not document_review.list_open_issues(connection, case_id) and not document_review.case_has_unapplied_sources(connection, case_id):
+                document_review.validate_case_ready(connection, case_id)
+        except ValueError as error:
+            # Required canonical fields may not have been part of a legacy
+            # extractor's requirement list; make every missing value editable.
+            document = connection.execute("SELECT document_kind FROM source_documents WHERE id_document=?", (document_id,)).fetchone()
+            fields = {"invoice": ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"),
+                      "reading": ("vecinos",), "owners": ("propietarios",)}
+            document_review.create_missing_field_issues(connection, case_id, document_id, fields.get(document['document_kind'], ()))
+            messagebox.showwarning("Fuente pendiente de revisión", str(error), parent=app)
+        finally:
+            connection.close()
+        app._refrescar_lista_expedientes(select_case_id=case_id)
+        app._refrescar_expediente()
+        render()
+
+    render()
+
+
 def open_archived_file(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     try:
         if sys.platform != "win32":
@@ -1436,6 +1574,8 @@ def resolution_route_for_issue(issue: ReviewIssue) -> str:
         return "counter_reset_estimate"
     if issue.code == "INVOICE_OUTSIDE_PERIOD":
         return "dismiss_invoice_outside_period"
+    if issue.code == "DOCUMENT_CLASSIFICATION_REQUIRED":
+        return "classify_unknown"
     return "generic_correction"
 
 
@@ -1490,8 +1630,14 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
             wraplength=390,
         ).grid(row=row, column=1, sticky="w", padx=(0, 12), pady=7)
 
+    source_actions = ctk.CTkFrame(panel, fg_color="transparent")
+    source_actions.grid(row=2, column=0, sticky="w", padx=22, pady=(6, 0))
     ctk.CTkButton(
-        panel,
+        source_actions, text="Ver contexto", command=lambda: show_issue_context(app, issue),
+        height=34, corner_radius=8, **UIM.secondary_button_kwargs(),
+    ).pack(side="left", padx=(0, 8))
+    ctk.CTkButton(
+        source_actions,
         text="Abrir archivo",
         command=lambda: open_archived_file(app, issue),
         height=34,
@@ -1501,10 +1647,19 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         border_color=C["borde"],
         text_color=C["primario"],
         hover_color=C["acento_suave"],
-    ).grid(row=2, column=0, sticky="w", padx=22, pady=(6, 0))
+    ).pack(side="left")
 
     value = None
-    if route == "counter_reset_estimate":
+    kind_by_label = {"Factura": "invoice", "Lectura": "reading", "Propietarios": "owners", "Otro documento": "other"}
+    if route == "classify_unknown":
+        value = tk.StringVar(value="Selecciona el tipo")
+        ctk.CTkComboBox(
+            panel, values=list(kind_by_label), variable=value, state="readonly",
+        ).grid(row=3, column=0, sticky="ew", padx=22, pady=(14, 0))
+        reason = _field(panel, "Motivo de la clasificación y fuente consultada", 4)
+        action_row = 6
+        action_text = "Guardar clasificación"
+    elif route == "counter_reset_estimate":
         ctk.CTkLabel(
             panel,
             text=(
@@ -1559,8 +1714,12 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     ).pack(side="right")
 
     def save():
+        if app._procesando:
+            return
         correction_reason = reason.get().strip()
         confirmed = value.get().strip() if value is not None else ""
+        if route == "classify_unknown":
+            confirmed = kind_by_label.get(confirmed, "")
         if (route != "dismiss_invoice_outside_period" and not confirmed) or not correction_reason:
             messagebox.showwarning(
                 "Datos requeridos",
@@ -1574,6 +1733,8 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
 
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
+            if route == "classify_unknown":
+                connection.execute("BEGIN IMMEDIATE")
             if route == "counter_reset_estimate":
                 document_review.approve_counter_reset_estimate(
                     connection, issue.id_issue, consumption=confirmed,
@@ -1589,11 +1750,18 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
                     connection, issue.id_issue, value=confirmed,
                     reason=correction_reason,
                 )
+                if route == "classify_unknown":
+                    # Reuse the archived source and retain the manual decision.
+                    # Missing invoice fields must exist before readiness is checked.
+                    case_ingestion.reanalyze_case_documents(connection, issue.id_case)
             remaining = len(document_review.list_open_issues(connection, issue.id_case))
             ready = None
-            if not remaining:
+            if not remaining and not document_review.case_has_unapplied_sources(connection, issue.id_case):
                 ready = document_review.validate_case_ready(connection, issue.id_case)
-        except (LookupError, ValueError) as error:
+            if route == "classify_unknown":
+                connection.commit()
+        except Exception as error:
+            connection.rollback()
             messagebox.showwarning("No se pudo guardar", str(error))
             return
         finally:
@@ -1618,4 +1786,4 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         border_width=1,
         border_color=C["exito"],
     ).pack(side="right", padx=(0, 8))
-    (value or reason).focus_set()
+    (reason if route == "classify_unknown" else (value or reason)).focus_set()
