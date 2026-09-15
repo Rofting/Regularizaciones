@@ -13,7 +13,14 @@ _MISSING_FIELD_CODE = "MISSING_REQUIRED_FIELD"
 _COUNTER_RESET_CODE = "COUNTER_RESET"
 _INVOICE_OUTSIDE_PERIOD_CODE = "INVOICE_OUTSIDE_PERIOD"
 _CLASSIFICATION_REQUIRED_CODE = "DOCUMENT_CLASSIFICATION_REQUIRED"
-_AUTOMATIC_REVIEW_CODES = (_MISSING_FIELD_CODE, _CLASSIFICATION_REQUIRED_CODE)
+_ARCHIVED_SOURCE_DUPLICATE_CODE = "ARCHIVED_SOURCE_DUPLICATE"
+_ARCHIVED_SOURCE_MISSING_CODE = "ARCHIVED_SOURCE_MISSING"
+_AUTOMATIC_REVIEW_CODES = (
+    _MISSING_FIELD_CODE,
+    _CLASSIFICATION_REQUIRED_CODE,
+    _ARCHIVED_SOURCE_DUPLICATE_CODE,
+    _ARCHIVED_SOURCE_MISSING_CODE,
+)
 _VALIDATION_STATUSES = {"candidate", "validated", "rejected"}
 _ISSUE_ORIGINS = {"automatic", "manual"}
 
@@ -371,6 +378,37 @@ def create_classification_required_issue(
     )
 
 
+def create_archived_source_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    duplicate_count: int,
+) -> ReviewIssue:
+    """Registra una ruta archivada no disponible sin inventar una copia válida."""
+    if duplicate_count > 1:
+        code = _ARCHIVED_SOURCE_DUPLICATE_CODE
+        message = (
+            f"Hay {duplicate_count} copias verificadas con la misma huella. "
+            "Elige la copia correcta antes de reanalizar esta fuente."
+        )
+    else:
+        code = _ARCHIVED_SOURCE_MISSING_CODE
+        message = (
+            "No se localiza la copia archivada con la misma huella. "
+            "Vuelve a añadir el archivo original para poder analizarlo."
+        )
+    return _create_review_issue(
+        connection,
+        case_id,
+        document_id,
+        code=code,
+        field_name="archived_path",
+        message=message,
+        origin="automatic",
+    )
+
+
 def resolved_classification_kind(
     connection: sqlite3.Connection, document_id: int
 ) -> str | None:
@@ -415,10 +453,11 @@ def clear_open_automatic_issues(
         ).fetchone()
         if document is None or document["id_case"] != case_id:
             raise LookupError("El documento no pertenece al expediente")
+        placeholders = ", ".join("?" for _ in _AUTOMATIC_REVIEW_CODES)
         connection.execute(
-            """DELETE FROM review_issues
-               WHERE id_case = ? AND id_document = ? AND status = 'open'
-                 AND origin = 'automatic' AND code IN (?, ?)""",
+            f"""DELETE FROM review_issues
+                WHERE id_case = ? AND id_document = ? AND status = 'open'
+                  AND origin = 'automatic' AND code IN ({placeholders})""",
             (case_id, document_id, *_AUTOMATIC_REVIEW_CODES),
         )
 

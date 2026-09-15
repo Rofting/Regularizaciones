@@ -611,6 +611,12 @@ def reanalyze_case_documents(
     expedient_service.repair_archived_source_paths(
         connection, archive_root=source_archive_root, case_id=case_id,
     )
+    ambiguous_sources = {
+        item.document_id: item
+        for item in expedient_service.list_archived_path_candidates(
+            connection, archive_root=source_archive_root, case_id=case_id,
+        )
+    }
     active_analyser = analyser or _case_analyser(connection, case_id)
     documents = connection.execute(
         """SELECT id_document, id_case, original_name, archived_path, sha256,
@@ -621,6 +627,20 @@ def reanalyze_case_documents(
     results = []
     for row in documents:
         document = document_from_row(row)
+        if not document.archived_path.is_file():
+            candidate_set = ambiguous_sources.get(document.id_document)
+            document_review.create_archived_source_issue(
+                connection,
+                case_id,
+                document.id_document,
+                duplicate_count=(len(candidate_set.candidate_paths) if candidate_set else 0),
+            )
+            results.append(IngestionResult(
+                _source_document(connection, document.id_document),
+                False,
+                _open_issue_count(connection, case_id),
+            ))
+            continue
         _persist_analysis(
             connection,
             case_id,

@@ -1147,7 +1147,8 @@ class AppGestionFincas(ctk.CTk):
         review = MOD.get("document_review")
         ingestion = MOD.get("case_ingestion")
         database = MOD.get("gestor_bd")
-        if not review or not ingestion or not database:
+        ui = MOD.get("expedient_ui")
+        if not review or not ingestion or not database or not ui:
             self.log("No está disponible la revisión de incidencias.", "error")
             return
         if not self.id_expediente:
@@ -1170,10 +1171,7 @@ class AppGestionFincas(ctk.CTk):
             self._accion_confirmar_fuentes()
             return
         self._refrescar_bandeja_incidencias(issues)
-        self.log(
-            "Elige Resolver en la incidencia concreta de la bandeja.",
-            "info",
-        )
+        ui.open_issue_dialog(self, issues[0])
 
     def _refrescar_expediente(self):
         service = MOD.get("expedient_service")

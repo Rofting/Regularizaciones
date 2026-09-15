@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -544,6 +545,40 @@ class ExpedientFlowTest(unittest.TestCase):
                 "SELECT archived_path FROM source_documents WHERE id_document=?",
                 (document.id_document,),
             ).fetchone()[0],
+        )
+
+    def test_reanalysis_skips_ambiguous_archived_copy_and_continues_other_documents(self):
+        ambiguous = self.add_confirmed_invoice()
+        second_source = Path(self.directory.name) / "segunda_factura.pdf"
+        second_source.write_bytes(b"%PDF-1.4 segunda factura")
+        second = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=second_source,
+            archive_root=self.archive_root,
+            document_kind="invoice",
+            candidates={"fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31", "importe_total": "10.00"},
+            required_fields=(),
+        ).document
+        first_copy = ambiguous.archived_path.with_name(f"658_{ambiguous.archived_path.name}")
+        ambiguous.archived_path.rename(first_copy)
+        shutil.copy2(first_copy, first_copy.with_name(f"copia_{first_copy.name}"))
+        analysed_paths = []
+
+        results = case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            archive_root=self.archive_root,
+            analyser=lambda path: analysed_paths.append(path) or SourceAnalysis.invoice({
+                "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31", "importe_total": "10.00",
+            }),
+        )
+
+        self.assertEqual([second.archived_path], analysed_paths)
+        self.assertEqual(2, len(results))
+        self.assertEqual(
+            ["ARCHIVED_SOURCE_DUPLICATE"],
+            [issue.code for issue in document_review.list_open_issues(self.connection, self.case.id_case)],
         )
 
     def test_reanalysis_removes_only_open_automatic_issues(self):

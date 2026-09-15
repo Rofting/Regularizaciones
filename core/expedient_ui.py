@@ -1695,11 +1695,25 @@ def resolution_route_for_issue(issue: ReviewIssue) -> str:
         return "dismiss_invoice_outside_period"
     if issue.code == "DOCUMENT_CLASSIFICATION_REQUIRED":
         return "classify_unknown"
+    if issue.code == "ARCHIVED_SOURCE_DUPLICATE":
+        return "archived_source_duplicate"
+    if issue.code == "ARCHIVED_SOURCE_MISSING":
+        return "archived_source_missing"
     return "generic_correction"
 
 
 def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     route = resolution_route_for_issue(issue)
+    if route == "archived_source_duplicate":
+        open_archived_path_resolution_dialog(app, issue.id_case)
+        return
+    if route == "archived_source_missing":
+        messagebox.showwarning(
+            "Archivo archivado no disponible",
+            "No se encuentra una copia verificada de esta fuente. Vuelve a añadir el archivo original y después pulsa Reanalizar fuentes.",
+            parent=app,
+        )
+        return
     dialog = _dialog(app, "Resolver incidencia", 680, 720)
     panel = ctk.CTkFrame(
         dialog,

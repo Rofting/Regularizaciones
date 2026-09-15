@@ -397,6 +397,15 @@ class SourceActionsTest(unittest.TestCase):
         self.assertEqual(3, self.connection.execute("SELECT count(*) FROM source_documents").fetchone()[0])
         self.assertIn("2 lecturas", self.messages.showinfo.call_args.args[1])
 
+    def test_resolve_incidents_action_opens_the_first_pending_issue(self):
+        self.ingest()
+        issue = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        review_ui = Mock()
+        with patch.dict(self.app_module.MOD, {"expedient_ui": review_ui}):
+            self.app_module.AppGestionFincas._accion_resolver_incidencias(self.app)
+
+        review_ui.open_issue_dialog.assert_called_once_with(self.app, issue)
+
     def test_reset_cancellation_failure_and_success_preserve_or_clear_ui_at_the_right_time(self):
         from database_reset import DatabaseResetError, ResetResult
         self.assertTrue(hasattr(self.app_module.AppGestionFincas, "_accion_nueva_base_segura"))
