@@ -78,6 +78,34 @@
         ]
       }
     },
+    "ENDESA_LUZ_GENERAL": {
+      "nombre_display": "Endesa Energía — Electricidad (formato general)",
+      "tipo_suministro": "ELECTRICIDAD",
+      "unidad_consumo": "kWh",
+      "_notas": "Factura de Endesa Energía identificada por empresa, CIF e indicios de factura. No depende de un CUPS concreto para poder reutilizarse en otras comunidades.",
+      "firmas_identificacion": [
+        "Endesa\\s*Energ[ií�]a"
+      ],
+      "firmas_requeridas": [
+        "CIF\\s*A81948077",
+        "(?:DATOS\\s*DE\\s*LA\\s*FACTURA|RESUMEN\\s*DE\\s*LA\\s*FACTURA)",
+        "N[º°o�]?\\s*factura\\s*:"
+      ],
+      "regex": {
+        "num_factura": "N[º°o�]?\\s*factura[:\\s]*(?P<valor>[A-Z0-9]+)",
+        "fecha_factura": "Fecha\\s*emisi[oó�]n\\s*factura[:\\s]*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "fecha_inicio": "Periodo\\s*de\\s*facturaci[oó�]n:\\s*del\\s*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "fecha_fin": "Periodo\\s*de\\s*facturaci[oó�]n:\\s*del\\s*\\d{2}/\\d{2}/\\d{4}\\s*a\\s*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "dias_facturados": "\\((?P<valor>\\d+)\\s*d[íi�]as\\)",
+        "consumo_kwh": "Consumo\\s*Total\\s+(?P<valor>[\\d.,]+)\\s*kWh",
+        "termino_fijo": "Potencia\\s+(?P<valor>[\\d.,]+)\\s*(?:€|�)",
+        "termino_variable": "Energ[ií�]a\\s+(?P<valor>[\\d.,]+)\\s*(?:€|�)",
+        "impuestos": "Impuestos\\s+(?P<valor>[\\d.,]+)\\s*(?:€|�)",
+        "importe_total": "Total\\s+(?P<valor>[\\d.,]+)\\s*(?:€|�)",
+        "cups": "CUPS[):\\s]+(?P<valor>ES\\w+)"
+      },
+      "cups_comunidades": {}
+    },
     "ENERGIAXXI_BOMBA": {
       "nombre_display": "Energía XXI — Bomba de incendios (mercado regulado)",
       "tipo_suministro": "ELECTRICIDAD",

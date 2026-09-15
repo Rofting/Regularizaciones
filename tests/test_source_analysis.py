@@ -147,6 +147,62 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual("NATURGY_CLIENTES_GAS", key)
         self.assertEqual("GAS", config["tipo_suministro"])
 
+    def test_catalogue_identifies_endesa_electricity_without_a_community_cups(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "DATOSDELAFACTURA Nºfactura:P26CON005275625 "
+            "Periododefacturación:del31/12/2025a31/01/2026 "
+            "EndesaEnergía,S.A.Unipersonal. CIFA81948077. "
+            "RESUMENDELAFACTURA Potencia 16,13€ Energía 177,54€ Total 248,75€",
+            "factura-endesa.pdf", providers,
+        )
+
+        self.assertEqual("ENDESA_LUZ_GENERAL", key)
+        self.assertEqual("ELECTRICIDAD", config["tipo_suministro"])
+
+    def test_catalogue_does_not_classify_endesa_name_without_invoice_evidence(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "Aviso de mantenimiento de Endesa Energía, S.A. Unipersonal. CIF A81948077.",
+            "aviso.pdf", providers,
+        )
+
+        self.assertIsNone(key)
+        self.assertIsNone(config)
+
+    def test_catalogue_does_not_classify_endesa_payment_notice_without_invoice_number(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "DATOS DE LA FACTURA RESUMEN DE LA FACTURA Endesa Energía, S.A. "
+            "Unipersonal. CIF A81948077. Este aviso informa de un recibo pendiente.",
+            "aviso-cobro.pdf", providers,
+        )
+
+        self.assertIsNone(key)
+        self.assertIsNone(config)
+
+    def test_general_endesa_profile_extracts_collapsed_electricity_consumption(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["ENDESA_LUZ_GENERAL"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "DATOSDELAFACTURA Nºfactura:P26CON005275625 "
+            "Periododefacturación:del31/12/2025a31/01/2026(31días) "
+            "EndesaEnergía,S.A.Unipersonal. CIFA81948077. "
+            "ConsumoTotal 1.124,785 kWh Total 248,75€",
+            config,
+        )
+
+        self.assertEqual(1124.785, result["consumo_kwh"])
+
     def test_catalogue_identifies_totalenergies_gas_invoice(self):
         providers = lector_pdf.cargar_proveedores(
             str(PROJECT_ROOT / "config" / "proveedores.json")

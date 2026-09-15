@@ -579,7 +579,7 @@ def identificar_proveedor(texto: str, nombre_archivo: str, proveedores: dict) ->
                 continue
 
             # — Endesa luz (mercado libre): CUPS sufijo RR0F o PS0F —
-            if "ENDESA_LUZ" in clave:
+            if "ENDESA_LUZ" in clave and config.get("cups_sufijos_validos"):
                 m = re.search(r"CUPS[):\s]+(?P<cups>ES\w+)", texto, re.IGNORECASE)
                 if m:
                     cups = m.group("cups").upper()
