@@ -139,13 +139,114 @@ class SourceAnalysisTest(unittest.TestCase):
             str(PROJECT_ROOT / "config" / "proveedores.json")
         )
         key, config = lector_pdf.identificar_proveedor(
-            "Naturgy Clientes, S.A.U. Estás en mercado libre. "
-            "Período gas: del 26/04/2026 al 29/05/2026",
+            "Naturgy Clientes, S.A.U. Estás en mercado libre. Hola, aquí tienes tu factura de gas. "
+            "Nº de factura: FE263900221987 Período gas: del 26/04/2026 al 29/05/2026 "
+            "Total a pagar 326,98 €",
             "naturgy.pdf", providers,
         )
 
         self.assertEqual("NATURGY_CLIENTES_GAS", key)
         self.assertEqual("GAS", config["tipo_suministro"])
+
+    def test_catalogue_identifies_naturgy_iberia_legacy_gas_invoice(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "Naturgy Iberia, S.A. - Mercado Libre Hola, aquí tienes tu factura de gas. "
+            "Nº factura: FE25321495922757 "
+            "Gas: del 25.07.2025 al 27.07.2025 Total a pagar 31,77 €",
+            "naturgy-iberia.pdf", providers,
+        )
+
+        self.assertEqual("NATURGY_CLIENTES_GAS", key)
+        self.assertEqual("GAS", config["tipo_suministro"])
+
+    def test_catalogue_rejects_naturgy_iberia_without_gas_invoice_evidence(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "Naturgy Iberia, S.A. - Mercado Libre. Comunicado de mantenimiento.",
+            "comunicado.pdf", providers,
+        )
+
+        self.assertIsNone(key)
+        self.assertIsNone(config)
+
+    def test_catalogue_rejects_naturgy_payment_notice_without_invoice_number(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "Naturgy Clientes, S.A.U. Aviso de pago pendiente de tu factura de gas. "
+            "Período gas: del 25/06/2026 al 23/07/2026 Total a pagar 537,74 €",
+            "aviso-naturgy.pdf", providers,
+        )
+
+        self.assertIsNone(key)
+        self.assertIsNone(config)
+
+    def test_catalogue_rejects_detailed_naturgy_payment_reminder(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "AVISO DE PAGO Naturgy Clientes, S.A.U. Hola, aquí tienes tu factura de gas. "
+            "Nº de factura: FE263900221987 Período gas: del 26/04/2026 al 29/05/2026 "
+            "Total a pagar 326,98 €. Esta factura está pendiente.",
+            "aviso-detallado-naturgy.pdf", providers,
+        )
+
+        self.assertIsNone(key)
+        self.assertIsNone(config)
+
+    def test_naturgy_iberia_profile_extracts_dot_dates_consumption_and_total(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["NATURGY_CLIENTES_GAS"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "Nº factura: FE25321495922757 Fecha de emisión: 13.08.2025 "
+            "Gas: del 25.07.2025 al 27.07.2025 Total a pagar 31,77 € "
+            "Consumo kWh: 30 347kWh",
+            config,
+        )
+
+        self.assertEqual("2025-07-25", result["fecha_inicio"])
+        self.assertEqual("2025-07-27", result["fecha_fin"])
+        self.assertEqual(347.0, result["consumo_kwh"])
+        self.assertEqual(31.77, result["importe_total"])
+
+    def test_naturgy_profile_ignores_chart_axis_before_explicit_total(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["NATURGY_CLIENTES_GAS"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "Naturgy Clientes, S.A.U. Período gas: del 25/06/2026 al 23/07/2026 "
+            "Total a pagar\n4500\n537, 74 €\nTotal gas 444,41 €\n"
+            "Total a pagar 537,74 €",
+            config,
+        )
+
+        self.assertEqual(537.74, result["importe_total"])
+
+    def test_naturgy_profile_interprets_dotted_kwh_as_thousands(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["NATURGY_CLIENTES_GAS"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "Naturgy Clientes, S.A.U. Período gas: del 25/06/2026 al 23/07/2026 "
+            "Consumo gas 4.011 kWh Total a pagar 537,74 €",
+            config,
+        )
+
+        self.assertEqual(4011.0, result["consumo_kwh"])
 
     def test_catalogue_identifies_endesa_electricity_without_a_community_cups(self):
         providers = lector_pdf.cargar_proveedores(
@@ -259,6 +360,108 @@ class SourceAnalysisTest(unittest.TestCase):
 
         self.assertEqual("MANTENIMIENTOS_ZARAGOZA", key)
         self.assertEqual("MANTENIMIENTO", config["tipo_suministro"])
+
+    def test_catalogue_identifies_gomez_group_metering_service_invoice(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "FACTURA GOMEZ GROUP METERING, S.L.U. B80853237 F.FACTURA F. VCTO. "
+            "Nº FACTURA LF26022852 "
+            "MEDITRADE DEL EBRO SERVICIO DE LECTURA, FACTURACIÓN Y MANTENIMIENTO "
+            "DE CONTADORES CONFORME CONTRATO EN VIGOR TOTAL FACTURA 125,24 €",
+            "lectura-contadores.pdf", providers,
+        )
+
+        self.assertEqual("GOMEZ_GROUP_METERING", key)
+        self.assertEqual("MANTENIMIENTO", config["tipo_suministro"])
+
+    def test_gomez_group_metering_profile_extracts_invoice_date_and_total(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["GOMEZ_GROUP_METERING"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "F.FACTURA F. VCTO. Nº FACTURA RAZÓN SOCIAL LF26022852 02/03/2026 "
+            "06/03/2026 GOMEZ GROUP METERING, S.L.U. TOTAL FACTURA ... 125,24 €",
+            config,
+        )
+
+        self.assertEqual("LF26022852", result["num_factura"])
+        self.assertEqual("2026-03-02", result["fecha_factura"])
+        self.assertEqual(125.24, result["importe_total"])
+
+    def test_gomez_group_metering_anchors_date_to_invoice_header(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["GOMEZ_GROUP_METERING"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "Fecha de prestación 01/02/2026 F.FACTURA F. VCTO. Nº FACTURA "
+            "RAZÓN SOCIAL LF26022852 02/03/2026 06/03/2026 TOTAL FACTURA 125,24 €",
+            config,
+        )
+
+        self.assertEqual("2026-03-02", result["fecha_factura"])
+
+    def test_catalogue_rejects_gomez_payment_notice_without_service_evidence(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "GOMEZ GROUP METERING, S.L.U. FACTURA pendiente LF26022852 "
+            "TOTAL FACTURA 125,24 €. Consulte el estado de su pago.",
+            "aviso-gomez.pdf", providers,
+        )
+
+        self.assertIsNone(key)
+        self.assertIsNone(config)
+
+    def test_catalogue_rejects_detailed_gomez_payment_reminder(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "RECORDATORIO DE PAGO GOMEZ GROUP METERING, S.L.U. F.FACTURA F. VCTO. "
+            "Nº FACTURA RAZÓN SOCIAL LF26022852 SERVICIO DE LECTURA, FACTURACIÓN "
+            "Y MANTENIMIENTO DE CONTADORES CONFORME CONTRATO EN VIGOR TOTAL FACTURA 125,24 €",
+            "aviso-detallado-gomez.pdf", providers,
+        )
+
+        self.assertIsNone(key)
+        self.assertIsNone(config)
+
+    def test_catalogue_rejects_gomez_service_text_without_structured_invoice_header(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        key, config = lector_pdf.identificar_proveedor(
+            "GOMEZ GROUP METERING, S.L.U. Nº FACTURA LF26022852 "
+            "SERVICIO DE LECTURA, FACTURACIÓN Y MANTENIMIENTO DE CONTADORES "
+            "TOTAL FACTURA 125,24 €",
+            "gomez-sin-cabecera.pdf", providers,
+        )
+
+        self.assertIsNone(key)
+        self.assertIsNone(config)
+
+    def test_gomez_group_metering_profile_reads_legacy_total_before_label(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["GOMEZ_GROUP_METERING"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "FACTURA\nGOMEZ GROUP METERING, S.L.U.\nNº FACTURA\nRAZÓN SOCIAL\n"
+            "LF25040215 01/07/2025 05/07/2025\nCONCEPTO CANTIDAD PRECIO IMPORTE\n"
+            "100,00 €\nBASE IMPONIBLE ...\nI.V.A. 100,00 € (21%) 21,00 €\n"
+            "Cargo IBAN: ES41\nFORMA DE PAGO:\n121,00 €\nTOTAL FACTURA ...\n",
+            config,
+        )
+
+        self.assertEqual(121.0, result["importe_total"])
 
     def test_totalenergies_credit_note_is_accepted_as_a_negative_invoice(self):
         providers = lector_pdf.cargar_proveedores(

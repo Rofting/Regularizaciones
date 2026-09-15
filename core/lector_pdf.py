@@ -57,12 +57,19 @@ def cargar_proveedores(ruta_json: str | None = None) -> dict:
 # UTILIDADES
 # ---------------------------------------------------------------------------
 
-def _limpiar_numero(texto: str) -> float:
-    """Convierte '8.176,48' o '8176.48' a float."""
+def _limpiar_numero(texto: str, puntos_millares: bool = False) -> float:
+    """Convierte un importe o consumo textual a ``float``.
+
+    ``puntos_millares`` se activa sólo desde el perfil que confirma ese
+    formato. Así ``4.011`` puede leerse como 4011 kWh en una factura española
+    sin convertir los decimales con punto de otros proveedores.
+    """
     if not texto:
         return 0.0
     t = texto.strip().replace("€", "").replace(" ", "")
-    if "." in t and "," in t:
+    if puntos_millares and "," not in t and re.fullmatch(r"\d{1,3}(?:\.\d{3})+", t):
+        t = t.replace(".", "")
+    elif "." in t and "," in t:
         if t.index(".") < t.index(","):
             t = t.replace(".", "")
     t = t.replace(",", ".")
@@ -616,6 +623,21 @@ def _extraer_campo(texto: str, patron: str) -> str | None:
     return None
 
 
+def _extraer_campo_preferido(texto: str, patron: str, alternativos: list[str]) -> str | None:
+    """Extrae primero los patrones más fiables configurados por proveedor.
+
+    Algunos PDF incluyen gráficas entre una etiqueta y el importe. Un patrón
+    específico que exige un valor monetario completo evita interpretar la
+    escala de esa gráfica como el total de la factura, sin alterar el rescate
+    genérico que usan los formatos simples.
+    """
+    for alternativo in alternativos:
+        valor = _extraer_campo(texto, alternativo)
+        if valor:
+            return valor
+    return _extraer_campo(texto, patron)
+
+
 _PAT_RANGO_FECHAS_CAPA_B = [
     # "del 1 al 30 de Abril de 2026" (Lebal y similares)
     re.compile(
@@ -659,6 +681,8 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
       Capa C — LLM Gemini API (GEMINI_API_KEY en entorno)  → último recurso
     """
     regex = config.get("regex", {})
+    regex_preferidos = config.get("regex_preferidos", {})
+    campos_con_puntos_millares = set(config.get("campos_con_puntos_millares", []))
     tiene_decorativos = config.get("importe_tiene_puntos_decorativos", False)
     datos: dict = {}
 
@@ -666,7 +690,9 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
     for campo, patron in regex.items():
         if campo.startswith("linea_"):
             continue  # campos especiales de Ríos, se tratan aparte
-        datos[campo] = _extraer_campo(texto, patron)
+        datos[campo] = _extraer_campo_preferido(
+            texto, patron, regex_preferidos.get(campo, [])
+        )
 
     # ── Capas B y C: solo para campos críticos que Capa A no encontró ────────
     # Si el proveedor usa puntos decorativos, importe_total se maneja
@@ -706,7 +732,9 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
             patron_imp = config.get("regex", {}).get(campo_num, "")
             datos[campo_num] = _limpiar_importe_decorativo(texto, patron_imp) if patron_imp else 0.0
         elif datos.get(campo_num):
-            datos[campo_num] = _limpiar_numero(datos[campo_num])
+            datos[campo_num] = _limpiar_numero(
+                datos[campo_num], campo_num in campos_con_puntos_millares
+            )
         else:
             datos[campo_num] = 0.0
 
