@@ -159,6 +159,33 @@
         "644": null
       }
     },
+    "GOMEZ_GROUP_METERING": {
+      "nombre_display": "Gómez Group Metering — Servicio de contadores",
+      "tipo_suministro": "MANTENIMIENTO",
+      "unidad_consumo": null,
+      "_notas": "Factura por lectura, facturación y mantenimiento de contadores. Es un gasto de servicio, no una lectura individual de vivienda.",
+      "firma_exclusion": "(?:AVISO|RECORDATORIO)\\s+DE\\s+PAGO|FACTURA\\s+PENDIENTE",
+      "firmas_identificacion": [
+        "GOMEZ\\s+GROUP\\s+METERING"
+      ],
+      "firmas_requeridas": [
+        "F\\.?\\s*FACTURA\\s+F\\.?\\s*VCTO\\.?",
+        "N[º°�]\\s*FACTURA(?:\\s+RAZ[ÓO�]N\\s+SOCIAL)?\\s+[A-Z]{1,3}\\d+",
+        "SERVICIO\\s+DE\\s+LECTURA,\\s*FACTURACI[ÓO�]N\\s+Y\\s+MANTENIMIENTO",
+        "TOTAL\\s+FACTURA"
+      ],
+      "regex_preferidos": {
+        "importe_total": [
+          "(?P<valor>[\\d.,]+)\\s*(?:€|�)\\s*TOTAL\\s+FACTURA"
+        ]
+      },
+      "regex": {
+        "num_factura": "N[º°�]\\s*FACTURA(?:\\s+RAZ[ÓO�]N\\s+SOCIAL)?\\s+(?P<valor>[A-Z]{1,3}\\d+)",
+        "fecha_factura": "F\\.?\\s*FACTURA[\\s\\S]{0,120}?[A-Z]{1,3}\\d+\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "importe_total": "TOTAL\\s+FACTURA\\s*(?:\\.{2,}\\s*)?(?P<valor>[\\d.,]+)\\s*(?:€|�)"
+      },
+      "cups_comunidades": {}
+    },
     "METRIGEST_ACS": {
       "nombre_display": "Metrigest — Resumen lecturas ACS",
       "tipo_suministro": "LECTURA_ACS",
@@ -347,17 +374,32 @@
       "tipo_suministro": "GAS",
       "unidad_consumo": "kWh",
       "_notas": "Factura de gas de Naturgy Clientes. El CUPS se valida sólo cuando la comunidad lo tenga confirmado en este perfil.",
+      "firma_exclusion": "(?:AVISO|RECORDATORIO)\\s+DE\\s+PAGO|FACTURA\\s+PENDIENTE",
       "firmas_identificacion": [
-        "Naturgy Clientes, S.A.U.",
-        "naturgyclientes@naturgy.com",
-        "Período gas:"
+        "Naturgy\\s+(?:Clientes|Iberia)"
+      ],
+      "firmas_requeridas": [
+        "aqu[ií�]\\s*tienes\\s*tu\\s*factura\\s*de\\s*gas",
+        "N[.º°o�]?\\s*[º°�]?\\s*(?:de\\s*)?factura:\\s*[A-Z]{2}\\d+",
+        "(?:Per[ií�]odo\\s+gas:|Gas:\\s*del)",
+        "Total\\s*a\\s*pagar"
+      ],
+      "regex_preferidos": {
+        "importe_total": [
+          "Total\\s*a\\s*pagar\\s*(?P<valor>\\d{1,3}(?:\\.\\d{3})*,\\s*\\d{2})\\s*(?:€|�)",
+          "(?P<valor>\\d{1,3}(?:\\.\\d{3})*,\\s*\\d{2})\\s*(?:€|�)\\s*Total\\s*a\\s*pagar"
+        ]
+      },
+      "campos_con_puntos_millares": [
+        "consumo_kwh"
       ],
       "regex": {
-        "num_factura": "N[.º°o]\\s*de\\s*factura:\\s*(?P<valor>[A-Z0-9]+)",
-        "fecha_factura": "Fecha\\s+de\\s+emisi[oó]n:\\s*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
-        "fecha_inicio": "Per[ií]odo\\s+gas:\\s+del\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
-        "fecha_fin": "Per[ií]odo\\s+gas:\\s+del\\s+\\d{2}/\\d{2}/\\d{4}\\s+al\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
-        "importe_total": "Total\\s+a\\s+pagar\\s+(?P<valor>[\\d.,\\s]+)\\s*(?:€|�)"
+        "num_factura": "N[.º°o�]\\s*(?:de\\s*)?factura:\\s*(?P<valor>[A-Z0-9]+)",
+        "fecha_factura": "Fecha\\s+de\\s+emisi[oó�]n:\\s*(?P<valor>\\d{2}[/.]\\d{2}[/.]\\d{4})",
+        "fecha_inicio": "(?:Per[ií�]odo\\s+gas:|Gas:)\\s*del\\s*(?P<valor>\\d{2}[/.]\\d{2}[/.]\\d{4})",
+        "fecha_fin": "(?:Per[ií�]odo\\s+gas:|Gas:)\\s*del\\s*\\d{2}[/.]\\d{2}[/.]\\d{4}\\s+al\\s*(?P<valor>\\d{2}[/.]\\d{2}[/.]\\d{4})",
+        "consumo_kwh": "(?:Consumo\\s+gas\\s+|Consumo\\s*kWh\\s*:\\s*(?:\\d+\\s+)?)(?P<valor>[\\d.,]+)\\s*kWh",
+        "importe_total": "Total\\s*a\\s*pagar\\s*(?P<valor>[\\d.,\\s]+)\\s*(?:€|�)?"
       },
       "cups_comunidades": {}
     },
