@@ -34,7 +34,10 @@ def _key(value) -> str:
 def _is_period_header(value) -> bool:
     text = str(value or "").strip().lower()
     return bool(
-        re.fullmatch(r"\d{1,2}/\d{2,4}", text)
+        # Algunos listados de Meditrade imprimen el año abreviado a un dígito
+        # (por ejemplo, ``01/6`` para enero de 2026). El intervalo se confirma
+        # después en el expediente, por lo que aquí basta reconocer la columna.
+        re.fullmatch(r"\d{1,2}/\d{1,4}", text)
         or re.fullmatch(r"[a-záéíóú]{3,10}-\d{2,4}", text)
     )
 

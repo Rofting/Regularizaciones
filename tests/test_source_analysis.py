@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -233,6 +234,36 @@ class SourceAnalysisTest(unittest.TestCase):
         )
 
         self.assertEqual(537.74, result["importe_total"])
+
+    def test_naturgy_profile_reads_ocr_total_after_chart_axis(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["NATURGY_CLIENTES_GAS"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "Naturgy Clientes, S.A.U. aquí tienes tu factura de gas. "
+            "Total a pagar 60000 € 45000 6.279, 49€ Gas 5.189,66€",
+            config,
+        )
+
+        self.assertEqual(6279.49, result["importe_total"])
+
+    def test_zaragoza_water_profile_uses_meter_reading_dates_from_ocr(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["AGUA_ZARAGOZA"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "OFICINA MUNICIPAL DEL AGUA TOTAL A PAGAR 175,14 € "
+            "Lectura anterior (m3) 1.401 20-08-25 "
+            "Ultima lectura (m3) 1.445 21-09-25",
+            config,
+        )
+
+        self.assertEqual("2025-08-20", result["fecha_inicio"])
+        self.assertEqual("2025-09-21", result["fecha_fin"])
 
     def test_naturgy_profile_interprets_dotted_kwh_as_thousands(self):
         providers = lector_pdf.cargar_proveedores(
@@ -493,6 +524,137 @@ class SourceAnalysisTest(unittest.TestCase):
         )
 
         self.assertEqual(121.0, result["importe_total"])
+
+    def test_gomez_group_metering_profile_reads_total_before_payment_label(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["GOMEZ_GROUP_METERING"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "FACTURA GOMEZ GROUP METERING, S.L.U. LF25008221 02/01/2025 06/01/2025 "
+            "LECTURAS FACTURADAS: 2025 ENE 100,00 € BASE IMPONIBLE "
+            "I.V.A. 100,00 € (21%) 21,00 € Cargo IBAN: ES41 0081 1986 5600 "
+            "0119 1920 121,00 € FORMA DE PAGO: TOTAL FACTURA ...",
+            config,
+        )
+
+        self.assertEqual(121.0, result["importe_total"])
+
+    def test_meditrade_readings_accept_short_year_and_ignore_report_footers(self):
+        import xlwt
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lecturas.xls"
+            workbook = xlwt.Workbook()
+            sheet = workbook.add_sheet("xmlrep")
+            for row_index, row in enumerate((
+                ("MEDITRADE DEL EBRO",),
+                ("LISTADO DEL CONSUMO ENTRE DOS LECTURAS",),
+                ("Cod.", "Propiedad", "Nombre", "", "", "", "01/6", "03/2026", "", "", "8 CONS. ACS"),
+                (659, "PA2-1A", "VECINO", "", "", "", 144, 150, "", "", 6),
+                (999, "   ", "C.P. PINTOR AGUAYO", "", "", "", 0, 0, "", "", 0),
+                ("", "", "Totales....", "", "", "", 144, 150, "", "", 6),
+            )):
+                for column, value in enumerate(row):
+                    sheet.write(row_index, column, value)
+            workbook.save(str(path))
+
+            analysis = source_analysis.analyse_tabular(path)
+
+        self.assertEqual("reading", analysis.kind)
+        self.assertEqual(1, len(json.loads(analysis.candidates["vecinos"])))
+        self.assertEqual("ACS", analysis.candidates["tipo"])
+        self.assertEqual("2026-01-01", analysis.candidates["fecha_inicio"])
+        self.assertEqual("2026-03-31", analysis.candidates["fecha_fin"])
+
+    def test_meditrade_xlsx_ignores_footer_with_empty_property_cell(self):
+        from openpyxl import Workbook
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lecturas.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["Cod.", "Propiedad", "Nombre", "11/2025", "1/2026"])
+            sheet.append([659, "PA2-1A", "VECINO", 144, 150])
+            sheet.append([None, None, "Totales....", 144, 150])
+            workbook.save(path)
+            workbook.close()
+
+            analysis = source_analysis.analyse_tabular(path)
+
+        self.assertEqual("reading", analysis.kind)
+        self.assertEqual(1, len(json.loads(analysis.candidates["vecinos"])))
+
+    def test_meditrade_owner_report_collects_following_email_line(self):
+        import xlwt
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "propietarios.xls"
+            workbook = xlwt.Workbook()
+            sheet = workbook.add_sheet("propietarios")
+            for row_index, row in enumerate((
+                ("DATOS DE PROPIETARIOS",),
+                ("Código", "Propiedad", "Nombre", "NIF", "Coeficiente"),
+                ("000659", "PA2-1A", "ANA VECINA", "12345678A", "1,460000"),
+                ("e-mail : ana@example.com",),
+                ("Bloque:", "0002 -"),
+            )):
+                for column, value in enumerate(row):
+                    sheet.write(row_index, column, value)
+            workbook.save(str(path))
+
+            analysis = source_analysis.analyse_tabular(path)
+
+        self.assertEqual("owners", analysis.kind)
+        self.assertEqual(
+            [{"codigo_vivienda": "PA2-1A", "nombre_propietario": "ANA VECINA",
+              "coeficiente": 1.46, "email": "ana@example.com"}],
+            json.loads(analysis.candidates["propietarios"]),
+        )
+
+    def test_reference_workbook_is_not_mistaken_for_a_source_invoice(self):
+        from openpyxl import Workbook
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ESTUDIO ACS.xlsx"
+            workbook = Workbook()
+            workbook.active.title = "DATOS"
+            for name in ("GAS", "ELECTRICIDAD", "AGUA", "LECTURAS ACS M3", "ANALISIS"):
+                workbook.create_sheet(name)
+            workbook.save(path)
+            workbook.close()
+
+            analysis = source_analysis.analyse_tabular(path)
+
+        self.assertEqual("other", analysis.kind)
+        self.assertIn("modelo", analysis.review_message.lower())
+
+    @mock.patch("pytesseract.image_to_string", return_value="texto OCR")
+    @mock.patch("pdf2image.convert_from_path", return_value=[object()])
+    def test_ocr_limits_scanned_pdf_to_the_invoice_cover_page(self, convert, _ocr):
+        with mock.patch("sys.platform", "linux"):
+            self.assertEqual("texto OCR", lector_pdf.extraer_texto_ocr("factura.pdf"))
+
+        convert.assert_called_once_with(
+            "factura.pdf", dpi=200, poppler_path=None, first_page=1, last_page=1,
+        )
+
+    def test_image_only_pdf_is_routed_to_ocr_before_pdfplumber(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scanned = Path(directory) / "escaneado.pdf"
+            native = Path(directory) / "nativo.pdf"
+            scanned.write_bytes(b"%PDF-1.7 /XObject /Image /Image")
+            native.write_bytes(b"%PDF-1.7 /Font /ToUnicode /Image")
+
+            self.assertTrue(lector_pdf._pdf_probablemente_escaneado(scanned))
+            self.assertFalse(lector_pdf._pdf_probablemente_escaneado(native))
+
+    def test_ocr_normalisation_recovers_split_euro_cents(self):
+        text = "Total a pagar 6.279 49€"
+        self.assertEqual(
+            "Total a pagar 6.279,49€", lector_pdf._normalizar_decimales_ocr(text),
+        )
 
     def test_totalenergies_credit_note_is_accepted_as_a_negative_invoice(self):
         providers = lector_pdf.cargar_proveedores(

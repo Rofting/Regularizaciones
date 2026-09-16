@@ -325,7 +325,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.confirm(self.ingest(analysis, path))
         self.assertEqual(2, self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0])
 
-    def test_legacy_xls_rows_are_extracted_and_request_missing_interval_and_service(self):
+    def test_legacy_xls_rows_are_extracted_and_request_only_missing_service(self):
         import xlwt
         self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))
         path = self.reading_file.with_suffix(".xls")
@@ -340,8 +340,10 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.assertIn("vecinos", analysis.candidates)
         document = self.ingest(analysis, path)
         issues = document_review.list_open_issues(self.connection, self.case.id_case)
-        self.assertEqual({"tipo", "fecha_inicio", "fecha_fin"}, {issue.field_name for issue in issues})
-        values = {"tipo": "ACS", "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31"}
+        self.assertEqual({"tipo"}, {issue.field_name for issue in issues})
+        self.assertEqual("2025-12-01", analysis.candidates["fecha_inicio"])
+        self.assertEqual("2026-01-31", analysis.candidates["fecha_fin"])
+        values = {"tipo": "ACS"}
         for issue in issues:
             document_review.resolve_issue(self.connection, issue.id_issue, value=values[issue.field_name], reason="Cabecera verificada")
         self.confirm(document)

@@ -7,6 +7,7 @@ import json
 import math
 import re
 import unicodedata
+import calendar
 from datetime import date, datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +57,19 @@ class SourceAnalysis:
     @classmethod
     def owners(cls, candidates: Mapping[str, str | None] | None = None, *, locator=None) -> "SourceAnalysis":
         return cls("owners", "high", candidates or {}, (), locator)
+
+    @classmethod
+    def reference(cls, *, locator=None) -> "SourceAnalysis":
+        """Archivo histórico reconocido que no debe entrar como fuente operativa.
+
+        Los modelos Excel completos se importan explícitamente desde el paso de
+        arranque. Cuando llegan dentro de una carpeta de facturas no deben
+        bloquear el expediente ni duplicar importes.
+        """
+        return cls(
+            "other", "high", {}, (), locator,
+            "Modelo Excel de referencia detectado; impórtalo desde «Importar modelo inicial» si quieres usarlo como histórico.",
+        )
 
     @classmethod
     def unknown(cls, message: str | None = None, *, locator=None) -> "SourceAnalysis":
@@ -217,6 +231,9 @@ def _tabular_headers(path: Path) -> tuple[tuple[object, ...], SourceLocator | No
 def analyse_tabular(path: Path) -> SourceAnalysis:
     """Extract explicit rows; incomplete or ambiguous tables remain reviewable."""
     try:
+        reference = _reference_workbook_analysis(path)
+        if reference is not None:
+            return reference
         rows, sheet = _tabular_rows(path)
         for index, headers in enumerate(rows[:30]):
             keys = [_normalise_header(value).replace("_", " ") for value in headers]
@@ -228,20 +245,31 @@ def analyse_tabular(path: Path) -> SourceAnalysis:
                 property_column, periods = legacy_columns
                 if len(periods) < 2:
                     raise ValueError("Faltan dos columnas de lectura por periodo")
-                candidates = _extract_rows(rows[index + 1:], {
-                    "vivienda": property_column, "val_ant": periods[0], "val_act": periods[-1],
-                })
+                candidates = _legacy_reading_rows(
+                    rows[index + 1:], property_column, periods[0], periods[-1],
+                )
                 if not candidates:
                     raise ValueError("La tabla no contiene lecturas")
                 for row in candidates:
-                    if not str(row["vivienda"] or "").strip():
-                        raise ValueError("Hay lecturas sin vivienda")
-                    row["vivienda"] = str(row["vivienda"]).strip()
                     for key in ("val_ant", "val_act"):
                         row[key] = _tabular_number(row[key])
-                return SourceAnalysis("reading", "high", {"vecinos": _string_value(candidates)},
-                    ("tipo", "fecha_inicio", "fecha_fin"), locator,
-                    "Confirma el servicio y las fechas exactas de las columnas inicial y final.")
+                metadata = _legacy_reading_metadata(headers, periods)
+                values = {"vecinos": _string_value(candidates), **metadata}
+                missing = tuple(
+                    field for field in ("tipo", "fecha_inicio", "fecha_fin")
+                    if not values.get(field)
+                )
+                return SourceAnalysis(
+                    "reading", "high" if not missing else "medium", values, missing, locator,
+                    "Revisa y confirma el servicio y el intervalo deducidos de las columnas de lectura.",
+                )
+            legacy_owners = _meditrade_owner_rows(rows[index + 1:], headers)
+            if legacy_owners is not None:
+                if not legacy_owners:
+                    raise ValueError("El listado no contiene propietarios completos")
+                return SourceAnalysis.owners(
+                    {"propietarios": _string_value(legacy_owners)}, locator=locator,
+                )
             reading_keys = {
                 "vivienda": ("vivienda", "propiedad", "codigo vivienda"),
                 "tipo": ("tipo", "servicio", "suministro"),
@@ -318,6 +346,148 @@ def _extract_rows(rows, columns):
         result.append({key: row[index] if index < len(row) else None
                        for key, index in columns.items()})
     return result
+
+
+def _legacy_reading_rows(rows, property_column: int, initial_column: int, final_column: int):
+    """Return only dwelling rows from Meditrade-style printed reports.
+
+    These reports end with a community control line (code 999) and ``Totales``.
+    They are report footers, not missing homes. Rows with a real dwelling but a
+    missing reading deliberately remain candidates so the normal numeric check
+    can request a review rather than inventing a value.
+    """
+    result = []
+    for row in rows:
+        raw_vivienda = row[property_column] if property_column < len(row) else None
+        vivienda = str(raw_vivienda or "").strip()
+        if not vivienda:
+            continue
+        result.append({
+            "vivienda": vivienda,
+            "val_ant": row[initial_column] if initial_column < len(row) else None,
+            "val_act": row[final_column] if final_column < len(row) else None,
+        })
+    return result
+
+
+_READING_MONTHS = {
+    "ene": 1, "enero": 1, "feb": 2, "febrero": 2, "mar": 3, "marzo": 3,
+    "abr": 4, "abril": 4, "may": 5, "mayo": 5, "jun": 6, "junio": 6,
+    "jul": 7, "julio": 7, "ago": 8, "agosto": 8, "sep": 9, "sept": 9,
+    "septiembre": 9, "oct": 10, "octubre": 10, "nov": 11, "noviembre": 11,
+    "dic": 12, "diciembre": 12,
+}
+
+
+def _legacy_reading_metadata(headers, periods: tuple[int, ...]) -> dict[str, str]:
+    """Derive confirmable service and month boundaries from report headers."""
+    label_text = " ".join(_normalise_header(value) for value in headers)
+    service = None
+    if "acs" in label_text or "agua caliente" in label_text:
+        service = "ACS"
+    elif "calefaccion" in label_text:
+        service = "CALEFACCION"
+
+    values = [headers[index] for index in periods]
+    known_years = [
+        year for value in values
+        if (parts := re.search(r"(?:/|-)(\d{4})$", str(value or "").strip().lower()))
+        for year in (int(parts.group(1)),)
+    ]
+    start = _legacy_header_month(values[0], known_years)
+    end = _legacy_header_month(values[-1], known_years)
+    metadata: dict[str, str] = {}
+    if service:
+        metadata["tipo"] = service
+    if start:
+        metadata["fecha_inicio"] = f"{start[0]:04d}-{start[1]:02d}-01"
+    if end:
+        metadata["fecha_fin"] = f"{end[0]:04d}-{end[1]:02d}-{calendar.monthrange(*end)[1]:02d}"
+    return metadata
+
+
+def _legacy_header_month(value, known_years: list[int]) -> tuple[int, int] | None:
+    """Parse ``7/2025``, ``01/6`` or ``sep-24`` without guessing a day."""
+    text = str(value or "").strip().lower()
+    numeric = re.fullmatch(r"(\d{1,2})/(\d{1,4})", text)
+    named = re.fullmatch(r"([a-záéíóú]+)-(\d{2,4})", text)
+    if numeric:
+        month, raw_year = int(numeric.group(1)), numeric.group(2)
+    elif named:
+        month = _READING_MONTHS.get(named.group(1))
+        raw_year = named.group(2)
+    else:
+        return None
+    if not month or not 1 <= month <= 12:
+        return None
+    if len(raw_year) == 4:
+        year = int(raw_year)
+    elif len(raw_year) == 2:
+        year = 2000 + int(raw_year)
+    else:
+        suffix = int(raw_year)
+        matching = [candidate for candidate in known_years if candidate % 10 == suffix]
+        year = matching[0] if len(matching) == 1 else 2020 + suffix
+    return year, month
+
+
+def _meditrade_owner_rows(rows, headers):
+    """Read Meditrade owner reports, whose emails are printed on the next row."""
+    labels = [_normalise_header(value).replace("_", " ") for value in headers]
+    try:
+        code_column = next(index for index, value in enumerate(labels) if value in ("codigo", "cod"))
+        property_column = labels.index("propiedad")
+        name_column = labels.index("nombre")
+    except StopIteration:
+        return None
+    except ValueError:
+        return None
+    coefficient_column = next(
+        (index for index, value in enumerate(labels) if value == "coeficiente"), None,
+    )
+    result = []
+    current = None
+    from importar_propietarios_csv import _email
+    for row in rows:
+        values = [row[index] if index < len(row) else None for index in range(len(headers))]
+        email = _email(" ".join(str(value or "") for value in values))
+        code = str(values[code_column] or "").strip()
+        vivienda = str(values[property_column] or "").strip()
+        nombre = str(values[name_column] or "").strip()
+        if vivienda and nombre and re.fullmatch(r"\d+(?:\.0)?", code):
+            current = {
+                "codigo_vivienda": vivienda,
+                "nombre_propietario": nombre,
+            }
+            if coefficient_column is not None:
+                coefficient = values[coefficient_column]
+                if coefficient not in (None, ""):
+                    current["coeficiente"] = _tabular_number(coefficient)
+            if email:
+                current["email"] = email
+            result.append(current)
+        elif email and current is not None:
+            current["email"] = email
+    return result
+
+
+def _reference_workbook_analysis(path: Path) -> SourceAnalysis | None:
+    """Recognise the validated multi-sheet Excel model before row analysis."""
+    if path.suffix.lower() != ".xlsx":
+        return None
+    from openpyxl import load_workbook
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet_names = set(workbook.sheetnames)
+        required = {"DATOS", "GAS", "ELECTRICIDAD", "AGUA", "LECTURAS ACS M3", "ANALISIS"}
+        if not required.issubset(sheet_names):
+            return None
+        return SourceAnalysis.reference(locator=SourceLocator(
+            sheet="DATOS", cell="A1",
+            fragment="Modelo Excel de referencia detectado; no se añadirá como factura ni lectura operativa.",
+        ))
+    finally:
+        workbook.close()
 
 
 def _tabular_number(value):

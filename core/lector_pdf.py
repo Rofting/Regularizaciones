@@ -445,6 +445,37 @@ def _colapsar_espacios(texto: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", texto)
 
 
+def _normalizar_decimales_ocr(texto: str) -> str:
+    """Recupera céntimos cuando OCR sustituye la coma por un espacio.
+
+    Solo se toca una cifra seguida del símbolo de euro, por ejemplo
+    ``6.279 49€``. No se alteran espacios normales ni escalas de gráficas.
+    """
+    return re.sub(
+        r"(\d{1,3}(?:\.\d{3})*)\s+(\d{2}\s*(?:€|�))",
+        r"\1,\2",
+        texto,
+    )
+
+
+def _pdf_probablemente_escaneado(ruta: Path) -> bool:
+    """Detecta rápidamente PDFs de imagen sin capa tipográfica utilizable.
+
+    Pdfplumber puede tardar mucho intentando descomponer páginas escaneadas
+    complejas. Un PDF que contiene imágenes pero no fuentes ni mapa Unicode se
+    envía directamente a OCR; la comprobación es binaria y no interpreta el
+    documento completo.
+    """
+    if ruta.suffix.lower() != ".pdf" or zipfile.is_zipfile(ruta):
+        return False
+    try:
+        with ruta.open("rb") as archivo:
+            contenido = archivo.read(2 * 1024 * 1024)
+    except OSError:
+        return False
+    return b"/Image" in contenido and b"/Font" not in contenido and b"/ToUnicode" not in contenido
+
+
 def extraer_texto(ruta_archivo: str) -> str:
     """
     Extrae todo el texto de un archivo.
@@ -533,16 +564,25 @@ def extraer_texto_ocr(ruta_archivo: str) -> str:
             if candidatos_poppler:
                 poppler_path = candidatos_poppler[0]
 
-        imagenes = convert_from_path(ruta_archivo, dpi=200, poppler_path=poppler_path)
+        # Los datos decisivos de una factura están en portada. Limitar el OCR
+        # evita que un anexo de muchas páginas bloquee la interfaz durante
+        # minutos; si la portada no basta, el documento queda para revisión.
+        imagenes = convert_from_path(
+            ruta_archivo, dpi=200, poppler_path=poppler_path, first_page=1, last_page=1,
+        )
         partes = []
         for img in imagenes:
+            # Los recibos municipales y de suministros suelen tener varias
+            # cajas de importes. PSM 6 conserva etiqueta y cifra en la misma
+            # línea, a diferencia del modo automático que separa columnas.
+            ocr_config = "--psm 6"
             # Intentar con español primero, inglés como fallback
             try:
-                texto = pytesseract.image_to_string(img, lang="spa")
+                texto = pytesseract.image_to_string(img, lang="spa", config=ocr_config)
             except Exception:
-                texto = pytesseract.image_to_string(img)
+                texto = pytesseract.image_to_string(img, config=ocr_config)
             partes.append(texto)
-        return "\n".join(partes)
+        return _normalizar_decimales_ocr("\n".join(partes))
     except ImportError:
         return ""
     except Exception:
@@ -994,8 +1034,10 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
     hash_md5 = _md5_archivo(ruta_archivo)
     validacion = {"nivel_1_archivo": None, "nivel_2_cif": None, "nivel_3_cups": None}
 
-    # 1. Extraer texto (ZIP o PDF nativo con pdfplumber)
-    texto = extraer_texto(ruta_archivo)
+    # 1. Los PDFs de imagen se detectan sin recorrerlos con pdfplumber: así el
+    # OCR de portada evita bloqueos en facturas escaneadas de varias páginas.
+    ruta = Path(ruta_archivo)
+    texto = "" if _pdf_probablemente_escaneado(ruta) else extraer_texto(ruta_archivo)
 
     # Si no hay texto, intentar OCR automáticamente
     if not texto.strip():
