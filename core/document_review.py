@@ -462,6 +462,32 @@ def clear_open_automatic_issues(
         )
 
 
+def resolve_archived_source_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+) -> int:
+    """Cierra las incidencias de archivo al recuperar una ruta verificada."""
+    with _transaction(connection):
+        document = connection.execute(
+            "SELECT id_case FROM source_documents WHERE id_document = ?", (document_id,)
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        result = connection.execute(
+            """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
+               WHERE id_case=? AND id_document=? AND status='open' AND origin='automatic'
+                 AND code IN (?, ?)""",
+            (
+                case_id,
+                document_id,
+                _ARCHIVED_SOURCE_DUPLICATE_CODE,
+                _ARCHIVED_SOURCE_MISSING_CODE,
+            ),
+        )
+    return result.rowcount
+
+
 def list_open_issues(connection: sqlite3.Connection, case_id: int) -> tuple[ReviewIssue, ...]:
     rows = connection.execute(
         """SELECT issues.id_issue, issues.id_case, issues.id_document,

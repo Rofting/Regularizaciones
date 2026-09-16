@@ -1665,6 +1665,9 @@ def open_archived_path_resolution_dialog(app: "AppGestionFincas", case_id: int) 
             selected = expedient_service.select_archived_source_path(
                 connection, document_id, path, archive_root=app.ruta_archivo_expedientes,
             )
+            document_review.resolve_archived_source_issue(
+                connection, case_id, document_id,
+            )
         except (LookupError, ValueError, RuntimeError, OSError) as exc:
             messagebox.showerror("No se pudo actualizar la ruta", str(exc), parent=dialog)
             return

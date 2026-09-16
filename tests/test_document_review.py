@@ -113,6 +113,37 @@ class DocumentReviewTest(unittest.TestCase):
                          [("fecha_inicio", "open")])
         self.assertEqual(issues[0].archived_path, self.document.archived_path)
 
+    def test_resolving_archived_source_issue_closes_only_the_path_incident(self):
+        duplicate = document_review.create_archived_source_issue(
+            self.connection,
+            self.case.id_case,
+            self.document.id_document,
+            duplicate_count=2,
+        )
+        other = document_review.create_review_issue(
+            self.connection,
+            self.case.id_case,
+            self.document.id_document,
+            code="SOURCE_VALUE_REVIEW",
+            field_name="importe_total",
+            message="Comprueba el importe total.",
+        )
+
+        closed = document_review.resolve_archived_source_issue(
+            self.connection,
+            self.case.id_case,
+            self.document.id_document,
+        )
+
+        self.assertEqual(1, closed)
+        self.assertEqual([other.id_issue], [
+            issue.id_issue
+            for issue in document_review.list_open_issues(self.connection, self.case.id_case)
+        ])
+        self.assertEqual("resolved", self.connection.execute(
+            "SELECT status FROM review_issues WHERE id_issue=?", (duplicate.id_issue,)
+        ).fetchone()[0])
+
     def test_candidate_context_is_persisted_without_changing_existing_callers(self):
         document_review.record_candidates(
             self.connection,
