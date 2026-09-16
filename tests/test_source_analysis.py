@@ -406,6 +406,37 @@ class SourceAnalysisTest(unittest.TestCase):
 
         self.assertEqual("2026-03-02", result["fecha_factura"])
 
+    def test_gomez_group_metering_infers_full_month_from_billed_readings_label(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["GOMEZ_GROUP_METERING"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "F.FACTURA F. VCTO. Nº FACTURA LF25040215 01/07/2025 05/07/2025 "
+            "SERVICIO DE LECTURA, FACTURACIÓN Y MANTENIMIENTO DE CONTADORES. "
+            "LECTURAS FACTURADAS: 2025 JUL TOTAL FACTURA 121,00 €",
+            config,
+        )
+
+        self.assertEqual("2025-07-01", result["fecha_inicio"])
+        self.assertEqual("2025-07-31", result["fecha_fin"])
+
+    def test_maintenance_profile_uses_invoice_date_when_no_service_period_exists(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["MANTENIMIENTOS_ZARAGOZA"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "INSTALACIONES ZARAGOZA S.L. Factura Número F2523682 "
+            "Fecha 04/07/2025 MANTENIMIENTO DE SALAS DE CALDERAS F2523682 - 100,00 €",
+            config,
+        )
+
+        self.assertEqual("2025-07-04", result["fecha_inicio"])
+        self.assertEqual("2025-07-04", result["fecha_fin"])
+
     def test_catalogue_rejects_gomez_payment_notice_without_service_evidence(self):
         providers = lector_pdf.cargar_proveedores(
             str(PROJECT_ROOT / "config" / "proveedores.json")

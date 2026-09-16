@@ -673,6 +673,36 @@ def _extraer_rango_fechas_capa_b(texto: str) -> tuple[str, str] | None:
     return None
 
 
+def _extraer_rango_mes_facturado(texto: str, patron: str) -> tuple[str, str] | None:
+    """Convierte un mes facturado explícito en el rango completo del mes.
+
+    El patrón pertenece al perfil del proveedor y debe aportar los grupos
+    ``anio`` y ``mes``. Así sólo se infiere un período cuando el documento
+    realmente declara el mes que se está facturando.
+    """
+    try:
+        match = re.search(patron, texto, re.IGNORECASE)
+    except re.error:
+        return None
+    if match is None:
+        return None
+    anio = match.group("anio")
+    mes = match.group("mes").lower()
+    mes_num = _MESES_NUM.get(mes)
+    if not mes_num:
+        return None
+    ultimo_dia = calendar.monthrange(int(anio), mes_num)[1]
+    return f"{anio}-{mes_num:02d}-01", f"{anio}-{mes_num:02d}-{ultimo_dia:02d}"
+
+
+def _fecha_iso_valida(valor: object) -> bool:
+    try:
+        datetime.strptime(str(valor), "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def extraer_datos_factura(texto: str, config: dict) -> dict:
     """
     Extrae los campos de una factura con estrategia en tres capas:
@@ -722,6 +752,24 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
             if not datos.get("fecha_fin"):
                 datos["fecha_fin"] = rango[1]
 
+    # Algunos servicios de lectura sólo imprimen el mes facturado. El perfil
+    # declara su ancla para no confundirlo con cualquier mes citado en el PDF.
+    if not datos.get("fecha_inicio") or not datos.get("fecha_fin"):
+        patron_mes = config.get("regex_periodo_mes_facturado")
+        rango = _extraer_rango_mes_facturado(texto, patron_mes) if patron_mes else None
+        if rango:
+            datos["fecha_inicio"] = datos.get("fecha_inicio") or rango[0]
+            datos["fecha_fin"] = datos.get("fecha_fin") or rango[1]
+
+    # Los perfiles de gastos sin período de prestación se imputan por fecha de
+    # factura, pero sólo cuando la configuración lo declara explícitamente.
+    if (
+        config.get("periodo_por_fecha_factura")
+        and _fecha_iso_valida(datos.get("fecha_factura"))
+    ):
+        datos["fecha_inicio"] = datos.get("fecha_inicio") or datos["fecha_factura"]
+        datos["fecha_fin"] = datos.get("fecha_fin") or datos["fecha_factura"]
+
     # ── Normalizar números ────────────────────────────────────────────────────
     # Los proveedores con puntos decorativos (ENVAC) también los intercalan en
     # el IVA, no solo en importe_total — mismo tratamiento para ambos campos.
@@ -761,6 +809,8 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
 _MESES_NUM = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
     "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
+    "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+    "jul": 7, "ago": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dic": 12,
 }
 
 
