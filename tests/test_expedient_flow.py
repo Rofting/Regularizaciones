@@ -158,6 +158,24 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertFalse(document_review.case_has_unapplied_sources(self.connection, self.case.id_case))
         self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
 
+    def test_manual_date_correction_rejects_non_date_digits(self):
+        result = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case, source_path=self.source_path,
+            archive_root=self.archive_root, document_kind="invoice",
+            candidates={}, required_fields=("fecha_inicio",),
+        )
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+
+        with self.assertRaisesRegex(ValueError, "fecha válida"):
+            document_review.resolve_issue(
+                self.connection, issue.id_issue, value="1233",
+                reason="valor visto en el documento",
+            )
+
+        self.assertEqual("open", document_review.list_open_issues(
+            self.connection, self.case.id_case,
+        )[0].status)
+
     def add_confirmed_reading(self, final=120):
         self.connection.execute(
             """INSERT OR IGNORE INTO propietarios

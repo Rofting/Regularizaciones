@@ -1,5 +1,7 @@
 import sqlite3
+import re
 from contextlib import contextmanager
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from itertools import count
 from typing import Collection, Iterator, Mapping
@@ -56,6 +58,29 @@ def _normalise_value(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _validate_issue_value(field_name: str, value: str) -> str:
+    """Reject placeholders before they can become a manual canonical value."""
+    if field_name in {"fecha_inicio", "fecha_fin", "fecha_factura"}:
+        for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(value, pattern).date().isoformat()
+            except ValueError:
+                continue
+        raise ValueError("Introduce una fecha válida (dd/mm/aaaa).")
+    if field_name in {"importe_total", "consumo_total", "consumo_kwh", "consumo_m3"}:
+        try:
+            amount = Decimal(value.replace(".", "").replace(",", "."))
+        except InvalidOperation:
+            raise ValueError("Introduce un importe o consumo numérico válido.") from None
+        if not amount.is_finite():
+            raise ValueError("Introduce un importe o consumo numérico válido.")
+    if field_name == "tipo_suministro" and (not re.search(r"[A-Za-zÁÉÍÓÚáéíóú]", value)):
+        raise ValueError("Indica un tipo de suministro válido, por ejemplo GAS, ACS o MANTENIMIENTO.")
+    if field_name == "document_kind" and value.casefold() not in {"invoice", "reading", "owners", "other"}:
+        raise ValueError("El tipo de documento debe ser factura, lectura, propietarios u otro.")
+    return value
 
 
 def _positive_consumption(value: object) -> Decimal:
@@ -518,6 +543,7 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
         issue = _issue_row(connection, issue_id)
         if issue is None or issue["status"] != "open":
             raise LookupError("Incidencia no encontrada")
+        normalized_value = _validate_issue_value(str(issue["field_name"]), normalized_value)
         if issue["code"] == _COUNTER_RESET_CODE:
             raise ValueError(
                 "Un reinicio de contador sólo se puede cerrar con una estimación aprobada"
