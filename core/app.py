@@ -1200,6 +1200,9 @@ class AppGestionFincas(ctk.CTk):
         if not issues:
             self._accion_confirmar_fuentes()
             return
+        if any(issue.code == "COUNTER_RESET" for issue in issues):
+            ui.open_confirm_sources_dialog(self, self.id_expediente)
+            return
         self._refrescar_bandeja_incidencias(issues)
         ui.open_issue_dialog(self, issues[0])
 

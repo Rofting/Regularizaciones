@@ -406,6 +406,23 @@ class SourceActionsTest(unittest.TestCase):
 
         review_ui.open_issue_dialog.assert_called_once_with(self.app, issue)
 
+    def test_resolve_incidents_action_routes_counter_resets_to_the_grouped_view(self):
+        self.ingest()
+        document_id = self.connection.execute(
+            "SELECT id_document FROM source_documents WHERE id_case=? ORDER BY id_document LIMIT 1",
+            (self.case.id_case,),
+        ).fetchone()[0]
+        expedient_ui.document_review.create_review_issue(
+            self.connection, self.case.id_case, document_id,
+            code="COUNTER_RESET", field_name="reading.A.ACS",
+            message="El contador disminuye y requiere una estimación aprobada",
+        )
+        review_ui = Mock()
+        with patch.dict(self.app_module.MOD, {"expedient_ui": review_ui}):
+            self.app_module.AppGestionFincas._accion_resolver_incidencias(self.app)
+
+        review_ui.open_confirm_sources_dialog.assert_called_once_with(self.app, self.case.id_case)
+
     def test_reset_cancellation_failure_and_success_preserve_or_clear_ui_at_the_right_time(self):
         from database_reset import DatabaseResetError, ResetResult
         self.assertTrue(hasattr(self.app_module.AppGestionFincas, "_accion_nueva_base_segura"))
