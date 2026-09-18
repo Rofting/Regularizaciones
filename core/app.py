@@ -2997,10 +2997,15 @@ class AppGestionFincas(ctk.CTk):
 
         expedient_ui = MOD.get("expedient_ui")
         option(
+            "Detectar desde carpeta",
+            "Analiza una carpeta mixta y propone crear automáticamente las comunidades nuevas.",
+            lambda: expedient_ui.open_detect_communities_dialog(self),
+            primary=True,
+        )
+        option(
             "Alta guiada desde fuentes",
             "Analiza propietarios, lecturas y facturas antes de crear el perfil.",
             lambda: expedient_ui.open_community_onboarding_dialog(self),
-            primary=True,
         )
         option(
             "Registro rápido",

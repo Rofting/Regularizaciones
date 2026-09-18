@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypeVar
 import customtkinter as ctk
 
 import case_ingestion
+import community_discovery
 import community_onboarding
 import document_review
 import expedient_service
@@ -246,6 +247,156 @@ def source_files_in_folder(folder: Path) -> list[Path]:
         ),
         key=lambda path: str(path.relative_to(root)).casefold(),
     )
+
+
+def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
+    """Offer automatic creation for clear community groups in a source folder."""
+    if getattr(app, "_procesando", False):
+        messagebox.showwarning("Espera", "Termina la operación actual antes de analizar una carpeta.", parent=app)
+        return
+    folder = filedialog.askdirectory(parent=app, title="Selecciona la carpeta con documentos de comunidades")
+    if not folder:
+        return
+    paths = source_files_in_folder(Path(folder))
+    if not paths:
+        messagebox.showwarning(
+            "Sin fuentes compatibles",
+            "La carpeta no contiene PDF, XLSX, XLS o CSV visibles.",
+            parent=app,
+        )
+        return
+
+    app._estado("Detectando comunidades en la carpeta…", procesando=True)
+
+    def work():
+        try:
+            candidates = community_discovery.discover_communities(paths)
+        except Exception as error:
+            def failed():
+                app._estado("No se pudo analizar la carpeta", procesando=False)
+                messagebox.showerror("No se pudo analizar la carpeta", str(error), parent=app)
+            app.after(0, failed)
+            return
+        app.after(0, lambda: _show_detected_communities(app, Path(folder), candidates, len(paths)))
+
+    app._en_hilo(work)
+
+
+def _show_detected_communities(
+    app: "AppGestionFincas", folder: Path, candidates, source_count: int,
+) -> None:
+    app._estado("Detección de comunidades lista", procesando=False)
+    dialog = _dialog(app, "Comunidades detectadas", 800, 620)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16,
+                         border_width=1, border_color=C["borde"])
+    panel.pack(fill="both", expand=True, padx=18, pady=18)
+    ctk.CTkLabel(panel, text="Comunidades detectadas", font=UIM.fuente(21, "bold"),
+                 text_color=C["texto"]).pack(anchor="w", padx=22, pady=(20, 2))
+    ctk.CTkLabel(
+        panel,
+        text=(f"Se han revisado {source_count} archivo(s) de {folder.name}. "
+              "Solo se proponen códigos identificados con seguridad. "
+              "Los originales no se moverán ni se modificarán."),
+        font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=720, justify="left",
+    ).pack(anchor="w", padx=22, pady=(0, 14))
+
+    body = ctk.CTkScrollableFrame(panel, fg_color=C["panel_2"], corner_radius=11)
+    body.pack(fill="both", expand=True, padx=22, pady=(0, 12))
+    approved = []
+    for candidate in candidates:
+        row = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=10,
+                           border_width=1, border_color=C["borde"])
+        row.pack(fill="x", padx=8, pady=6)
+        variable = tk.BooleanVar(value=candidate.can_create, master=dialog)
+        if candidate.can_create:
+            approved.append((candidate, variable))
+        ctk.CTkCheckBox(row, text="", variable=variable, width=26,
+                         state="normal" if candidate.can_create else "disabled",
+                         fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left", padx=(12, 4), pady=12)
+        details = ctk.CTkFrame(row, fg_color="transparent")
+        details.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=11)
+        ctk.CTkLabel(details, text=f"{candidate.code} — {candidate.name}",
+                     font=UIM.fuente(12, "bold"), text_color=C["texto"]).pack(anchor="w")
+        cif_text = candidate.cif or "CIF no localizado"
+        ctk.CTkLabel(
+            details,
+            text=(candidate.blocked_reason or
+                  f"{len(candidate.source_paths)} documento(s) · {cif_text}"),
+            font=UIM.fuente(10),
+            text_color=C["alerta"] if candidate.blocked_reason else C["texto_sec"],
+            wraplength=560, justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+
+    if not candidates:
+        ctk.CTkLabel(
+            body,
+            text="No se ha encontrado un código seguro. Nombra los archivos con el código al inicio (por ejemplo, 658_factura.pdf) o guárdalos dentro de una carpeta llamada 658.",
+            font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=650, justify="left",
+        ).pack(anchor="w", padx=14, pady=14)
+
+    footer = ctk.CTkFrame(panel, fg_color="transparent")
+    footer.pack(fill="x", padx=22, pady=(0, 18))
+
+    def create_selected():
+        selected = tuple(candidate for candidate, variable in approved if variable.get())
+        if not selected:
+            messagebox.showwarning("Sin comunidades seleccionadas", "Marca al menos una comunidad detectada.", parent=dialog)
+            return
+        for widget in footer.winfo_children():
+            widget.configure(state="disabled")
+        app._estado("Creando comunidades detectadas…", procesando=True)
+
+        def create_work():
+            connection = None
+            try:
+                connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+                created = []
+                for candidate in selected:
+                    community_id = gestor_bd.obtener_o_crear_comunidad(
+                        connection, candidate.code, candidate.name, cif=candidate.cif,
+                    )
+                    created.append((community_id, candidate))
+            except Exception as error:
+                def failed():
+                    app._estado("No se pudieron crear las comunidades", procesando=False)
+                    for widget in footer.winfo_children():
+                        widget.configure(state="normal")
+                    messagebox.showerror("No se pudieron crear las comunidades", str(error), parent=dialog)
+                app.after(0, failed)
+                return
+            finally:
+                if connection is not None:
+                    connection.close()
+
+            def completed():
+                for _community_id, candidate in created:
+                    app._crear_excel_si_no_existe(candidate.code, candidate.name)
+                app._cargar_comunidades()
+                first = created[0][1]
+                option = f"{first.code} — {first.name}"
+                if option in getattr(app, "_ids_comunidad", {}):
+                    app.comunidad_actual.set(option)
+                    app.cb_comunidad.set(option)
+                    app._on_comunidad_seleccionada()
+                app._estado("Comunidades detectadas creadas", procesando=False)
+                dialog.destroy()
+                messagebox.showinfo(
+                    "Comunidades creadas",
+                    f"Se han creado o actualizado {len(created)} comunidad(es).\n\n"
+                    "Los documentos originales permanecen en su carpeta. Selecciona una comunidad y crea su expediente antes de añadir sus fuentes al flujo guiado.",
+                    parent=app,
+                )
+            app.after(0, completed)
+
+        app._en_hilo(create_work)
+
+    ctk.CTkButton(footer, text="Crear comunidades seleccionadas", command=create_selected,
+                  height=38, corner_radius=9, font=UIM.fuente(11, "bold"),
+                  fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right")
+    ctk.CTkButton(footer, text="Cancelar", command=dialog.destroy, height=38,
+                  corner_radius=9, font=UIM.fuente(11), fg_color="transparent",
+                  border_width=1, border_color=C["borde"], text_color=C["primario"],
+                  hover_color=C["acento_suave"]).pack(side="right", padx=(0, 8))
 
 
 def issue_guidance(field_name: str) -> dict[str, str]:
