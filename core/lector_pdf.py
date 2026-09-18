@@ -26,6 +26,9 @@ import json
 import zipfile
 import hashlib
 import calendar
+import shutil
+import sys
+from dataclasses import dataclass
 from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
@@ -528,47 +531,82 @@ def extraer_texto(ruta_archivo: str) -> str:
 # IDENTIFICACIÓN DE PROVEEDOR
 # ---------------------------------------------------------------------------
 
-def extraer_texto_ocr(ruta_archivo: str) -> str:
-    """
-    Extrae texto de un PDF escaneado usando OCR (pytesseract + pdf2image).
-    Requiere: pip install pytesseract pdf2image
-    En Windows: instalar Tesseract desde https://github.com/UB-Mannheim/tesseract/wiki
+@dataclass(frozen=True)
+class OCRResult:
+    """Resultado legible por la interfaz del intento de OCR de una fuente."""
+
+    text: str
+    status: str
+    detail: str
+    language: str | None = None
+
+
+def _tesseract_executable() -> str | None:
+    """Localiza un motor existente sin exigir instalaciones al usuario."""
+    candidates = [
+        shutil.which("tesseract"),
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ]
+    return next((candidate for candidate in candidates if candidate and os.path.exists(candidate)), None)
+
+
+def _poppler_path() -> str | None:
+    """Devuelve la carpeta de Poppler si Winget la instaló fuera del PATH."""
+    if sys.platform != "win32":
+        return None
+    import glob
+
+    candidates = glob.glob(os.path.expandvars(
+        r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\oschwartz10612.Poppler_*\poppler-*\Library\bin"
+    ))
+    return candidates[0] if candidates else None
+
+
+def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
+    """Intenta OCR de portada y conserva una causa concreta cuando no puede.
+
+    La aplicación no pide al gestor que instale nada: el diagnóstico se usa
+    para decidir si revisar el documento, corregir una imagen ilegible o
+    comunicar una incidencia técnica al soporte del despacho.
     """
     try:
         from pdf2image import convert_from_path
         import pytesseract
+    except ImportError:
+        return OCRResult(
+            text="", status="dependencies_unavailable",
+            detail="El componente de lectura de documentos escaneados no está disponible en esta instalación.",
+        )
 
-        # En Windows, Tesseract suele estar en esta ruta:
-        import sys
-        poppler_path = None
-        if sys.platform == "win32":
-            import os
-            import glob
-            rutas_tesseract = [
-                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-            ]
-            for ruta in rutas_tesseract:
-                if os.path.exists(ruta):
-                    pytesseract.pytesseract.tesseract_cmd = ruta
-                    break
+    engine = _tesseract_executable()
+    if not engine:
+        return OCRResult(
+            text="", status="engine_unavailable",
+            detail="No se encontró el motor OCR local para leer esta imagen escaneada.",
+        )
+    pytesseract.pytesseract.tesseract_cmd = engine
 
-            # pdf2image necesita los binarios de Poppler (pdftoppm/pdfinfo).
-            # Si no están en el PATH (ej. instalado con winget en la sesión
-            # actual, antes de reiniciar la terminal), se busca la ruta típica.
-            candidatos_poppler = glob.glob(
-                os.path.expandvars(
-                    r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\oschwartz10612.Poppler_*\poppler-*\Library\bin"
-                )
-            )
-            if candidatos_poppler:
-                poppler_path = candidatos_poppler[0]
+    try:
+        languages = set(pytesseract.get_languages(config=""))
+    except Exception as exc:
+        return OCRResult(
+            text="", status="engine_unavailable",
+            detail=f"No se pudo iniciar el motor OCR local: {exc}",
+        )
+    language = "spa" if "spa" in languages else "eng" if "eng" in languages else None
+    if language is None:
+        return OCRResult(
+            text="", status="language_unavailable",
+            detail="El motor OCR no dispone de un idioma de lectura compatible para este documento.",
+        )
 
+    try:
         # Los datos decisivos de una factura están en portada. Limitar el OCR
         # evita que un anexo de muchas páginas bloquee la interfaz durante
         # minutos; si la portada no basta, el documento queda para revisión.
         imagenes = convert_from_path(
-            ruta_archivo, dpi=200, poppler_path=poppler_path, first_page=1, last_page=1,
+            ruta_archivo, dpi=200, poppler_path=_poppler_path(), first_page=1, last_page=1,
         )
         partes = []
         for img in imagenes:
@@ -576,17 +614,26 @@ def extraer_texto_ocr(ruta_archivo: str) -> str:
             # cajas de importes. PSM 6 conserva etiqueta y cifra en la misma
             # línea, a diferencia del modo automático que separa columnas.
             ocr_config = "--psm 6"
-            # Intentar con español primero, inglés como fallback
-            try:
-                texto = pytesseract.image_to_string(img, lang="spa", config=ocr_config)
-            except Exception:
-                texto = pytesseract.image_to_string(img, config=ocr_config)
+            texto = pytesseract.image_to_string(img, lang=language, config=ocr_config)
             partes.append(texto)
-        return _normalizar_decimales_ocr("\n".join(partes))
-    except ImportError:
-        return ""
-    except Exception:
-        return ""
+    except Exception as exc:
+        return OCRResult(
+            text="", status="render_or_ocr_failed",
+            detail=f"No se pudo leer la portada escaneada: {exc}", language=language,
+        )
+
+    text = _normalizar_decimales_ocr("\n".join(partes))
+    if not text.strip():
+        return OCRResult(
+            text="", status="no_text",
+            detail="El OCR no obtuvo texto legible de la primera página.", language=language,
+        )
+    return OCRResult(text=text, status="ok", detail="OCR aplicado a la portada.", language=language)
+
+
+def extraer_texto_ocr(ruta_archivo: str) -> str:
+    """Compatibilidad: devuelve sólo el texto del OCR de portada."""
+    return extraer_texto_ocr_con_diagnostico(ruta_archivo).text
 
 
 def identificar_proveedor(texto: str, nombre_archivo: str, proveedores: dict) -> tuple[str, dict] | tuple[None, None]:
@@ -1040,15 +1087,16 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
     texto = "" if _pdf_probablemente_escaneado(ruta) else extraer_texto(ruta_archivo)
 
     # Si no hay texto, intentar OCR automáticamente
+    ocr_result = None
     if not texto.strip():
-        texto = extraer_texto_ocr(ruta_archivo)
+        ocr_result = extraer_texto_ocr_con_diagnostico(ruta_archivo)
+        texto = ocr_result.text
 
     if not texto.strip():
+        diagnostic = ocr_result.detail if ocr_result is not None else "No se obtuvo texto legible."
         return {"ok": False, "motivo": "SIN_TEXTO",
-                "detalle": (f"No se pudo extraer texto de {nombre}. "
-                            "Si es una imagen escaneada, instala Tesseract OCR:\n"
-                            "  1. pip install pytesseract pdf2image\n"
-                            "  2. Windows: descarga Tesseract de https://github.com/UB-Mannheim/tesseract/wiki"),
+                "detalle": (f"No se pudo extraer texto de {nombre}. {diagnostic} "
+                            "Abre el archivo y revisa la clasificación o los datos necesarios."),
                 "nombre_archivo": nombre, "hash_md5": hash_md5,
                 "requiere_ocr": True}
 

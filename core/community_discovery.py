@@ -27,6 +27,22 @@ _COMMUNITY_NAME = re.compile(
     re.IGNORECASE,
 )
 _SUPPORTED = frozenset({".pdf", ".xlsx", ".xls", ".csv"})
+_DUPLICATE_SUFFIX = re.compile(r"\s*\((?P<index>\d+)\)$")
+_MONTHS = {
+    "ene": 1, "enero": 1, "feb": 2, "febrero": 2, "mar": 3, "marzo": 3,
+    "abr": 4, "abril": 4, "may": 5, "mayo": 5, "jun": 6, "junio": 6,
+    "jul": 7, "julio": 7, "ago": 8, "agosto": 8, "sep": 9, "sept": 9,
+    "septiembre": 9, "oct": 10, "octubre": 10, "nov": 11, "noviembre": 11,
+    "dic": 12, "diciembre": 12,
+}
+_SERVICE_HINTS = (
+    ("LIMPIEZA", ("limpieza",)),
+    ("ELECTRICIDAD", ("electricidad", "luz", "endesa", "iberdrola", "naturgy")),
+    ("AGUA", ("agua", "canal", "aqualia", "contador agua")),
+    ("CALEFACCION", ("calefaccion", "calefacción", "gas", "acs")),
+    ("ASCENSOR", ("ascensor", "elevador")),
+    ("MANTENIMIENTO", ("mantenimiento", "mant.")),
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +58,118 @@ class DetectedCommunity:
     @property
     def can_create(self) -> bool:
         return self.blocked_reason is None
+
+
+@dataclass(frozen=True)
+class FilenameEvidence:
+    """Señales seguras presentes en el nombre y la carpeta de una fuente.
+
+    No sustituye la extracción de la factura: permite agrupar documentos de
+    correo antes de conocer una comunidad o un período seleccionados.
+    """
+
+    community_code: str | None
+    category: str
+    supply_hint: str | None
+    month: int | None
+    year: int | None
+    duplicate_index: int | None
+
+
+@dataclass(frozen=True)
+class GlobalIntakeGroup:
+    """Documentos que pueden revisarse juntos sin contexto seleccionado."""
+
+    community_code: str
+    source_paths: tuple[Path, ...]
+    period_hints: tuple[tuple[int, int], ...]
+    supply_hints: tuple[str, ...]
+    categories: tuple[str, ...]
+
+    @property
+    def display_periods(self) -> str:
+        if not self.period_hints:
+            return "Período por confirmar"
+        return ", ".join(f"{month:02d}/{year}" for month, year in self.period_hints)
+
+
+@dataclass(frozen=True)
+class GlobalIntakeProposal:
+    """Resultado puro de la clasificación inicial de una carpeta mixta."""
+
+    groups: tuple[GlobalIntakeGroup, ...]
+    unassigned_paths: tuple[Path, ...]
+
+
+def filename_evidence(path: Path) -> FilenameEvidence:
+    """Extrae indicios conservadores de nombres habituales recibidos por correo."""
+    path = Path(path)
+    stem = path.stem
+    duplicate = _DUPLICATE_SUFFIX.search(stem)
+    duplicate_index = int(duplicate.group("index")) if duplicate else None
+    if duplicate:
+        stem = stem[:duplicate.start()].rstrip()
+    normalized = stem.casefold()
+    category = _category_from_path(path)
+    supply_hint = next(
+        (hint for hint, tokens in _SERVICE_HINTS if any(token in normalized for token in tokens)),
+        None,
+    )
+    month = next((number for token, number in _MONTHS.items()
+                  if re.search(rf"\b{re.escape(token)}\b", normalized)), None)
+    year_match = re.search(r"\b(20\d{2})\b", normalized)
+    return FilenameEvidence(
+        community_code=code_from_path(path), category=category,
+        supply_hint=supply_hint, month=month,
+        year=int(year_match.group(1)) if year_match else None,
+        duplicate_index=duplicate_index,
+    )
+
+
+def build_global_intake(paths: Iterable[Path]) -> GlobalIntakeProposal:
+    """Agrupa fuentes mixtas por código sin usar la comunidad activa.
+
+    Esta primera fase no abre PDFs ni escribe en SQLite, por lo que responde
+    rápido incluso con carpetas grandes. Los meses del nombre se muestran como
+    ayuda visual, nunca se transforman por sí solos en las fechas oficiales de
+    un expediente.
+    """
+    grouped: dict[str, list[tuple[Path, FilenameEvidence]]] = defaultdict(list)
+    unassigned: list[Path] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        evidence = filename_evidence(path)
+        if evidence.community_code is None or evidence.category == "unassigned":
+            unassigned.append(path)
+            continue
+        grouped[evidence.community_code].append((path, evidence))
+
+    groups: list[GlobalIntakeGroup] = []
+    for code in sorted(grouped, key=lambda value: (len(value), value)):
+        entries = sorted(grouped[code], key=lambda item: item[0].name.casefold())
+        periods = sorted({(item.month, item.year) for _path, item in entries
+                          if item.month is not None and item.year is not None}, key=lambda value: (value[1], value[0]))
+        supplies = sorted({item.supply_hint for _path, item in entries if item.supply_hint})
+        categories = sorted({item.category for _path, item in entries})
+        groups.append(GlobalIntakeGroup(
+            community_code=code,
+            source_paths=tuple(path for path, _item in entries),
+            period_hints=tuple(periods), supply_hints=tuple(supplies),
+            categories=tuple(categories),
+        ))
+    return GlobalIntakeProposal(
+        groups=tuple(groups),
+        unassigned_paths=tuple(sorted(unassigned, key=lambda path: path.name.casefold())),
+    )
+
+
+def _category_from_path(path: Path) -> str:
+    names = {parent.name.casefold() for parent in Path(path).parents}
+    if "sin_comunidad" in names or "sin comunidad" in names:
+        return "unassigned"
+    if "extraordinarias" in names or "extraordinaria" in names:
+        return "extraordinaria"
+    return "habitual"
 
 
 def discover_communities(paths: Iterable[Path]) -> tuple[DetectedCommunity, ...]:

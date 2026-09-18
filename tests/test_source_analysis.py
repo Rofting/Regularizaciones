@@ -13,9 +13,29 @@ if str(CORE_DIR) not in sys.path:
 
 import source_analysis
 import lector_pdf
+import community_discovery
 
 
 class SourceAnalysisTest(unittest.TestCase):
+    def test_mail_filename_extracts_community_and_service_hint(self):
+        evidence = community_discovery.filename_evidence(
+            Path("644 - Limpieza mar 2026.pdf")
+        )
+
+        self.assertEqual("644", evidence.community_code)
+        self.assertEqual("LIMPIEZA", evidence.supply_hint)
+        self.assertEqual((3, 2026), (evidence.month, evidence.year))
+        self.assertEqual("habitual", evidence.category)
+
+    def test_global_intake_groups_two_communities_without_selected_context(self):
+        proposal = community_discovery.build_global_intake((
+            Path("644 - Limpieza mar 2026.pdf"),
+            Path("658 - Factura abr 2026.pdf"),
+        ))
+
+        self.assertEqual(("644", "658"), tuple(item.community_code for item in proposal.groups))
+        self.assertEqual((), proposal.unassigned_paths)
+
     def test_invoice_result_requires_only_missing_invoice_fields(self):
         result = source_analysis.analyse_pdf(
             Path("invoice.pdf"),
@@ -655,6 +675,30 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual(
             "Total a pagar 6.279,49€", lector_pdf._normalizar_decimales_ocr(text),
         )
+
+    def test_unreadable_scan_reports_diagnostic_without_install_instructions(self):
+        providers = {"proveedores": {}}
+        diagnostic = lector_pdf.OCRResult(
+            text="", status="no_text",
+            detail="El OCR no obtuvo texto legible de la primera página.",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scan.pdf"
+            path.touch()
+            with (
+                mock.patch("lector_pdf.extraer_texto", return_value=""),
+                mock.patch(
+                    "lector_pdf.extraer_texto_ocr_con_diagnostico",
+                    return_value=diagnostic,
+                ),
+            ):
+                result = lector_pdf.procesar_archivo(str(path), "658", proveedores=providers)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("SIN_TEXTO", result["motivo"])
+        self.assertIn("OCR no obtuvo texto", result["detalle"])
+        self.assertNotIn("instala", result["detalle"].lower())
+        self.assertNotIn("descarga", result["detalle"].lower())
 
     def test_totalenergies_credit_note_is_accepted_as_a_negative_invoice(self):
         providers = lector_pdf.cargar_proveedores(

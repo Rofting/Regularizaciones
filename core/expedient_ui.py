@@ -171,9 +171,12 @@ def guided_workspace_state(
         headline = "Incorpora las fuentes"
         detail = "Añade facturas, lecturas y Excel del período para iniciar la revisión."
     elif case_status == "under_review":
-        active_step, next_action = "validar", "resolver_incidencias"
-        headline = "Comprueba la validación"
-        detail = "Revisa las fuentes incorporadas y confirma los datos que el sistema solicite."
+        active_step, next_action = "validar", "confirmar_fuentes"
+        headline = "Confirmar fuentes"
+        detail = (
+            "No quedan incidencias. Confirma y aplica las fuentes al expediente "
+            "antes de generar el Excel oficial."
+        )
     else:
         active_step, next_action = "fuentes", "anadir_fuentes"
         headline = "Completa las fuentes"
@@ -270,6 +273,7 @@ def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
 
     def work():
         try:
+            proposal = community_discovery.build_global_intake(paths)
             candidates = community_discovery.discover_communities(paths)
         except Exception as error:
             def failed():
@@ -277,13 +281,15 @@ def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
                 messagebox.showerror("No se pudo analizar la carpeta", str(error), parent=app)
             app.after(0, failed)
             return
-        app.after(0, lambda: _show_detected_communities(app, Path(folder), candidates, len(paths)))
+        app.after(0, lambda: _show_detected_communities(
+            app, Path(folder), candidates, len(paths), proposal,
+        ))
 
     app._en_hilo(work)
 
 
 def _show_detected_communities(
-    app: "AppGestionFincas", folder: Path, candidates, source_count: int,
+    app: "AppGestionFincas", folder: Path, candidates, source_count: int, proposal,
 ) -> None:
     app._estado("Detección de comunidades lista", procesando=False)
     dialog = _dialog(app, "Comunidades detectadas", 800, 620)
@@ -295,7 +301,7 @@ def _show_detected_communities(
     ctk.CTkLabel(
         panel,
         text=(f"Se han revisado {source_count} archivo(s) de {folder.name}. "
-              "Solo se proponen códigos identificados con seguridad. "
+              "Se han agrupado sin usar la comunidad o el período seleccionados. "
               "Los originales no se moverán ni se modificarán."),
         font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=720, justify="left",
     ).pack(anchor="w", padx=22, pady=(0, 14))
@@ -303,6 +309,7 @@ def _show_detected_communities(
     body = ctk.CTkScrollableFrame(panel, fg_color=C["panel_2"], corner_radius=11)
     body.pack(fill="both", expand=True, padx=22, pady=(0, 12))
     approved = []
+    groups_by_code = {group.community_code: group for group in proposal.groups}
     for candidate in candidates:
         row = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=10,
                            border_width=1, border_color=C["borde"])
@@ -317,15 +324,31 @@ def _show_detected_communities(
         details.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=11)
         ctk.CTkLabel(details, text=f"{candidate.code} — {candidate.name}",
                      font=UIM.fuente(12, "bold"), text_color=C["texto"]).pack(anchor="w")
+        group = groups_by_code.get(candidate.code)
         cif_text = candidate.cif or "CIF no localizado"
+        group_detail = ""
+        if group is not None:
+            services = ", ".join(group.supply_hints) or "tipo por revisar"
+            group_detail = (
+                f"{len(group.source_paths)} documento(s) · {group.display_periods} · "
+                f"{services}"
+            )
         ctk.CTkLabel(
             details,
             text=(candidate.blocked_reason or
-                  f"{len(candidate.source_paths)} documento(s) · {cif_text}"),
+                  f"{group_detail or f'{len(candidate.source_paths)} documento(s)'} · {cif_text}"),
             font=UIM.fuente(10),
             text_color=C["alerta"] if candidate.blocked_reason else C["texto_sec"],
             wraplength=560, justify="left",
         ).pack(anchor="w", pady=(2, 0))
+
+    if proposal.unassigned_paths:
+        ctk.CTkLabel(
+            body,
+            text=(f"{len(proposal.unassigned_paths)} documento(s) quedan sin comunidad asignada: "
+                  "no se asociarán a la comunidad activa. Renómbralos con el código o revísalos desde la bandeja."),
+            font=UIM.fuente(10), text_color=C["alerta"], wraplength=680, justify="left",
+        ).pack(anchor="w", padx=14, pady=(10, 14))
 
     if not candidates:
         ctk.CTkLabel(

@@ -161,6 +161,8 @@ class AppGestionFincas(ctk.CTk):
         self._issues_page       = 1
         self._issues_case_id    = None
         self._issues_current    = ()
+        self._workspace_command = self._accion_crear_expediente
+        self._workspace_action_label = "Crear expediente"
 
         self._crear_ui_v3()
         self._cargar_comunidades()
@@ -210,6 +212,7 @@ class AppGestionFincas(ctk.CTk):
         self.cb_expediente.grid(row=1, column=2, sticky="ew", padx=10)
         actions = ctk.CTkFrame(context, fg_color="transparent")
         actions.grid(row=1, column=3, padx=(14, 0))
+        ctk.CTkButton(actions, text="Bandeja global", command=self._accion_bandeja_global, height=38, corner_radius=9, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="left", padx=(0, 7))
         ctk.CTkButton(actions, text="Nueva comunidad", command=self._nueva_comunidad, height=38, corner_radius=9, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="left", padx=(0, 7))
         ctk.CTkButton(actions, text="Crear expediente", command=self._accion_crear_expediente, height=38, corner_radius=9, font=UIM.fuente(11, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left")
         self.banner_periodo = ctk.CTkFrame(self, fg_color=C["acento_suave"], corner_radius=10)
@@ -226,7 +229,7 @@ class AppGestionFincas(ctk.CTk):
         nav.grid_propagate(False)
         ctk.CTkLabel(nav, text="Expediente", font=UIM.fuente(11, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=16, pady=(16, 8))
         self.workflow_step_rows, self.etapas, self.botones = {}, {}, {}
-        rows = (("fuentes", "1", "Fuentes", self._accion_anadir_fuentes), ("validar", "2", "Validar", self._accion_resolver_incidencias), ("reparto", "3", "Reparto", self._accion_generar_excel_expediente), ("cartas", "4", "Cartas", self._accion_generar_cartas_expediente))
+        rows = (("fuentes", "1", "Fuentes", self._accion_anadir_fuentes), ("validar", "2", "Validar", self._accion_resolver_incidencias), ("reparto", "3", "Reparto", self._accion_siguiente_paso), ("cartas", "4", "Cartas", self._accion_generar_cartas_expediente))
         for key, number, label, command in rows:
             row = UIM.WorkflowStepRow(nav, number=number, label=label, status="pending", command=command)
             row.pack(fill="x", padx=8, pady=3)
@@ -1048,6 +1051,19 @@ class AppGestionFincas(ctk.CTk):
         if self._validar_expediente_activo():
             self._en_hilo(self._generar_excel_expediente_impl)
 
+    def _accion_siguiente_paso(self):
+        """Ejecuta la acción segura mostrada en el panel principal.
+
+        El acceso lateral de reparto no debe saltarse la confirmación de
+        fuentes ni intentar crear un Excel cuando el expediente aún no está
+        preparado. La ruta se actualiza al refrescar el expediente.
+        """
+        command = getattr(self, "_workspace_command", None)
+        if command is None:
+            self.log("Selecciona un expediente para continuar con el reparto.", "aviso")
+            return
+        command()
+
     def _accion_calcular_reparto_expediente(self):
         if self._validar_expediente_activo():
             self._en_hilo(self._calcular_reparto_expediente_impl)
@@ -1084,6 +1100,12 @@ class AppGestionFincas(ctk.CTk):
         if not expedient_ui or not ingestion or not database:
             self.log("No está disponible la interfaz para añadir fuentes.", "error")
             return
+        if not self.id_expediente:
+            # No se reutiliza una comunidad abierta como destino implícito:
+            # una carpeta de correo puede reunir distintos ejercicios y
+            # comunidades. La bandeja clasifica antes de pedir un expediente.
+            self._accion_bandeja_global()
+            return
         if self.id_expediente:
             connection = database.conectar(str(self.ruta_bd_expedientes))
             try:
@@ -1098,6 +1120,14 @@ class AppGestionFincas(ctk.CTk):
             finally:
                 connection.close()
         expedient_ui.open_add_sources_dialog(self, self.id_expediente)
+
+    def _accion_bandeja_global(self):
+        """Clasifica una carpeta mixta sin reutilizar el contexto activo."""
+        ui = MOD.get("expedient_ui")
+        if ui is None:
+            self.log("No está disponible la bandeja global de fuentes.", "error")
+            return
+        ui.open_detect_communities_dialog(self)
 
     def _accion_confirmar_fuentes(self):
         if self._procesando or not self._validar_expediente_activo():
@@ -1297,12 +1327,15 @@ class AppGestionFincas(ctk.CTk):
             "crear_expediente": ("Crear expediente", self._accion_crear_expediente),
             "anadir_fuentes": ("Añadir fuentes", self._accion_anadir_fuentes),
             "resolver_incidencias": ("Resolver incidencias", self._accion_resolver_incidencias),
+            "confirmar_fuentes": ("Confirmar fuentes", self._accion_confirmar_fuentes),
             "generar_excel": ("Generar Excel oficial", self._accion_generar_excel_expediente),
             "calcular_reparto": ("Calcular reparto", self._accion_calcular_reparto_expediente),
             "generar_cartas": ("Generar cartas", self._accion_generar_cartas_expediente),
             "abrir_salidas": ("Abrir salidas", self._abrir_salidas),
         }
         label, command = action_map[workspace.next_action]
+        self._workspace_command = command
+        self._workspace_action_label = label
         self.workspace_headline.configure(text=workspace.headline)
         self.workspace_detail.configure(text=workspace.detail)
         self.workspace_primary.configure(text=label, command=command)

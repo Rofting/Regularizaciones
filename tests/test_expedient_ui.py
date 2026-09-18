@@ -435,6 +435,18 @@ class SourceActionsTest(unittest.TestCase):
 
 
 class GuidedWorkspaceStateTest(unittest.TestCase):
+    def test_under_review_without_issues_routes_to_source_confirmation(self):
+        """Guards against a silent attempt to generate Excel before applying sources."""
+        state = expedient_ui.guided_workspace_state(
+            has_case=True,
+            document_count=3,
+            open_issue_count=0,
+            case_status="under_review",
+        )
+
+        self.assertEqual("confirmar_fuentes", state.next_action)
+        self.assertEqual("Confirmar fuentes", state.headline)
+
     def test_no_case_prompts_case_creation(self):
         state = expedient_ui.guided_workspace_state(
             has_case=False, document_count=0, open_issue_count=0, case_status=""
