@@ -61,6 +61,23 @@ def source_summary(kinds) -> str:
     ) or "Sin documentos analizados"
 
 
+def group_review_issues(issues: Sequence[ReviewIssue]) -> tuple[dict[str, object], ...]:
+    """Agrupa reinicios del mismo informe para evitar una acción por vivienda."""
+    groups: list[dict[str, object]] = []
+    reset_groups: dict[int, dict[str, object]] = {}
+    for issue in issues:
+        if issue.code != "COUNTER_RESET":
+            groups.append({"document_id": issue.id_document, "count": 1, "representative": issue})
+            continue
+        group = reset_groups.get(issue.id_document)
+        if group is None:
+            group = {"document_id": issue.id_document, "count": 0, "representative": issue}
+            reset_groups[issue.id_document] = group
+            groups.append(group)
+        group["count"] = int(group["count"]) + 1
+    return tuple(groups)
+
+
 def issue_context_label(source_context: str | None) -> str:
     """Describe metadatos nuevos y fragmentos históricos sin exigir un visor."""
     fallback = "No hay contexto guardado. Usa Abrir archivo para consultar la fuente."
@@ -1695,23 +1712,43 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 document_review.validate_case_ready(connection, case_id)
                 ready_for_calculation = True
             issues = document_review.list_open_issues(connection, case_id)
-            for issue in issues:
+            for grouped in group_review_issues(issues):
+                issue = grouped["representative"]
+                reset_count = int(grouped["count"])
                 group = ctk.CTkFrame(panel)
                 group.pack(fill="x", pady=8)
                 ctk.CTkLabel(
                     group, text=Path(issue.archived_path).name,
                     font=UIM.fuente(12, "bold"), wraplength=740,
                 ).pack(anchor="w", padx=12, pady=(10, 2))
+                if issue.code == "COUNTER_RESET" and reset_count > 1:
+                    message = (
+                        f"Se detectaron {reset_count} contadores reiniciados en el mismo informe de período. "
+                        "Puedes conservar de una vez la última lectura válida de cada vivienda hasta que "
+                        "lleguen lecturas posteriores fiables."
+                    )
+                    action_text = f"Mantener lecturas previas ({reset_count})"
+                    action = lambda selected=issue, count=reset_count: (
+                        dialog.destroy(),
+                        open_counter_reset_carry_forward_dialog(
+                            app, selected.id_case, selected.id_document, count,
+                            Path(selected.archived_path).name,
+                        ),
+                    )
+                else:
+                    message = issue.message
+                    action_text = "Resolver incidencia"
+                    action = lambda selected=issue: (
+                        dialog.destroy(), open_issue_dialog(app, selected),
+                    )
                 ctk.CTkLabel(
-                    group, text=issue.message, wraplength=740, justify="left",
+                    group, text=message, wraplength=740, justify="left",
                     text_color=C["texto_sec"],
                 ).pack(anchor="w", padx=12, pady=(0, 6))
                 ctk.CTkButton(
-                    group, text="Resolver incidencia", height=32, corner_radius=8,
+                    group, text=action_text, height=32, corner_radius=8,
                     fg_color=C["primario"], hover_color=C["primario_hover"],
-                    command=lambda selected=issue: (
-                        dialog.destroy(), open_issue_dialog(app, selected),
-                    ),
+                    command=action,
                 ).pack(anchor="e", padx=12, pady=(0, 10))
             if not issues:
                 unapplied = document_review.case_has_unapplied_sources(connection, case_id)
@@ -1749,6 +1786,74 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
             app.after(0, completed)
 
     render()
+
+
+def open_counter_reset_carry_forward_dialog(
+    app: "AppGestionFincas", case_id: int, document_id: int, count: int, source_name: str,
+) -> None:
+    """Una sola autorización para un reinicio generalizado en una fuente."""
+    dialog = _dialog(app, "Reinicio masivo de contadores", 700, 430)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16)
+    panel.pack(fill="both", expand=True, padx=18, pady=18)
+    ctk.CTkLabel(
+        panel, text="Conservar las últimas lecturas válidas",
+        font=UIM.fuente(20, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=22, pady=(22, 6))
+    ctk.CTkLabel(
+        panel,
+        text=(
+            f"{source_name} contiene {count} contadores cuyo valor disminuye. "
+            "Se conservará la lectura previa como cierre temporal y se anotará un consumo provisional de 0. "
+            "Cuando llegue una lectura posterior fiable, podrás recalcular el período."
+        ),
+        wraplength=600, justify="left", text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=22, pady=(0, 14))
+    reason = _field(panel, "Motivo y fuente consultada", 3)
+    reason.insert(0, "Reinicio masivo; se conserva la última lectura válida hasta la siguiente lectura fiable.")
+
+    actions = ctk.CTkFrame(panel, fg_color="transparent")
+    actions.pack(fill="x", padx=22, pady=(22, 18))
+    ctk.CTkButton(
+        actions, text="Cancelar", command=dialog.destroy, height=38, corner_radius=9,
+        **UIM.secondary_button_kwargs(),
+    ).pack(side="right")
+
+    def apply_carry_forward():
+        if app._procesando:
+            return
+        rationale = reason.get().strip()
+        if not rationale:
+            messagebox.showwarning("Motivo requerido", "Indica el motivo del criterio temporal.", parent=dialog)
+            return
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            resolved = document_review.carry_forward_counter_resets_for_source(
+                connection, case_id=case_id, document_id=document_id,
+                reason=rationale, approved_by="usuario_local",
+            )
+            remaining = len(document_review.list_open_issues(connection, case_id))
+            ready = None
+            if not remaining and not document_review.case_has_unapplied_sources(connection, case_id):
+                ready = document_review.validate_case_ready(connection, case_id)
+        except Exception as error:
+            connection.rollback()
+            messagebox.showwarning("No se pudo aplicar el criterio", str(error), parent=dialog)
+            return
+        finally:
+            connection.close()
+        dialog.destroy()
+        app._refrescar_lista_expedientes(select_case_id=case_id)
+        app._refrescar_expediente()
+        if ready is not None and ready.status == "ready_for_calculation":
+            app.log(f"Criterio temporal aplicado a {resolved} contador(es). Listo para cálculo.", "ok")
+        else:
+            app.log(f"Criterio temporal aplicado a {resolved} contador(es). Quedan {remaining} incidencia(s).", "aviso")
+
+    ctk.CTkButton(
+        actions, text=f"Aplicar a los {count} contadores", command=apply_carry_forward,
+        height=38, corner_radius=9, fg_color=C["exito"], hover_color=C["exito_hover"],
+        font=UIM.fuente(12, "bold"),
+    ).pack(side="right", padx=(0, 8))
 
 
 def open_archived_path_resolution_dialog(app: "AppGestionFincas", case_id: int) -> None:

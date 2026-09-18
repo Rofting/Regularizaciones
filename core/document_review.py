@@ -670,6 +670,89 @@ def approve_counter_reset_estimate(
     return review_issue_from_row(resolved)
 
 
+def carry_forward_counter_resets_for_source(
+    connection: sqlite3.Connection,
+    *,
+    case_id: int,
+    document_id: int,
+    reason: str,
+    approved_by: str,
+) -> int:
+    """Aprueba en bloque el criterio temporal para reinicios de una fuente.
+
+    Conserva la última lectura acumulada conocida de cada contador afectado,
+    por lo que el consumo provisional del intervalo es cero. Cada corrección
+    queda auditada, pero el gestor toma una sola decisión para el documento.
+    """
+    normalized_reason = reason.strip()
+    normalized_approver = approved_by.strip()
+    if not normalized_reason:
+        raise ValueError("El motivo del criterio temporal es obligatorio")
+    if not normalized_approver:
+        raise ValueError("La persona que aprueba el criterio temporal es obligatoria")
+
+    with _transaction(connection):
+        rows = connection.execute(
+            """SELECT id_issue FROM review_issues
+               WHERE id_case=? AND id_document=? AND code=? AND status='open'
+               ORDER BY id_issue""",
+            (case_id, document_id, _COUNTER_RESET_CODE),
+        ).fetchall()
+        if not rows:
+            return 0
+        for row in rows:
+            issue = _issue_row(connection, row["id_issue"])
+            if issue is None:
+                raise LookupError("Incidencia de reinicio no encontrada")
+            _case, owner, initial, final = _counter_reset_target(connection, issue)
+            original_text = _decimal_text(Decimal(str(final["valor_acumulado"])))
+            corrected_text = _decimal_text(Decimal(str(initial["valor_acumulado"])))
+            notes = (
+                f"Lectura previa conservada tras reinicio masivo; valor original={original_text}; "
+                f"consumo provisional=0; lectura virtual={corrected_text}; "
+                f"motivo={normalized_reason}; aprobada por={normalized_approver}"
+            )
+            if final["notas"]:
+                notes = f"{final['notas']} | {notes}"
+            connection.execute(
+                """INSERT INTO manual_corrections
+                   (id_issue,original_value,corrected_value,reason,resolved_by)
+                   VALUES (?,?,?,?,?)""",
+                (issue["id_issue"], original_text, corrected_text, normalized_reason, normalized_approver),
+            )
+            connection.execute(
+                """INSERT INTO extraction_candidates
+                   (id_document,field_name,value,source,validation_status)
+                   VALUES (?, ?, ?, 'manual_counter_reset_carry_forward', 'validated')
+                   ON CONFLICT(id_document,field_name) DO UPDATE SET
+                       value=excluded.value,source=excluded.source,
+                       validation_status=excluded.validation_status""",
+                (issue["id_document"], issue["field_name"], corrected_text),
+            )
+            connection.execute(
+                """UPDATE lecturas_vecino
+                   SET valor_acumulado=?,estado='estimado',metodo_estimacion='counter_reset_carry_forward',
+                       notas=?,approved_by=?,approved_at=datetime('now')
+                   WHERE id_lectura=?""",
+                (corrected_text, notes, normalized_approver, final["id_lectura"]),
+            )
+            owner_state = (
+                "estado_contador_acs"
+                if issue["field_name"].partition("|")[0].endswith(".ACS")
+                else "estado_contador_cal"
+            )
+            connection.execute(
+                f"UPDATE propietarios SET {owner_state}='ok' WHERE id_propietario=?",
+                (owner["id_propietario"],),
+            )
+            connection.execute(
+                "UPDATE review_issues SET status='resolved',resolved_at=datetime('now') WHERE id_issue=?",
+                (issue["id_issue"],),
+            )
+        _reapply_reviewed_document(connection, case_id, document_id)
+    return len(rows)
+
+
 def dismiss_invoice_outside_period(
     connection: sqlite3.Connection,
     issue_id: int,

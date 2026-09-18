@@ -330,6 +330,43 @@ class DocumentReviewTest(unittest.TestCase):
             "SELECT estado_contador_acs FROM propietarios WHERE id_propietario=?", (owner_id,)
         ).fetchone()[0])
 
+    def test_carrying_forward_reset_source_resolves_all_its_resets_with_zero_consumption(self):
+        issue, owner_id, _period_id = self._create_counter_reset_issue(initial=100, final=5)
+
+        resolved = document_review.carry_forward_counter_resets_for_source(
+            self.connection,
+            case_id=self.case.id_case,
+            document_id=self.document.id_document,
+            reason="Lectura posterior todavía no disponible",
+            approved_by="gestora",
+        )
+
+        self.assertEqual(1, resolved)
+        reading = self.connection.execute(
+            """SELECT valor_acumulado,estado,metodo_estimacion,approved_by
+               FROM lecturas_vecino WHERE id_propietario=? AND fecha_lectura='2026-01-31'""",
+            (owner_id,),
+        ).fetchone()
+        self.assertEqual((100.0, "estimado", "counter_reset_carry_forward", "gestora"), tuple(reading))
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+
+    def test_review_groups_counter_resets_by_source(self):
+        first, _owner_id, _period_id = self._create_counter_reset_issue()
+        second = document_review.create_review_issue(
+            self.connection, self.case.id_case, self.document.id_document,
+            code="COUNTER_RESET", field_name="reading.B.ACS",
+            message="El contador disminuye y requiere una estimación aprobada",
+        )
+
+        groups = expedient_ui.group_review_issues(
+            document_review.list_open_issues(self.connection, self.case.id_case)
+        )
+
+        self.assertEqual(1, len(groups))
+        self.assertEqual((first.id_document, 2, first.id_issue), (
+            groups[0]["document_id"], groups[0]["count"], groups[0]["representative"].id_issue,
+        ))
+
     def test_counter_reset_estimate_rejects_non_positive_or_non_numeric_consumption(self):
         issue, owner_id, _period_id = self._create_counter_reset_issue()
 
