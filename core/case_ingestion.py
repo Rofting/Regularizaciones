@@ -196,15 +196,14 @@ def _auto_apply_clean_analysis(
     """
     if analysis.confidence.strip().lower() != "high":
         return document
-    # Las facturas completas pueden publicarse sin intervención. Las lecturas
-    # requieren además coherencia entre contador, vivienda y lectura final;
-    # quedan en su control específico para no estimar ni cerrar un contador.
-    if document.document_kind != "invoice":
+    if document.document_kind not in {"invoice", "owners", "reading"}:
         return document
     if _has_open_document_issues(connection, document.id_document):
         return document
     required_by_kind = {
         "invoice": ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"),
+        "owners": ("propietarios",),
+        "reading": ("tipo", "fecha_inicio", "fecha_fin", "vecinos"),
     }
     values = {
         row["field_name"]: row["value"]
@@ -221,19 +220,14 @@ def _auto_apply_clean_analysis(
             connection, case_id, document.id_document,
             confirmed_by="deteccion_automatica",
         )
-    except ValueError:
+    except (ValueError, LookupError):
         # ``confirm_source_candidates`` contiene las comprobaciones canónicas
         # adicionales (por ejemplo, tipo de suministro). Materializamos sólo
         # los campos que falten para que la interfaz los muestre como una
         # incidencia concreta, no como una confirmación masiva.
-        fields = {
-            "invoice": ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"),
-            "reading": ("vecinos",),
-            "owners": ("propietarios",),
-        }
         document_review.create_missing_field_issues(
             connection, case_id, document.id_document,
-            fields.get(document.document_kind, ()),
+            required_by_kind[document.document_kind],
         )
         return _source_document(connection, document.id_document)
 
@@ -251,6 +245,11 @@ def auto_apply_case_sources(connection: sqlite3.Connection, case_id: int) -> tup
              AND document_kind IN ('invoice','reading','owners')""",
         (case_id,),
     ).fetchall()
+    order = {"owners": 0, "invoice": 1, "reading": 2}
+    rows = sorted(
+        rows,
+        key=lambda row: order[_source_document(connection, int(row["id_document"])).document_kind],
+    )
     applied = 0
     for row in rows:
         document = _source_document(connection, int(row["id_document"]))

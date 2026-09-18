@@ -1684,6 +1684,7 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
     panel.pack(fill="both", expand=True, padx=16, pady=16)
 
     def render():
+        ready_for_calculation = False
         for widget in panel.winfo_children():
             widget.destroy()
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
@@ -1692,6 +1693,7 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
             if (not document_review.list_open_issues(connection, case_id)
                     and not document_review.case_has_unapplied_sources(connection, case_id)):
                 document_review.validate_case_ready(connection, case_id)
+                ready_for_calculation = True
             issues = document_review.list_open_issues(connection, case_id)
             for issue in issues:
                 group = ctk.CTkFrame(panel)
@@ -1712,14 +1714,39 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                     ),
                 ).pack(anchor="e", padx=12, pady=(0, 10))
             if not issues:
-                text = (
-                    f"Se han aplicado automáticamente {automatic} fuente(s) completas.\n"
-                    "No queda ninguna fuente que confirmar manualmente."
-                    if automatic else "No hay fuentes reconocidas pendientes de confirmación."
-                )
+                unapplied = document_review.case_has_unapplied_sources(connection, case_id)
+                if unapplied:
+                    text = (
+                        f"Se han aplicado automáticamente {automatic} fuente(s) completas.\n"
+                        "Quedan fuentes registradas que no se pudieron aplicar con seguridad. "
+                        "Pulsa «Reanalizar fuentes» para recuperarlas y ver sólo las incidencias reales."
+                    )
+                else:
+                    text = (
+                        f"Se han aplicado automáticamente {automatic} fuente(s) completas.\n"
+                        "El expediente ya está listo para generar el Excel oficial."
+                        if automatic else "El expediente ya está listo para generar el Excel oficial."
+                    )
                 ctk.CTkLabel(panel, text=text, justify="left").pack(pady=16)
         finally:
             connection.close()
+
+        if ready_for_calculation:
+            def completed():
+                if dialog.winfo_exists():
+                    dialog.destroy()
+                app._refrescar_lista_expedientes(select_case_id=case_id)
+                app._refrescar_expediente()
+                app.log(
+                    "Fuentes aplicadas y validadas. El expediente está listo para generar el Excel oficial.",
+                    "ok",
+                )
+                messagebox.showinfo(
+                    "Fuentes listas",
+                    "Las fuentes se han aplicado automáticamente. Ya puedes generar el Excel oficial.",
+                    parent=app,
+                )
+            app.after(0, completed)
 
     render()
 

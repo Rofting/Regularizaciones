@@ -158,6 +158,45 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertFalse(document_review.case_has_unapplied_sources(self.connection, self.case.id_case))
         self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
 
+    def test_batch_auto_apply_publishes_owners_before_complete_readings(self):
+        owners_file = Path(self.directory.name) / "propietarios.csv"
+        owners_file.write_text("vivienda;propietario\nA;Vecino A\n", encoding="utf-8")
+        owners = case_ingestion.add_analysed_document_to_case(
+            self.connection, self.case.id_case, source_path=owners_file,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis("owners", "medium", {"propietarios": json.dumps([{
+                "codigo_vivienda": "A", "nombre_propietario": "Vecino A",
+            }])}),
+        ).document
+        reading = case_ingestion.add_analysed_document_to_case(
+            self.connection, self.case.id_case, source_path=self.reading_file,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis("reading", "medium", {
+                "tipo": "ACS", "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31",
+                "vecinos": json.dumps([{
+                    "vivienda": "A", "tipo": "ACS", "fecha_ant": "2026-01-01",
+                    "val_ant": 100, "fecha_act": "2026-01-31", "val_act": 120,
+                }]),
+            }),
+        ).document
+        self.connection.execute(
+            "UPDATE source_documents SET classification_confidence='high' WHERE id_case=?",
+            (self.case.id_case,),
+        )
+        self.connection.commit()
+
+        applied, pending = case_ingestion.auto_apply_case_sources(self.connection, self.case.id_case)
+
+        self.assertEqual(2, applied)
+        self.assertEqual(0, pending)
+        self.assertEqual("validated", self.document_status(owners))
+        self.assertEqual("validated", self.document_status(reading))
+        self.assertFalse(document_review.case_has_unapplied_sources(self.connection, self.case.id_case))
+        self.assertEqual(
+            "ready_for_calculation",
+            document_review.validate_case_ready(self.connection, self.case.id_case).status,
+        )
+
     def test_manual_date_correction_rejects_non_date_digits(self):
         result = case_ingestion.add_document_to_case(
             self.connection, self.case.id_case, source_path=self.source_path,
