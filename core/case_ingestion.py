@@ -180,6 +180,91 @@ def _source_document(connection: sqlite3.Connection, document_id: int) -> Source
     return document_from_row(row)
 
 
+def _auto_apply_clean_analysis(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document: SourceDocument,
+    analysis: SourceAnalysis,
+) -> SourceDocument:
+    """Aplica fuentes inequívocas; las dudas siguen llegando a incidencias.
+
+    La confirmación por pantalla era útil como salvaguarda inicial, pero no
+    debe convertir un lote limpio de facturas en cientos de clics. Sólo se
+    publica automáticamente un análisis de confianza alta, sin incidencias y
+    de un tipo operativo conocido. Las extracciones incompletas permanecen
+    pendientes para la revisión humana normal.
+    """
+    if analysis.confidence.strip().lower() != "high":
+        return document
+    # Las facturas completas pueden publicarse sin intervención. Las lecturas
+    # requieren además coherencia entre contador, vivienda y lectura final;
+    # quedan en su control específico para no estimar ni cerrar un contador.
+    if document.document_kind != "invoice":
+        return document
+    if _has_open_document_issues(connection, document.id_document):
+        return document
+    required_by_kind = {
+        "invoice": ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"),
+    }
+    values = {
+        row["field_name"]: row["value"]
+        for row in connection.execute(
+            """SELECT field_name,value FROM extraction_candidates
+               WHERE id_document=? AND value IS NOT NULL AND trim(value)<>''""",
+            (document.id_document,),
+        ).fetchall()
+    }
+    if any(not values.get(field) for field in required_by_kind[document.document_kind]):
+        return document
+    try:
+        return confirm_source_candidates(
+            connection, case_id, document.id_document,
+            confirmed_by="deteccion_automatica",
+        )
+    except ValueError:
+        # ``confirm_source_candidates`` contiene las comprobaciones canónicas
+        # adicionales (por ejemplo, tipo de suministro). Materializamos sólo
+        # los campos que falten para que la interfaz los muestre como una
+        # incidencia concreta, no como una confirmación masiva.
+        fields = {
+            "invoice": ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"),
+            "reading": ("vecinos",),
+            "owners": ("propietarios",),
+        }
+        document_review.create_missing_field_issues(
+            connection, case_id, document.id_document,
+            fields.get(document.document_kind, ()),
+        )
+        return _source_document(connection, document.id_document)
+
+
+def auto_apply_case_sources(connection: sqlite3.Connection, case_id: int) -> tuple[int, int]:
+    """Aplica de una vez las fuentes seguras ya presentes en un expediente.
+
+    También sanea expedientes creados antes de la validación automática. El
+    resultado es ``(aplicadas, pendientes)`` y nunca cierra incidencias ni
+    inventa valores para una fuente incompleta.
+    """
+    rows = connection.execute(
+        """SELECT id_document FROM source_documents
+           WHERE id_case=? AND classification_confidence='high'
+             AND document_kind IN ('invoice','reading','owners')""",
+        (case_id,),
+    ).fetchall()
+    applied = 0
+    for row in rows:
+        document = _source_document(connection, int(row["id_document"]))
+        before = document.status
+        result = _auto_apply_clean_analysis(
+            connection, case_id, document,
+            SourceAnalysis(document.document_kind, "high"),
+        )
+        if before != "validated" and result.status == "validated":
+            applied += 1
+    pending = _open_issue_count(connection, case_id)
+    return applied, pending
+
+
 def _open_issue_count(connection: sqlite3.Connection, case_id: int) -> int:
     return connection.execute(
         """SELECT COUNT(*) FROM review_issues
@@ -573,6 +658,7 @@ def add_analysed_document_to_case(
     _persist_analysis(
         connection, case_id, document, analysis, reanalysis=not created,
     )
+    document = _auto_apply_clean_analysis(connection, case_id, document, analysis)
     return IngestionResult(
         _source_document(connection, document.id_document),
         created,

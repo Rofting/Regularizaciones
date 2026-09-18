@@ -139,6 +139,25 @@ class ExpedientFlowTest(unittest.TestCase):
         )
         return result.document
 
+    def test_complete_high_confidence_invoice_is_applied_without_manual_confirmation(self):
+        result = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.source_path,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.invoice({
+                "tipo_suministro": "GAS",
+                "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31",
+                "importe_total": "123.45",
+            }),
+        )
+
+        self.assertEqual("validated", result.document.status)
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        self.assertFalse(document_review.case_has_unapplied_sources(self.connection, self.case.id_case))
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+
     def add_confirmed_reading(self, final=120):
         self.connection.execute(
             """INSERT OR IGNORE INTO propietarios

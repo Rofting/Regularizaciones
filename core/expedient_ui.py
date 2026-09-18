@@ -1678,7 +1678,7 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
 
 
 def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
-    """Show extracted values and explicitly apply each reviewed source."""
+    """Muestra sólo fuentes con dudas después de aplicar las seguras en lote."""
     dialog = _dialog(app, "Confirmar fuentes", 850, 720)
     panel = ctk.CTkScrollableFrame(dialog)
     panel.pack(fill="both", expand=True, padx=16, pady=16)
@@ -1688,8 +1688,18 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
             widget.destroy()
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
+            automatic, _pending = case_ingestion.auto_apply_case_sources(connection, case_id)
+            if (not document_review.list_open_issues(connection, case_id)
+                    and not document_review.case_has_unapplied_sources(connection, case_id)):
+                document_review.validate_case_ready(connection, case_id)
             documents = connection.execute("""SELECT id_document,original_name,document_kind,status
                 FROM source_documents WHERE id_case=? AND document_kind IN ('invoice','reading','owners')
+                  AND (status<>'validated' OR EXISTS (
+                      SELECT 1 FROM extraction_candidates candidate
+                      WHERE candidate.id_document=source_documents.id_document
+                        AND candidate.validation_status='candidate'
+                        AND candidate.value IS NOT NULL AND trim(candidate.value)<>''
+                  ))
                 ORDER BY id_document""", (case_id,)).fetchall()
             for document in documents:
                 group = ctk.CTkFrame(panel)
@@ -1708,7 +1718,12 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 ctk.CTkButton(group, text="Confirmar fuente",
                     command=lambda document_id=document['id_document']: confirm(document_id)).pack(anchor="e", padx=12, pady=10)
             if not documents:
-                ctk.CTkLabel(panel, text="No hay fuentes reconocidas pendientes de confirmación.").pack(pady=16)
+                text = (
+                    f"Se han aplicado automáticamente {automatic} fuente(s) completas.\n"
+                    "No queda ninguna fuente que confirmar manualmente."
+                    if automatic else "No hay fuentes reconocidas pendientes de confirmación."
+                )
+                ctk.CTkLabel(panel, text=text, justify="left").pack(pady=16)
         finally:
             connection.close()
 
