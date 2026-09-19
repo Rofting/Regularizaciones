@@ -487,22 +487,31 @@ def apply_zero_carry_forward(
     source_path: str,
 ) -> bool:
     """Conserva la última lectura válida al recibir un cero, sin ocultarlo."""
-    current_real = con.execute(
+    current_reference = con.execute(
         """SELECT id_lectura FROM lecturas_vecino
            WHERE id_propietario=? AND tipo=? AND fecha_lectura=?
-             AND estado='real' AND valor_acumulado<>0""",
+             AND valor_acumulado<>0
+             AND (
+                 estado='real'
+                 OR (
+                     estado='estimado'
+                     AND metodo_estimacion='counter_reset_carry_forward'
+                     AND trim(COALESCE(approved_by,''))<>''
+                     AND trim(COALESCE(approved_at,''))<>''
+                 )
+             )""",
         (owner_id, service, reading_date),
     ).fetchone()
-    if current_real is not None:
+    if current_reference is not None:
         con.execute(
             "INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
-            (current_real["id_lectura"], period_id),
+            (current_reference["id_lectura"], period_id),
         )
         con.execute(
             """UPDATE reading_observations
                SET status='carried_forward',effective_reading_id=?
                WHERE id_observation=?""",
-            (current_real["id_lectura"], observation_id),
+            (current_reference["id_lectura"], observation_id),
         )
         return True
     confirmed_zero = con.execute(

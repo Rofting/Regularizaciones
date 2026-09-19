@@ -1,5 +1,6 @@
-import sqlite3
 import re
+import json
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -527,6 +528,133 @@ def list_open_issues(connection: sqlite3.Connection, case_id: int) -> tuple[Revi
     return tuple(review_issue_from_row(row) for row in rows)
 
 
+def _normalise_reading_property(value: str) -> str:
+    return re.sub(r"[\s\.º°]", "", value.upper())
+
+
+def _resolve_reading_conflict(
+    connection: sqlite3.Connection,
+    issue: sqlite3.Row,
+    value: str,
+    *,
+    reason: str,
+    resolved_by: str,
+) -> str:
+    """Makes a reviewed reading authoritative before reapplying its source."""
+    match = re.fullmatch(r"reading\.(.+)\.(ACS|CALEFACCION)", str(issue["field_name"]))
+    if match is None:
+        raise LookupError("La incidencia de lectura no identifica una vivienda válida")
+    try:
+        confirmed_value = Decimal(value.replace(",", "."))
+    except InvalidOperation:
+        raise ValueError("Introduce una lectura acumulada numérica válida.") from None
+    if not confirmed_value.is_finite() or confirmed_value < 0:
+        raise ValueError("Introduce una lectura acumulada numérica válida.")
+
+    property_code, service = match.groups()
+    case = get_case(connection, issue["id_case"])
+    owners = connection.execute(
+        """SELECT DISTINCT owner.id_propietario,owner.codigo_vivienda
+           FROM reading_observations AS observation
+           JOIN propietarios AS owner ON owner.id_propietario=observation.id_propietario
+           WHERE observation.id_document=? AND observation.tipo=?
+             AND owner.id_comunidad=?""",
+        (issue["id_document"], service, case.community_id),
+    ).fetchall()
+    owner = next(
+        (item for item in owners if _normalise_reading_property(item["codigo_vivienda"])
+         == _normalise_reading_property(property_code)),
+        None,
+    )
+    if owner is None:
+        raise LookupError("La vivienda de la incidencia no pertenece al expediente")
+    observation = connection.execute(
+        """SELECT id_observation,fecha_lectura FROM reading_observations
+           WHERE id_document=? AND id_propietario=? AND tipo=? AND status='conflict'
+           ORDER BY id_observation DESC LIMIT 1""",
+        (issue["id_document"], owner["id_propietario"], service),
+    ).fetchone()
+    if observation is None:
+        raise LookupError("No se localiza la lectura en conflicto para corregirla")
+    reading = connection.execute(
+        """SELECT id_lectura FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
+        (owner["id_propietario"], service, observation["fecha_lectura"]),
+    ).fetchone()
+    if reading is None:
+        raise LookupError("No se localiza la lectura canónica en conflicto")
+
+    rows_candidate = connection.execute(
+        "SELECT value FROM extraction_candidates WHERE id_document=? AND field_name='vecinos'",
+        (issue["id_document"],),
+    ).fetchone()
+    if rows_candidate is None:
+        raise LookupError("La fuente no conserva las filas de lecturas para corregirla")
+    try:
+        source_rows = json.loads(rows_candidate["value"])
+    except (TypeError, json.JSONDecodeError):
+        raise LookupError("Las filas de lecturas de la fuente no tienen un formato válido") from None
+    if not isinstance(source_rows, list):
+        raise LookupError("Las filas de lecturas de la fuente no tienen un formato válido")
+
+    defaults = {
+        row["field_name"]: row["value"]
+        for row in connection.execute(
+            """SELECT field_name,value FROM extraction_candidates
+               WHERE id_document=? AND field_name IN ('tipo','fecha_inicio','fecha_fin')""",
+            (issue["id_document"],),
+        )
+    }
+    updated = False
+    for source_row in source_rows:
+        if not isinstance(source_row, dict):
+            continue
+        if _normalise_reading_property(str(source_row.get("vivienda") or "")) != _normalise_reading_property(property_code):
+            continue
+        source_service = str(source_row.get("tipo") or defaults.get("tipo") or "").upper()
+        if source_service != service:
+            continue
+        initial_date = str(source_row.get("fecha_ant") or defaults.get("fecha_inicio") or "")
+        final_date = str(source_row.get("fecha_act") or defaults.get("fecha_fin") or "")
+        if observation["fecha_lectura"] == initial_date:
+            source_row["val_ant"] = float(confirmed_value)
+        elif observation["fecha_lectura"] == final_date:
+            source_row["val_act"] = float(confirmed_value)
+        else:
+            continue
+        updated = True
+        break
+    if not updated:
+        raise LookupError("No se localiza la fila de la lectura en la fuente")
+
+    corrected_text = _decimal_text(confirmed_value)
+    connection.execute(
+        """UPDATE extraction_candidates
+           SET value=?,source='manual',validation_status='validated'
+           WHERE id_document=? AND field_name='vecinos'""",
+        (json.dumps(source_rows, ensure_ascii=False), issue["id_document"]),
+    )
+    connection.execute(
+        """UPDATE lecturas_vecino
+           SET valor_acumulado=?,estado='real',metodo_estimacion='manual_conflict_resolution',
+               notas=?,approved_by=?,approved_at=datetime('now')
+           WHERE id_lectura=?""",
+        (
+            corrected_text,
+            f"Lectura confirmada manualmente; motivo={reason}",
+            resolved_by,
+            reading["id_lectura"],
+        ),
+    )
+    connection.execute(
+        """UPDATE reading_observations
+           SET status='observed',effective_reading_id=?,previous_reading_id=NULL
+           WHERE id_observation=?""",
+        (reading["id_lectura"], observation["id_observation"]),
+    )
+    return corrected_text
+
+
 def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
                   reason: str, resolved_by: str = "usuario_local") -> ReviewIssue:
     normalized_value = _normalise_value(value)
@@ -554,6 +682,11 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
             (issue["id_document"], issue["field_name"]),
         ).fetchone()
         original_value = candidate["value"] if candidate is not None else None
+        if issue["code"] == "READING_CONFLICT":
+            normalized_value = _resolve_reading_conflict(
+                connection, issue, normalized_value,
+                reason=normalized_reason, resolved_by=normalized_resolved_by,
+            )
         connection.execute(
             """INSERT INTO manual_corrections
                (id_issue, original_value, corrected_value, reason, resolved_by)

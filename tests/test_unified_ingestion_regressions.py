@@ -352,6 +352,11 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
 
     def test_confirming_zeroes_preserves_an_approved_counter_reset_reading(self):
         self.connection.execute(
+            """UPDATE regularization_cases
+               SET fecha_inicio='2025-07-01',fecha_fin='2026-07-31' WHERE id_case=?""",
+            (self.case.id_case,),
+        )
+        self.connection.execute(
             """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
                VALUES (?,'B','Vecino B')""",
             (self.community_id,),
@@ -364,14 +369,20 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.connection.execute(
             """INSERT INTO lecturas_vecino
                (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente)
-               VALUES (?,?,'ACS','2026-01-01',9,'real','histórico')""",
+               VALUES (?,?,'ACS','2025-07-01',9,'real','histórico')""",
+            (owner_id, period_id),
+        )
+        self.connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente)
+               VALUES (?,?,'ACS','2026-01-31',10,'real','lectura posterior')""",
             (owner_id, period_id),
         )
         self.connection.execute(
             """INSERT INTO lecturas_vecino
                (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,
                 metodo_estimacion,fuente,approved_by,approved_at)
-               VALUES (?,?,'ACS','2026-01-31',9,'estimado','counter_reset_carry_forward',
+               VALUES (?,?,'ACS','2026-07-31',9,'estimado','counter_reset_carry_forward',
                        'informe anterior','Jose',datetime('now'))""",
             (owner_id, period_id),
         )
@@ -383,16 +394,17 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             archive_root=self.archive_root,
             document_kind="reading",
             candidates={"vecinos": json.dumps([{
-                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2026-01-01",
-                "val_ant": 9, "fecha_act": "2026-01-31", "val_act": 0,
+                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2025-07-01",
+                "val_ant": 9, "fecha_act": "2026-07-31", "val_act": 0,
             }])},
             required_fields=(),
         ).document
         case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
         document_review.create_review_issue(
             self.connection, self.case.id_case, document.id_document,
             code="READING_ZERO_REVIEW", field_name="reading.B.ACS",
-            message="La lectura cero no tiene una lectura anterior fiable para conservar",
+            message="Estado pendiente creado antes de aceptar reinicios aprobados",
         )
 
         resolved = document_review.confirm_initial_zero_readings_for_source(
@@ -403,7 +415,11 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.assertEqual(1, resolved)
         self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
         self.assertEqual(
-            [("2026-01-01", 9, "real"), ("2026-01-31", 9, "estimado")],
+            [
+                ("2025-07-01", 9, "real"),
+                ("2026-01-31", 10, "real"),
+                ("2026-07-31", 9, "estimado"),
+            ],
             [tuple(row) for row in self.connection.execute(
                 "SELECT fecha_lectura,valor_acumulado,estado FROM lecturas_vecino ORDER BY fecha_lectura"
             )],
@@ -411,7 +427,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.assertEqual(
             "counter_reset_carry_forward",
             self.connection.execute(
-                "SELECT metodo_estimacion FROM lecturas_vecino WHERE fecha_lectura='2026-01-31'"
+                "SELECT metodo_estimacion FROM lecturas_vecino WHERE fecha_lectura='2026-07-31'"
             ).fetchone()[0],
         )
         self.assertEqual(
@@ -420,6 +436,57 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
                 "SELECT status FROM reading_observations ORDER BY fecha_lectura"
             )],
         )
+
+    def test_resolving_reading_conflict_updates_source_and_canonical_reading(self):
+        self.connection.execute(
+            """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'B','Vecino B')""",
+            (self.community_id,),
+        )
+        owner_id = self.connection.execute(
+            "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda='B'",
+            (self.community_id,),
+        ).fetchone()[0]
+        period_id = expedient_service.link_case_to_period(self.connection, self.case.id_case)
+        self.connection.executemany(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente)
+               VALUES (?,?,'ACS',? ,?,'real','histórico')""",
+            [
+                (owner_id, period_id, '2026-01-01', 100),
+                (owner_id, period_id, '2026-01-31', 110),
+            ],
+        )
+        self.connection.commit()
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case, source_path=self.reading_file,
+            archive_root=self.archive_root, document_kind="reading",
+            candidates={"vecinos": json.dumps([{
+                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2026-01-01",
+                "val_ant": 100, "fecha_act": "2026-01-31", "val_act": 120,
+            }])}, required_fields=(),
+        ).document
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+
+        document_review.resolve_issue(
+            self.connection, issue.id_issue, value="123", reason="Lectura comprobada en el informe",
+        )
+
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        self.assertEqual(
+            (123.0, "real"),
+            tuple(self.connection.execute(
+                """SELECT valor_acumulado,estado FROM lecturas_vecino
+                   WHERE id_propietario=? AND tipo='ACS' AND fecha_lectura='2026-01-31'""",
+                (owner_id,),
+            ).fetchone()),
+        )
+        rows = json.loads(self.connection.execute(
+            "SELECT value FROM extraction_candidates WHERE id_document=? AND field_name='vecinos'",
+            (document.id_document,),
+        ).fetchone()[0])
+        self.assertEqual(123.0, rows[0]["val_act"])
 
     def test_two_resets_in_one_source_have_independent_approval_targets(self):
         self.connection.execute("UPDATE regularization_cases SET fecha_fin='2026-02-28' WHERE id_case=?", (self.case.id_case,))
