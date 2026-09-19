@@ -304,6 +304,52 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         ).fetchone()[0])
         self.assertTrue(document_review.list_open_issues(self.connection, self.case.id_case))
 
+    def test_confirming_initial_zeroes_for_one_source_applies_them_in_bulk(self):
+        self.connection.execute(
+            """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'B','Vecino B')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        document = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.reading_file,
+            archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"vecinos": json.dumps([{
+                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2026-01-01",
+                "val_ant": 0, "fecha_act": "2026-01-31", "val_act": 0,
+            }])},
+            required_fields=(),
+        ).document
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+
+        approve = getattr(document_review, "confirm_initial_zero_readings_for_source", None)
+        self.assertTrue(callable(approve), "La fuente debe poder confirmar sus ceros iniciales en bloque")
+        resolved = approve(
+            self.connection, case_id=self.case.id_case, document_id=document.id_document,
+            reason="Primer informe disponible", approved_by="Jose",
+        )
+
+        self.assertEqual(1, resolved)
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        readings = self.connection.execute(
+            """SELECT fecha_lectura,valor_acumulado,estado,metodo_estimacion
+                 FROM lecturas_vecino ORDER BY fecha_lectura"""
+        ).fetchall()
+        self.assertEqual(
+            [("2026-01-01", 0, "real", "confirmed_initial_zero"),
+             ("2026-01-31", 0, "estimado", "carry_forward_zero")],
+            [tuple(row) for row in readings],
+        )
+        self.assertEqual(
+            [("observed",), ("carried_forward",)],
+            [tuple(row) for row in self.connection.execute(
+                "SELECT status FROM reading_observations ORDER BY fecha_lectura"
+            )],
+        )
+
     def test_two_resets_in_one_source_have_independent_approval_targets(self):
         self.connection.execute("UPDATE regularization_cases SET fecha_fin='2026-02-28' WHERE id_case=?", (self.case.id_case,))
         self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))

@@ -437,6 +437,15 @@ def record_reading_observation(
     document_id: int,
 ) -> int:
     """Registra el valor de origen antes de decidir su proyección canónica."""
+    existing = con.execute(
+        """SELECT id_observation FROM reading_observations
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?
+             AND observed_value=? AND id_document=?
+           ORDER BY id_observation DESC LIMIT 1""",
+        (owner_id, service, reading_date, observed_value, document_id),
+    ).fetchone()
+    if existing is not None:
+        return int(existing["id_observation"])
     cursor = con.execute(
         """INSERT INTO reading_observations
            (id_propietario,tipo,fecha_lectura,observed_value,source_path,id_document,status)
@@ -478,6 +487,24 @@ def apply_zero_carry_forward(
     source_path: str,
 ) -> bool:
     """Conserva la última lectura válida al recibir un cero, sin ocultarlo."""
+    confirmed_zero = con.execute(
+        """SELECT id_lectura FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?
+             AND valor_acumulado=0 AND estado='real'""",
+        (owner_id, service, reading_date),
+    ).fetchone()
+    if confirmed_zero is not None:
+        con.execute(
+            "INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+            (confirmed_zero["id_lectura"], period_id),
+        )
+        con.execute(
+            """UPDATE reading_observations
+               SET status='observed',effective_reading_id=?,previous_reading_id=NULL
+               WHERE id_observation=?""",
+            (confirmed_zero["id_lectura"], observation_id),
+        )
+        return True
     previous = con.execute(
         """SELECT id_lectura,valor_acumulado FROM lecturas_vecino
            WHERE id_propietario=? AND tipo=? AND fecha_lectura < ?

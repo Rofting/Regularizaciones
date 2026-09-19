@@ -62,17 +62,18 @@ def source_summary(kinds) -> str:
 
 
 def group_review_issues(issues: Sequence[ReviewIssue]) -> tuple[dict[str, object], ...]:
-    """Agrupa reinicios del mismo informe para evitar una acción por vivienda."""
+    """Agrupa revisiones repetidas del mismo informe en una sola decisión."""
     groups: list[dict[str, object]] = []
-    reset_groups: dict[int, dict[str, object]] = {}
+    repeatable_groups: dict[tuple[int, str], dict[str, object]] = {}
     for issue in issues:
-        if issue.code != "COUNTER_RESET":
+        if issue.code not in {"COUNTER_RESET", "READING_ZERO_REVIEW"}:
             groups.append({"document_id": issue.id_document, "count": 1, "representative": issue})
             continue
-        group = reset_groups.get(issue.id_document)
+        key = (issue.id_document, issue.code)
+        group = repeatable_groups.get(key)
         if group is None:
             group = {"document_id": issue.id_document, "count": 0, "representative": issue}
-            reset_groups[issue.id_document] = group
+            repeatable_groups[key] = group
             groups.append(group)
         group["count"] = int(group["count"]) + 1
     return tuple(groups)
@@ -1830,6 +1831,20 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                             Path(selected.archived_path).name,
                         ),
                     )
+                elif issue.code == "READING_ZERO_REVIEW" and reset_count > 1:
+                    message = (
+                        f"Se detectaron {reset_count} lecturas iniciales a 0 en el mismo informe. "
+                        "Confirma una sola vez si esos ceros son valores reales de inicio; cada lectura "
+                        "y la decisión quedarán conservadas en el histórico."
+                    )
+                    action_text = f"Confirmar ceros iniciales ({reset_count})"
+                    action = lambda selected=issue, count=reset_count: (
+                        dialog.destroy(),
+                        open_initial_zero_confirmation_dialog(
+                            app, selected.id_case, selected.id_document, count,
+                            Path(selected.archived_path).name,
+                        ),
+                    )
                 else:
                     message = issue.message
                     action_text = "Resolver incidencia"
@@ -1946,6 +1961,74 @@ def open_counter_reset_carry_forward_dialog(
 
     ctk.CTkButton(
         actions, text=f"Aplicar a los {count} contadores", command=apply_carry_forward,
+        height=38, corner_radius=9, fg_color=C["exito"], hover_color=C["exito_hover"],
+        font=UIM.fuente(12, "bold"),
+    ).pack(side="right", padx=(0, 8))
+
+
+def open_initial_zero_confirmation_dialog(
+    app: "AppGestionFincas", case_id: int, document_id: int, count: int, source_name: str,
+) -> None:
+    """Pide una única confirmación humana para ceros iniciales de una fuente."""
+    dialog = _dialog(app, "Confirmar lecturas iniciales a 0", 700, 430)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16)
+    panel.pack(fill="both", expand=True, padx=18, pady=18)
+    ctk.CTkLabel(
+        panel, text="Confirmar ceros iniciales", font=UIM.fuente(20, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=22, pady=(22, 6))
+    ctk.CTkLabel(
+        panel,
+        text=(
+            f"{source_name} contiene {count} lecturas a 0 sin histórico previo. "
+            "Úsalo sólo si el archivo representa la primera lectura fiable de esos contadores. "
+            "Se guardará cada cero como lectura real inicial y las lecturas posteriores del archivo "
+            "podrán continuar normalmente."
+        ),
+        wraplength=600, justify="left", text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=22, pady=(0, 14))
+    reason = _field(panel, "Motivo y fuente consultada", 3)
+    reason.insert(0, "Primer informe fiable; los contadores parten de lectura 0.")
+
+    actions = ctk.CTkFrame(panel, fg_color="transparent")
+    actions.pack(fill="x", padx=22, pady=(22, 18))
+    ctk.CTkButton(
+        actions, text="Cancelar", command=dialog.destroy, height=38, corner_radius=9,
+        **UIM.secondary_button_kwargs(),
+    ).pack(side="right")
+
+    def confirm_zeroes():
+        if app._procesando:
+            return
+        rationale = reason.get().strip()
+        if not rationale:
+            messagebox.showwarning("Motivo requerido", "Indica por qué estos ceros son lecturas iniciales.", parent=dialog)
+            return
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            resolved = document_review.confirm_initial_zero_readings_for_source(
+                connection, case_id=case_id, document_id=document_id,
+                reason=rationale, approved_by="usuario_local",
+            )
+            remaining = len(document_review.list_open_issues(connection, case_id))
+            ready = None
+            if not remaining and not document_review.case_has_unapplied_sources(connection, case_id):
+                ready = document_review.validate_case_ready(connection, case_id)
+        except Exception as error:
+            connection.rollback()
+            messagebox.showwarning("No se pudieron confirmar los ceros", str(error), parent=dialog)
+            return
+        finally:
+            connection.close()
+        dialog.destroy()
+        app._refrescar_lista_expedientes(select_case_id=case_id)
+        app._refrescar_expediente()
+        if ready is not None and ready.status == "ready_for_calculation":
+            app.log(f"Confirmadas {resolved} lecturas iniciales a 0. Listo para cálculo.", "ok")
+        else:
+            app.log(f"Confirmadas {resolved} lecturas iniciales a 0. Quedan {remaining} incidencia(s).", "aviso")
+
+    ctk.CTkButton(
+        actions, text=f"Confirmar los {count} ceros", command=confirm_zeroes,
         height=38, corner_radius=9, fg_color=C["exito"], hover_color=C["exito_hover"],
         font=UIM.fuente(12, "bold"),
     ).pack(side="right", padx=(0, 8))
