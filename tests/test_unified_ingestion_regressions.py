@@ -89,6 +89,182 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         with self.assertRaisesRegex(excel_export_service.ExportBlockedError, "confirm|valid|revis"):
             excel_export_service._case_context(self.connection, self.case.id_case)
 
+    def test_reanalysis_of_manual_reading_classification_recreates_required_issues(self):
+        document = self.ingest(SourceAnalysis.unknown())
+        classification_issue = document_review.list_open_issues(
+            self.connection, self.case.id_case,
+        )[0]
+        document_review.resolve_issue(
+            self.connection, classification_issue.id_issue,
+            value="reading", reason="Clasificación comprobada manualmente",
+        )
+        document_review.record_candidates(
+            self.connection, document.id_document, {"tipo": "ACS"},
+            source="manual", validation_status="validated",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection, self.case.id_case,
+            analyser=lambda _: SourceAnalysis.unknown(),
+        )
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(
+            {"fecha_inicio", "fecha_fin", "vecinos"},
+            {issue.field_name for issue in issues},
+        )
+        stored = self.connection.execute(
+            """SELECT value, source, validation_status FROM extraction_candidates
+               WHERE id_document=? AND field_name='tipo'""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual(("ACS", "manual", "validated"), tuple(stored))
+
+    def test_reanalysis_of_invoice_candidates_misclassified_as_reading_requests_one_reclassification(self):
+        document = self.ingest(SourceAnalysis.unknown())
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        document_review.resolve_issue(
+            self.connection, issue.id_issue,
+            value="reading", reason="Clasificación inicial",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection, self.case.id_case,
+            analyser=lambda _: SourceAnalysis.invoice({
+                "tipo_suministro": "AGUA", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "importe_total": "177.84",
+            }, confidence="medium"),
+        )
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(1, len(issues))
+        self.assertEqual("DOCUMENT_CLASSIFICATION_REQUIRED", issues[0].code)
+
+    def test_resolving_classification_updates_effective_document_kind_immediately(self):
+        document = self.ingest(SourceAnalysis.unknown())
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+
+        document_review.resolve_issue(
+            self.connection, issue.id_issue,
+            value="invoice", reason="Contenido de factura comprobado",
+        )
+
+        stored_kind = self.connection.execute(
+            "SELECT document_kind FROM source_documents WHERE id_document=?",
+            (document.id_document,),
+        ).fetchone()[0]
+        self.assertEqual("invoice", stored_kind)
+
+    def test_invoice_candidates_misclassified_as_reading_request_reclassification(self):
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.source_path, archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={
+                "tipo_suministro": "AGUA", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "importe_total": "177.84",
+            },
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE source_documents
+               SET classification_confidence='low', status='under_review'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        case_ingestion.ensure_pending_source_issues(self.connection, self.case.id_case)
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(1, len(issues))
+        self.assertEqual("DOCUMENT_CLASSIFICATION_REQUIRED", issues[0].code)
+        self.assertEqual("document_kind", issues[0].field_name)
+        document_review.resolve_issue(
+            self.connection, issues[0].id_issue,
+            value="invoice", reason="El contenido corresponde a una factura",
+        )
+        confirmed = case_ingestion.confirm_source_candidates(
+            self.connection, self.case.id_case, document.id_document,
+            confirmed_by="Jose",
+        )
+        self.assertEqual("validated", confirmed.status)
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+
+    def test_pending_reading_with_invalid_type_becomes_actionable(self):
+        rows = [{
+            "vivienda": "A", "fecha_ant": "2026-01-01", "val_ant": 0,
+            "fecha_act": "2026-01-31", "val_act": 0,
+        }]
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.reading_file, archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"tipo": "12123", "vecinos": json.dumps(rows)},
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE source_documents
+               SET classification_confidence='low', status='under_review'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        ensure = getattr(case_ingestion, "ensure_pending_source_issues", None)
+        self.assertTrue(callable(ensure), "Pending sources need an actionable review operation")
+        ensure(self.connection, self.case.id_case)
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(["tipo"], [issue.field_name for issue in issues])
+        with self.assertRaisesRegex(ValueError, "ACS|CALEFACCION"):
+            document_review.resolve_issue(
+                self.connection, issues[0].id_issue,
+                value="12123", reason="Valor copiado del documento",
+            )
+
+    def test_pending_source_with_invalid_structured_data_becomes_actionable(self):
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.reading_file, archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"vecinos": "{contenido dañado"},
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE source_documents
+               SET classification_confidence='medium', status='under_review'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        case_ingestion.ensure_pending_source_issues(self.connection, self.case.id_case)
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(["vecinos"], [issue.field_name for issue in issues])
+        self.assertIn("formato", issues[0].message.lower())
+
+    def test_pending_invoice_with_invalid_amount_becomes_actionable(self):
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.source_path, archive_root=self.archive_root,
+            document_kind="invoice",
+            candidates={
+                "tipo_suministro": "GAS", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "importe_total": "no-numérico",
+            },
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE source_documents
+               SET classification_confidence='medium', status='under_review'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        case_ingestion.ensure_pending_source_issues(self.connection, self.case.id_case)
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(["importe_total"], [issue.field_name for issue in issues])
+
     def test_invoice_confirmation_does_not_apply_rejected_required_dates(self):
         document = self.ingest(self.invoice_analysis())
         self.connection.execute("UPDATE extraction_candidates SET validation_status='rejected' WHERE id_document=? AND field_name='fecha_inicio'", (document.id_document,))
@@ -112,6 +288,48 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
              patch.object(expedient_ui.messagebox, "showwarning"):
             expedient_ui.open_confirm_sources_dialog(app, self.case.id_case)
         self.assertEqual(128.1, self.connection.execute("SELECT importe_total FROM facturas").fetchone()[0])
+
+    def test_confirm_sources_dialog_can_confirm_a_complete_medium_confidence_source(self):
+        analysis = SourceAnalysis.invoice({
+            "tipo_suministro": "GAS", "fecha_inicio": "2026-01-01",
+            "fecha_fin": "2026-01-31", "importe_total": "128.10",
+        }, confidence="medium")
+        document = self.ingest(analysis)
+        self.assertTrue(document_review.case_has_unapplied_sources(
+            self.connection, self.case.id_case,
+        ))
+        app = SimpleNamespace(
+            ruta_bd_expedientes=self.database_path,
+            _refrescar_lista_expedientes=lambda **_: None,
+            _refrescar_expediente=lambda: None,
+            log=lambda *_: None,
+            after=lambda *_: None,
+        )
+        dialog = FakeWidget()
+        with patch.object(expedient_ui, "_dialog", return_value=dialog), \
+            patch.object(expedient_ui.UIM, "fuente", return_value=None), \
+            patch.multiple(
+                expedient_ui.ctk,
+                CTkFrame=FakeWidget, CTkScrollableFrame=FakeWidget,
+                CTkLabel=FakeWidget, CTkButton=FakeWidget,
+            ), \
+            patch.object(expedient_ui.messagebox, "showinfo"), \
+            patch.object(expedient_ui.messagebox, "showwarning"):
+            expedient_ui.open_confirm_sources_dialog(app, self.case.id_case)
+            button = next(
+                widget for widget in dialog.descendants()
+                if widget.options.get("text") == "Confirmar fuente"
+            )
+            button.options["command"]()
+
+        self.assertFalse(document_review.case_has_unapplied_sources(
+            self.connection, self.case.id_case,
+        ))
+        status = self.connection.execute(
+            "SELECT status FROM source_documents WHERE id_document=?",
+            (document.id_document,),
+        ).fetchone()[0]
+        self.assertEqual("validated", status)
 
     def test_pdf_structured_readings_survive_analysis_storage_and_application(self):
         self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))

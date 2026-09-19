@@ -79,9 +79,19 @@ def _validate_issue_value(field_name: str, value: str) -> str:
             raise ValueError("Introduce un importe o consumo numérico válido.")
     if field_name == "tipo_suministro" and (not re.search(r"[A-Za-zÁÉÍÓÚáéíóú]", value)):
         raise ValueError("Indica un tipo de suministro válido, por ejemplo GAS, ACS o MANTENIMIENTO.")
+    if field_name == "tipo":
+        reading_type = value.strip().upper()
+        if reading_type not in {"ACS", "CALEFACCION"}:
+            raise ValueError("El tipo de lectura debe ser ACS o CALEFACCION.")
+        return reading_type
     if field_name == "document_kind" and value.casefold() not in {"invoice", "reading", "owners", "other"}:
         raise ValueError("El tipo de documento debe ser factura, lectura, propietarios u otro.")
     return value
+
+
+def validate_candidate_value(field_name: str, value: str) -> str:
+    """Aplica a una extracción las mismas reglas usadas al resolver incidencias."""
+    return _validate_issue_value(field_name, value)
 
 
 def _positive_consumption(value: object) -> Decimal:
@@ -382,6 +392,28 @@ def create_review_issue(
         message=message,
         detected_value=detected_value,
         origin="manual",
+    )
+
+
+def create_invalid_field_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    field_name: str,
+    message: str,
+    detected_value: str | None = None,
+) -> ReviewIssue:
+    """Materializa como automática una extracción presente pero no utilizable."""
+    return _create_review_issue(
+        connection,
+        case_id,
+        document_id,
+        code=_MISSING_FIELD_CODE,
+        field_name=field_name,
+        message=message,
+        detected_value=detected_value,
+        origin="automatic",
     )
 
 
@@ -706,6 +738,14 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
                    validation_status = excluded.validation_status""",
             (issue["id_document"], issue["field_name"], normalized_value),
         )
+        if issue["code"] == _CLASSIFICATION_REQUIRED_CODE:
+            next_status = "not_applicable" if normalized_value == "other" else "under_review"
+            connection.execute(
+                """UPDATE source_documents
+                   SET document_kind=?, status=?, confirmed_by=NULL, confirmed_at=NULL
+                   WHERE id_document=?""",
+                (normalized_value, next_status, issue["id_document"]),
+            )
         connection.execute(
             """UPDATE review_issues SET status = 'resolved', resolved_at = datetime('now')
                WHERE id_issue = ?""",

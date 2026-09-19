@@ -1,5 +1,6 @@
 import os
 import json
+import sqlite3
 import stat
 import sys
 import tkinter as tk
@@ -1818,6 +1819,29 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
     panel = ctk.CTkScrollableFrame(dialog)
     panel.pack(fill="both", expand=True, padx=16, pady=16)
 
+    def confirm_pending_source(document_id: int) -> None:
+        error = None
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            result = case_ingestion.confirm_source_candidates(
+                connection, case_id, document_id, confirmed_by="usuario_local",
+            )
+            if result.status != "validated":
+                error = "La fuente necesita resolver las nuevas incidencias detectadas antes de continuar."
+        except (LookupError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            connection.rollback()
+            error = str(exc)
+            case_ingestion.ensure_pending_source_issues(connection, case_id)
+        finally:
+            connection.close()
+        if error:
+            messagebox.showwarning(
+                "No se pudo confirmar la fuente", error, parent=dialog,
+            )
+        else:
+            app.log("Fuente confirmada y aplicada al expediente.", "ok")
+        render()
+
     def render():
         ready_for_calculation = False
         for widget in panel.winfo_children():
@@ -1825,11 +1849,16 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
             automatic, _pending = case_ingestion.auto_apply_case_sources(connection, case_id)
-            if (not document_review.list_open_issues(connection, case_id)
-                    and not document_review.case_has_unapplied_sources(connection, case_id)):
+            case_ingestion.ensure_pending_source_issues(connection, case_id)
+            issues = document_review.list_open_issues(connection, case_id)
+            issue_document_ids = {issue.id_document for issue in issues}
+            pending_sources = tuple(
+                source for source in case_ingestion.list_pending_sources(connection, case_id)
+                if source.id_document not in issue_document_ids
+            )
+            if not issues and not pending_sources:
                 document_review.validate_case_ready(connection, case_id)
                 ready_for_calculation = True
-            issues = document_review.list_open_issues(connection, case_id)
             for grouped in group_review_issues(issues):
                 issue = grouped["representative"]
                 reset_count = int(grouped["count"])
@@ -1882,20 +1911,35 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                     fg_color=C["primario"], hover_color=C["primario_hover"],
                     command=action,
                 ).pack(anchor="e", padx=12, pady=(0, 10))
-            if not issues:
-                unapplied = document_review.case_has_unapplied_sources(connection, case_id)
-                if unapplied:
-                    text = (
-                        f"Se han aplicado automáticamente {automatic} fuente(s) completas.\n"
-                        "Quedan fuentes registradas que no se pudieron aplicar con seguridad. "
-                        "Pulsa «Reanalizar fuentes» para recuperarlas y ver sólo las incidencias reales."
-                    )
-                else:
-                    text = (
-                        f"Se han aplicado automáticamente {automatic} fuente(s) completas.\n"
-                        "El expediente ya está listo para generar el Excel oficial."
-                        if automatic else "El expediente ya está listo para generar el Excel oficial."
-                    )
+            kind_labels = {
+                "invoice": "Factura", "reading": "Lecturas", "owners": "Propietarios",
+            }
+            for source in pending_sources:
+                group = ctk.CTkFrame(panel)
+                group.pack(fill="x", pady=8)
+                ctk.CTkLabel(
+                    group, text=source.original_name,
+                    font=UIM.fuente(12, "bold"), wraplength=740,
+                ).pack(anchor="w", padx=12, pady=(10, 2))
+                ctk.CTkLabel(
+                    group,
+                    text=(
+                        f"Tipo: {kind_labels.get(source.document_kind, source.document_kind)}. "
+                        "Los datos están completos, pero necesitan tu confirmación antes de aplicarse."
+                    ),
+                    wraplength=740, justify="left", text_color=C["texto_sec"],
+                ).pack(anchor="w", padx=12, pady=(0, 6))
+                ctk.CTkButton(
+                    group, text="Confirmar fuente", height=32, corner_radius=8,
+                    fg_color=C["primario"], hover_color=C["primario_hover"],
+                    command=lambda document_id=source.id_document: confirm_pending_source(document_id),
+                ).pack(anchor="e", padx=12, pady=(0, 10))
+            if not issues and not pending_sources:
+                text = (
+                    f"Se han aplicado automáticamente {automatic} fuente(s) completas.\n"
+                    "El expediente ya está listo para generar el Excel oficial."
+                    if automatic else "El expediente ya está listo para generar el Excel oficial."
+                )
                 ctk.CTkLabel(panel, text=text, justify="left").pack(pady=16)
         finally:
             connection.close()

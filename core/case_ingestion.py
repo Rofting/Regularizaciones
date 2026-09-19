@@ -82,9 +82,12 @@ def _required_fields_for_kind(analysis: SourceAnalysis, document_kind: str) -> t
     """Uses the effective classification, not a conflicting automatic guess."""
     if document_kind == analysis.kind:
         return tuple(field.strip() for field in analysis.required_fields)
-    if document_kind == "invoice":
-        return SourceAnalysis.invoice().required_fields
-    return ()
+    required_by_kind = {
+        "invoice": SourceAnalysis.invoice().required_fields,
+        "reading": ("tipo", "fecha_inicio", "fecha_fin", "vecinos"),
+        "owners": ("propietarios",),
+    }
+    return tuple(required_by_kind.get(document_kind, ()))
 
 
 def _replace_unvalidated_candidates_not_in_analysis(
@@ -149,7 +152,23 @@ def _persist_analysis(
             document_review.clear_open_automatic_issues(
                 connection, case_id, document.id_document,
             )
-        if (
+        classification_conflict = bool(
+            confirmed_kind
+            and effective_kind != analysis.kind
+            and analysis.kind == "invoice"
+            and _looks_like_invoice(candidates)
+        )
+        if classification_conflict:
+            document_review.create_classification_required_issue(
+                connection,
+                case_id,
+                document.id_document,
+                message=(
+                    "La clasificación guardada no coincide con el nuevo análisis, que parece una factura. "
+                    "Confirma el tipo correcto antes de aplicar la fuente."
+                ),
+            )
+        elif (
             effective_kind == "unknown"
             and not document_review.has_closed_classification_outcome(
                 connection, document.id_document,
@@ -262,6 +281,155 @@ def auto_apply_case_sources(connection: sqlite3.Connection, case_id: int) -> tup
             applied += 1
     pending = _open_issue_count(connection, case_id)
     return applied, pending
+
+
+def list_pending_sources(
+    connection: sqlite3.Connection, case_id: int,
+) -> tuple[SourceDocument, ...]:
+    """Devuelve fuentes operativas que aún necesitan revisión o aplicación."""
+    rows = connection.execute(
+        """SELECT d.id_document
+           FROM source_documents AS d
+           WHERE d.id_case=? AND d.classification_confidence IS NOT NULL
+             AND d.document_kind<>'other' AND (
+               d.status<>'validated' OR d.document_kind='unknown'
+               OR NOT EXISTS (
+                   SELECT 1 FROM archivos_procesados AS a
+                   WHERE a.nombre_archivo='source_document:' || d.id_document
+               )
+               OR EXISTS (
+                   SELECT 1 FROM extraction_candidates AS c
+                   WHERE c.id_document=d.id_document
+                     AND c.validation_status='candidate'
+                     AND c.value IS NOT NULL AND trim(c.value)<>''
+               )
+             )
+           ORDER BY d.id_document""",
+        (case_id,),
+    ).fetchall()
+    return tuple(_source_document(connection, int(row["id_document"])) for row in rows)
+
+
+def _candidate_values(connection: sqlite3.Connection, document_id: int) -> dict[str, str]:
+    rows = connection.execute(
+        """SELECT field_name,value FROM extraction_candidates
+           WHERE id_document=? AND value IS NOT NULL AND trim(value)<>''
+             AND validation_status<>'rejected'""",
+        (document_id,),
+    ).fetchall()
+    return {row["field_name"]: row["value"] for row in rows}
+
+
+def _reading_required_fields(values: Mapping[str, str]) -> tuple[str, ...]:
+    """Obtiene los datos de cabecera que faltan en filas de lectura heredadas."""
+    raw_rows = values.get("vecinos")
+    if not raw_rows:
+        return ("tipo", "fecha_inicio", "fecha_fin", "vecinos")
+    try:
+        rows = json.loads(raw_rows)
+    except (json.JSONDecodeError, TypeError):
+        return ("vecinos",)
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        return ("vecinos",)
+    required = []
+    for row_field, candidate_field in (
+        ("tipo", "tipo"), ("fecha_ant", "fecha_inicio"), ("fecha_act", "fecha_fin"),
+    ):
+        if any(not row.get(row_field) for row in rows):
+            required.append(candidate_field)
+    return tuple(required)
+
+
+def _structured_candidate_error(field_name: str, value: str) -> str | None:
+    if field_name not in {"vecinos", "propietarios"}:
+        return None
+    try:
+        rows = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return f"El campo {field_name} no tiene un formato de lista válido."
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        return f"El campo {field_name} debe contener una lista no vacía de registros."
+    if field_name == "propietarios" and any(
+        not row.get("codigo_vivienda") or not row.get("nombre_propietario") for row in rows
+    ):
+        return "Cada propietario necesita una vivienda y un nombre."
+    return None
+
+
+def _invalid_candidate_message(field_name: str, value: str) -> str | None:
+    structured_error = _structured_candidate_error(field_name, value)
+    if structured_error:
+        return structured_error
+    try:
+        document_review.validate_candidate_value(field_name, value)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _looks_like_invoice(values: Mapping[str, str]) -> bool:
+    return bool(values.get("tipo_suministro") and values.get("importe_total"))
+
+
+def ensure_pending_source_issues(connection: sqlite3.Connection, case_id: int) -> int:
+    """Convierte toda fuente bloqueante en una decisión visible y resoluble."""
+    created_before = _open_issue_count(connection, case_id)
+    for document in list_pending_sources(connection, case_id):
+        if _has_open_document_issues(connection, document.id_document):
+            continue
+        values = _candidate_values(connection, document.id_document)
+        if (
+            document.document_kind in {"reading", "owners"}
+            and _looks_like_invoice(values)
+            and not values.get("vecinos")
+            and not values.get("propietarios")
+        ):
+            document_review.create_classification_required_issue(
+                connection, case_id, document.id_document,
+                message=(
+                    "La clasificación guardada no coincide con el contenido extraído, que parece una factura. "
+                    "Confirma el tipo correcto antes de aplicar la fuente."
+                ),
+            )
+            continue
+        if document.document_kind == "invoice":
+            required = ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total")
+        elif document.document_kind == "owners":
+            required = ("propietarios",)
+        elif document.document_kind == "reading":
+            required = _reading_required_fields(values)
+        elif document.document_kind == "unknown":
+            if not document_review.has_closed_classification_outcome(
+                connection, document.id_document,
+            ):
+                document_review.create_classification_required_issue(
+                    connection, case_id, document.id_document,
+                    message="Confirma si la fuente es una factura, lectura, propietarios u otro documento.",
+                )
+            continue
+        else:
+            continue
+
+        document_review.create_missing_field_issues(
+            connection, case_id, document.id_document, required,
+        )
+        fields_to_validate = set(required)
+        if document.document_kind == "owners":
+            fields_to_validate.add("propietarios")
+        elif document.document_kind == "reading":
+            fields_to_validate.add("vecinos")
+        for field_name in fields_to_validate:
+            value = values.get(field_name)
+            if not value:
+                continue
+            message = _invalid_candidate_message(field_name, value)
+            if message:
+                document_review.create_invalid_field_issue(
+                    connection, case_id, document.id_document,
+                    field_name=field_name, detected_value=value,
+                    message=message,
+                )
+    return _open_issue_count(connection, case_id) - created_before
 
 
 def _open_issue_count(connection: sqlite3.Connection, case_id: int) -> int:
