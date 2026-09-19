@@ -603,7 +603,7 @@ def _migration_10(connection: sqlite3.Connection) -> None:
                             'by', NEW.resolved_by)
             FROM review_issues AS issue WHERE issue.id_issue = NEW.id_issue;
         END""")
-    connection.execute("""CREATE TABLE reading_observations (
+    connection.execute("""CREATE TABLE IF NOT EXISTS reading_observations (
         id_observation INTEGER PRIMARY KEY AUTOINCREMENT,
         id_propietario INTEGER NOT NULL REFERENCES propietarios(id_propietario),
         tipo TEXT NOT NULL,
@@ -616,7 +616,7 @@ def _migration_10(connection: sqlite3.Connection) -> None:
         previous_reading_id INTEGER REFERENCES lecturas_vecino(id_lectura) ON DELETE SET NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""")
-    connection.execute("""CREATE INDEX idx_reading_observations_owner_service_date
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_reading_observations_owner_service_date
         ON reading_observations(id_propietario, tipo, fecha_lectura)""")
 
 

@@ -257,6 +257,53 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.assertEqual([("2026-01-01", 100), ("2026-01-31", 115), ("2026-02-28", 150)], [tuple(r) for r in rows])
         self.assertEqual("5", self.connection.execute("SELECT original_value FROM manual_corrections").fetchone()[0])
 
+    def test_zero_final_reading_keeps_raw_observation_and_carries_previous_value(self):
+        document = self.add_confirmed_reading(final=0)
+
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+
+        observations = self.connection.execute(
+            """SELECT fecha_lectura,observed_value,status
+                 FROM reading_observations ORDER BY fecha_lectura"""
+        ).fetchall()
+        effective = self.connection.execute(
+            """SELECT valor_acumulado,estado,metodo_estimacion
+                 FROM lecturas_vecino WHERE fecha_lectura='2026-01-31'"""
+        ).fetchone()
+        self.assertEqual(
+            [("2026-01-01", 100, "observed"), ("2026-01-31", 0, "carried_forward")],
+            [tuple(row) for row in observations],
+        )
+        self.assertEqual((100, "estimado", "carry_forward_zero"), tuple(effective))
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+
+    def test_zero_reading_without_prior_value_stays_open_for_review(self):
+        self.connection.execute(
+            """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'B','Vecino B')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        document = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.reading_file,
+            archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"vecinos": json.dumps([{
+                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2026-01-01",
+                "val_ant": 0, "fecha_act": "2026-01-31", "val_act": 0,
+            }])},
+            required_fields=(),
+        ).document
+
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+
+        self.assertEqual("review_required", self.connection.execute(
+            "SELECT status FROM reading_observations WHERE observed_value=0 ORDER BY id_observation LIMIT 1"
+        ).fetchone()[0])
+        self.assertTrue(document_review.list_open_issues(self.connection, self.case.id_case))
+
     def test_two_resets_in_one_source_have_independent_approval_targets(self):
         self.connection.execute("UPDATE regularization_cases SET fecha_fin='2026-02-28' WHERE id_case=?", (self.case.id_case,))
         self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))
