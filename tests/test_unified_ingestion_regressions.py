@@ -51,11 +51,12 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             },
         })
 
-    def test_analysed_invoice_cannot_be_ready_before_confirmation_and_application(self):
+    def test_clean_analysed_invoice_is_applied_automatically(self):
         self.ingest(self.invoice_analysis())
-        with self.assertRaisesRegex(ValueError, "confirm|canónic"):
-            document_review.validate_case_ready(self.connection, self.case.id_case)
-        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        self.assertEqual("ready_for_calculation", document_review.validate_case_ready(
+            self.connection, self.case.id_case,
+        ).status)
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
 
     def test_confirmation_applies_invoice_and_export_input_changes_after_correction(self):
         document = self.ingest(self.invoice_analysis())
@@ -93,24 +94,23 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.connection.execute("UPDATE extraction_candidates SET validation_status='rejected' WHERE id_document=? AND field_name='fecha_inicio'", (document.id_document,))
         with self.assertRaisesRegex(ValueError, "fecha_inicio"):
             self.confirm(document)
-        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        # La factura limpia se publicó al analizarla; rechazar una fecha después
+        # impide confirmarla de nuevo, pero no borra el dato ya aplicado.
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
 
-    def test_ui_confirmation_reaches_canonical_invoice(self):
+    def test_ui_source_review_reaches_canonical_invoice(self):
         self.ingest(self.invoice_analysis())
         self.assertTrue(callable(getattr(expedient_ui, "open_confirm_sources_dialog", None)),
                         "Complete extracted candidates need a reachable UI confirmation")
         app = SimpleNamespace(ruta_bd_expedientes=self.database_path,
             _refrescar_lista_expedientes=lambda **_: None, _refrescar_expediente=lambda: None,
-            log=lambda *_: None)
+            log=lambda *_: None, after=lambda *_: None)
         panel = FakeWidget()
         with patch.object(expedient_ui, "_dialog", return_value=panel), \
-             patch.multiple(expedient_ui.ctk, CTkFrame=FakeWidget, CTkScrollableFrame=FakeWidget,
-                            CTkLabel=FakeWidget, CTkButton=FakeWidget), \
+            patch.multiple(expedient_ui.ctk, CTkFrame=FakeWidget, CTkScrollableFrame=FakeWidget,
+                           CTkLabel=FakeWidget, CTkButton=FakeWidget), \
              patch.object(expedient_ui.messagebox, "showwarning"):
             expedient_ui.open_confirm_sources_dialog(app, self.case.id_case)
-            button = next(widget for widget in panel.descendants()
-                          if widget.options.get("text") == "Confirmar fuente")
-            button.options["command"]()
         self.assertEqual(128.1, self.connection.execute("SELECT importe_total FROM facturas").fetchone()[0])
 
     def test_pdf_structured_readings_survive_analysis_storage_and_application(self):
