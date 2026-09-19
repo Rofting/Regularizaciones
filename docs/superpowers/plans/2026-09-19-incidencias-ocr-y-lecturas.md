@@ -60,7 +60,7 @@ Expected: FAIL because migration 10 and its table/index do not exist.
 
 - [ ] **Step 3: Implement migration 10.**
 
-Drop the legacy unique index created from `UNIQUE(id_document,code,field_name,status)`, create `idx_review_issues_open_unique` with `WHERE status='open'`, and create the observation table plus a `(id_propietario,tipo,fecha_lectura)` index. Register migration 10 and update version assertions.
+Rebuild `review_issues` inside migration 10: create a replacement table with the same columns, foreign keys, check constraints and `origin` column but without the historical `UNIQUE`; copy every existing row with its primary key, drop/rename inside the active transaction, recreate `idx_issues_case_open`, and add `idx_review_issues_open_unique` with `WHERE status='open'`. Then create the observation table plus a `(id_propietario,tipo,fecha_lectura)` index, register migration 10 and update version assertions.
 
 - [ ] **Step 4: Run the migration tests again.**
 

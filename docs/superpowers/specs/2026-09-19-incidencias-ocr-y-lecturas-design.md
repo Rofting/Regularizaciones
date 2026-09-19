@@ -42,11 +42,13 @@ la observación y la lectura previa. La fecha de la observación se mantiene. El
 registro anterior no se modifica. Si en esa fecha ya existe un valor real
 diferente, se registra conflicto y no se altera la lectura canónica.
 
-La migración de incidencias eliminará la restricción que hace único el estado
-histórico `(id_document, code, field_name, status)`. La sustituirá por una
-restricción parcial que solo impide dos incidencias `open` equivalentes. Así se
-conservan resoluciones previas y puede aparecer una nueva incidencia abierta
-si una relectura realmente vuelve a requerir decisión.
+La migración de incidencias reconstruirá `review_issues` dentro de una única
+transacción para eliminar la restricción que hace único el estado histórico
+`(id_document, code, field_name, status)`: SQLite no permite retirar esa
+restricción directamente. Después creará un índice parcial que solo impide dos
+incidencias `open` equivalentes. Así se conservan resoluciones previas y puede
+aparecer una nueva incidencia abierta si una relectura realmente vuelve a
+requerir decisión.
 
 ## Flujo de incidencias
 
