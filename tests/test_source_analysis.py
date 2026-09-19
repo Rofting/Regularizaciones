@@ -676,6 +676,40 @@ class SourceAnalysisTest(unittest.TestCase):
             "Total a pagar 6.279,49€", lector_pdf._normalizar_decimales_ocr(text),
         )
 
+    def test_rapidocr_result_is_used_before_the_tesseract_fallback(self):
+        with mock.patch("lector_pdf._rapidocr_text", return_value="NATURGY CLIENTES GAS"):
+            result = lector_pdf.extraer_texto_ocr_con_diagnostico("factura_escaneada.png")
+
+        self.assertEqual("NATURGY CLIENTES GAS", result.text)
+        self.assertEqual("rapidocr", result.status)
+
+    def test_provider_detection_normalises_common_ocr_spacing_and_accents(self):
+        providers = {
+            "proveedores": {
+                "TOTAL": {
+                    "nombre_display": "TotalEnergies",
+                    "tipo_suministro": "GAS",
+                    "firmas_identificacion": ["TOTAL ENERGIES"],
+                },
+            },
+        }
+
+        key, _config = lector_pdf.identificar_proveedor(
+            "T0TAL   ENERGÍES factura de gas", "factura.pdf", providers,
+        )
+
+        self.assertEqual("TOTAL", key)
+
+    def test_provider_detection_rejects_equal_evidence(self):
+        providers = {
+            "proveedores": {
+                "UNO": {"nombre_display": "Uno", "tipo_suministro": "GAS", "firmas_identificacion": ["ACME"]},
+                "DOS": {"nombre_display": "Dos", "tipo_suministro": "GAS", "firmas_identificacion": ["ACME"]},
+            },
+        }
+
+        self.assertEqual((None, None), lector_pdf.identificar_proveedor("Factura ACME", "factura.pdf", providers))
+
     def test_unreadable_scan_reports_diagnostic_without_install_instructions(self):
         providers = {"proveedores": {}}
         diagnostic = lector_pdf.OCRResult(

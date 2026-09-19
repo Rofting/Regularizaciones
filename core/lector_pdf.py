@@ -28,6 +28,7 @@ import hashlib
 import calendar
 import shutil
 import sys
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from datetime import datetime
@@ -563,6 +564,22 @@ def _poppler_path() -> str | None:
     return candidates[0] if candidates else None
 
 
+@lru_cache(maxsize=1)
+def _rapidocr_engine():
+    from rapidocr import RapidOCR
+    return RapidOCR()
+
+
+def _rapidocr_text(ruta_archivo: str, source: object | None = None) -> str:
+    """Lee una imagen de portada con RapidOCR sin exponer su API a la UI."""
+    try:
+        result = _rapidocr_engine()(source if source is not None else ruta_archivo)
+        lines = getattr(result, "txts", ()) or ()
+        return "\n".join(str(line).strip() for line in lines if str(line).strip())
+    except Exception:
+        return ""
+
+
 def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
     """Intenta OCR de portada y conserva una causa concreta cuando no puede.
 
@@ -570,6 +587,28 @@ def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
     para decidir si revisar el documento, corregir una imagen ilegible o
     comunicar una incidencia técnica al soporte del despacho.
     """
+    # La imagen de la portada se comparte entre RapidOCR y Tesseract. Así el
+    # segundo sólo es un respaldo y no duplica el renderizado del PDF.
+    cover_images = None
+    cover_render_error = None
+    if Path(ruta_archivo).suffix.lower() == ".pdf":
+        try:
+            from pdf2image import convert_from_path
+            cover_images = convert_from_path(
+                ruta_archivo, dpi=200, poppler_path=_poppler_path(), first_page=1, last_page=1,
+            )
+        except Exception as exc:
+            cover_render_error = exc
+
+    rapidocr_text = "" if cover_render_error else _rapidocr_text(
+        ruta_archivo, cover_images[0] if cover_images else None,
+    )
+    if rapidocr_text.strip():
+        return OCRResult(
+            text=_normalizar_decimales_ocr(rapidocr_text), status="rapidocr",
+            detail="OCR integrado aplicado a la portada.",
+        )
+
     try:
         from pdf2image import convert_from_path
         import pytesseract
@@ -601,13 +640,21 @@ def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
             detail="El motor OCR no dispone de un idioma de lectura compatible para este documento.",
         )
 
+    if cover_render_error is not None:
+        return OCRResult(
+            text="", status="render_or_ocr_failed",
+            detail=f"No se pudo leer la portada escaneada: {cover_render_error}", language=language,
+        )
+
     try:
         # Los datos decisivos de una factura están en portada. Limitar el OCR
         # evita que un anexo de muchas páginas bloquee la interfaz durante
         # minutos; si la portada no basta, el documento queda para revisión.
-        imagenes = convert_from_path(
-            ruta_archivo, dpi=200, poppler_path=_poppler_path(), first_page=1, last_page=1,
-        )
+        imagenes = cover_images
+        if imagenes is None:
+            imagenes = convert_from_path(
+                ruta_archivo, dpi=200, poppler_path=_poppler_path(), first_page=1, last_page=1,
+            )
         partes = []
         for img in imagenes:
             # Los recibos municipales y de suministros suelen tener varias
@@ -636,6 +683,28 @@ def extraer_texto_ocr(ruta_archivo: str) -> str:
     return extraer_texto_ocr_con_diagnostico(ruta_archivo).text
 
 
+def _normalizar_firma_proveedor(value: str) -> str:
+    """Normaliza firmas para resistir tildes, huecos y la O leída como cero."""
+    decomposed = unicodedata.normalize("NFKD", value.upper())
+    ascii_text = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return re.sub(r"[^A-Z0-9]+", "", ascii_text.replace("0", "O"))
+
+
+def _firma_literal_normalizada(firma: str) -> str | None:
+    if re.search(r"[\\^$*+?{}\[\]|()]", firma):
+        return None
+    return _normalizar_firma_proveedor(firma)
+
+
+def _firma_coincide(firma: str, texto: str, nombre_archivo: str) -> bool:
+    if re.search(firma, texto, re.IGNORECASE):
+        return True
+    normalized_signature = _firma_literal_normalizada(firma)
+    if normalized_signature is None:
+        return False
+    return normalized_signature in _normalizar_firma_proveedor(texto + " " + nombre_archivo)
+
+
 def identificar_proveedor(texto: str, nombre_archivo: str, proveedores: dict) -> tuple[str, dict] | tuple[None, None]:
     """
     Devuelve (clave_proveedor, config_proveedor) o (None, None).
@@ -644,9 +713,10 @@ def identificar_proveedor(texto: str, nombre_archivo: str, proveedores: dict) ->
     - METRIGEST_ACS vs METRIGEST_CALEF: por tipo de lectura en el texto
     - ENDESA_LUZ_COMUNIDAD: acepta CUPS con sufijos RR0F o PS0F
     - ENERGIAXXI_BOMBA: solo CUPS con sufijo DY0F
-    - Resto: primera firma encontrada, respetando firma_exclusion si existe
+    - Resto: selecciona la coincidencia más específica; si hay empate, pide revisión
     """
     texto_up = texto.upper()
+    candidates: list[tuple[int, str, dict]] = []
 
     for clave, config in proveedores["proveedores"].items():
         # Firma de exclusión: si el texto contiene este patrón, saltar este proveedor
@@ -655,44 +725,48 @@ def identificar_proveedor(texto: str, nombre_archivo: str, proveedores: dict) ->
             continue
 
         firmas = config.get("firmas_identificacion", [])
-        for firma in firmas:
-            if not re.search(firma, texto, re.IGNORECASE):
-                continue
-            firmas_requeridas = config.get("firmas_requeridas", [])
-            if any(not re.search(requerida, texto, re.IGNORECASE)
-                   for requerida in firmas_requeridas):
-                continue
+        matched = [firma for firma in firmas if _firma_coincide(firma, texto, nombre_archivo)]
+        if not matched:
+            continue
+        firmas_requeridas = config.get("firmas_requeridas", [])
+        if any(not _firma_coincide(requerida, texto, nombre_archivo)
+               for requerida in firmas_requeridas):
+            continue
 
-            # — Metrigest: ACS vs Calefacción —
-            if "METRIGEST" in clave:
-                primera_pagina = texto_up[:700]
-                if "CALEF" in clave and "CALEFACCION" in primera_pagina:
-                    return clave, config
-                if "ACS" in clave and "ACS" in primera_pagina and "CALEFACCION" not in primera_pagina:
-                    return clave, config
+        # — Metrigest: ACS vs Calefacción —
+        if "METRIGEST" in clave:
+            primera_pagina = texto_up[:700]
+            if "CALEF" in clave and "CALEFACCION" not in primera_pagina:
                 continue
-
-            # — Endesa luz (mercado libre): CUPS sufijo RR0F o PS0F —
-            if "ENDESA_LUZ" in clave and config.get("cups_sufijos_validos"):
-                m = re.search(r"CUPS[):\s]+(?P<cups>ES\w+)", texto, re.IGNORECASE)
-                if m:
-                    cups = m.group("cups").upper()
-                    sufijos = config.get("cups_sufijos_validos", ["RR0F", "PS0F"])
-                    if any(s in cups for s in sufijos):
-                        return clave, config
+            if "ACS" in clave and ("ACS" not in primera_pagina or "CALEFACCION" in primera_pagina):
                 continue
 
-            # — Energía XXI (bomba incendios): CUPS sufijo DY0F —
-            if "ENERGIAXXI" in clave:
-                m = re.search(r"CUPS[):\s]+(?P<cups>ES\w+)", texto, re.IGNORECASE)
-                if m and "DY0F" in m.group("cups").upper():
-                    return clave, config
+        # — Endesa luz (mercado libre): CUPS sufijo RR0F o PS0F —
+        if "ENDESA_LUZ" in clave and config.get("cups_sufijos_validos"):
+            m = re.search(r"CUPS[):\s]+(?P<cups>ES\w+)", texto, re.IGNORECASE)
+            if not m:
+                continue
+            cups = m.group("cups").upper()
+            sufijos = config.get("cups_sufijos_validos", ["RR0F", "PS0F"])
+            if not any(s in cups for s in sufijos):
                 continue
 
-            # — Caso general —
-            return clave, config
+        # — Energía XXI (bomba incendios): CUPS sufijo DY0F —
+        if "ENERGIAXXI" in clave:
+            m = re.search(r"CUPS[):\s]+(?P<cups>ES\w+)", texto, re.IGNORECASE)
+            if not m or "DY0F" not in m.group("cups").upper():
+                continue
 
-    return None, None
+        candidates.append((len(matched) + len(firmas_requeridas), clave, config))
+
+    if not candidates:
+        return None, None
+    best_score = max(candidate[0] for candidate in candidates)
+    winners = [candidate for candidate in candidates if candidate[0] == best_score]
+    if len(winners) != 1:
+        return None, None
+    _score, clave, config = winners[0]
+    return clave, config
 
 
 # ---------------------------------------------------------------------------
