@@ -606,6 +606,29 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual("reading", analysis.kind)
         self.assertEqual(1, len(json.loads(analysis.candidates["vecinos"])))
 
+    def test_meditrade_blank_final_reading_is_preserved_as_zero_for_review(self):
+        import xlwt
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lecturas-con-vacio.xls"
+            workbook = xlwt.Workbook()
+            sheet = workbook.add_sheet("xmlrep")
+            for row_index, row in enumerate((
+                ("Cod.", "Propiedad", "Nombre", "7/2024", "7/2025", "8 CONS. ACS"),
+                (659, "PA2-1A", "VECINO", 117, "", ""),
+            )):
+                for column, value in enumerate(row):
+                    sheet.write(row_index, column, value)
+            workbook.save(str(path))
+
+            analysis = source_analysis.analyse_tabular(path)
+
+        self.assertEqual("reading", analysis.kind)
+        rows = json.loads(analysis.candidates["vecinos"])
+        self.assertEqual(117.0, rows[0]["val_ant"])
+        self.assertEqual(0.0, rows[0]["val_act"])
+        self.assertEqual("ACS", analysis.candidates["tipo"])
+
     def test_meditrade_owner_report_collects_following_email_line(self):
         import xlwt
 

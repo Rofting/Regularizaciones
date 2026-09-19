@@ -252,7 +252,15 @@ def analyse_tabular(path: Path) -> SourceAnalysis:
                     raise ValueError("La tabla no contiene lecturas")
                 for row in candidates:
                     for key in ("val_ant", "val_act"):
-                        row[key] = _tabular_number(row[key])
+                        # Los informes Meditrade dejan la celda vacía cuando
+                        # el contador informa 0. El importador histórico ya
+                        # aplica esa convención; conservarla aquí permite que
+                        # el flujo auditado decida si es un cero inicial o si
+                        # debe arrastrar la última lectura fiable.
+                        row[key] = (
+                            0.0 if row[key] in (None, "")
+                            else _tabular_number(row[key])
+                        )
                 metadata = _legacy_reading_metadata(headers, periods)
                 values = {"vecinos": _string_value(candidates), **metadata}
                 missing = tuple(
