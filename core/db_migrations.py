@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 
 MIGRATION_1_SQL = (
@@ -563,6 +563,63 @@ def _migration_9(connection: sqlite3.Connection) -> None:
          )""")
 
 
+def _migration_10(connection: sqlite3.Connection) -> None:
+    """Conserva el historial de incidencias y cada observación de contador."""
+    connection.execute("""CREATE TABLE review_issues_rebuilt (
+        id_issue INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_case INTEGER NOT NULL REFERENCES regularization_cases(id_case) ON DELETE CASCADE,
+        id_document INTEGER NOT NULL REFERENCES source_documents(id_document) ON DELETE CASCADE,
+        code TEXT NOT NULL,
+        field_name TEXT NOT NULL,
+        detected_value TEXT,
+        message TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('open','resolved','dismissed')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT,
+        origin TEXT NOT NULL DEFAULT 'manual' CHECK(origin IN ('automatic','manual'))
+    )""")
+    connection.execute("""INSERT INTO review_issues_rebuilt
+        (id_issue,id_case,id_document,code,field_name,detected_value,message,status,
+         created_at,resolved_at,origin)
+        SELECT id_issue,id_case,id_document,code,field_name,detected_value,message,status,
+               created_at,resolved_at,origin
+          FROM review_issues""")
+    connection.execute("DROP TRIGGER IF EXISTS history_manual_correction")
+    connection.execute("DROP TABLE review_issues")
+    connection.execute("ALTER TABLE review_issues_rebuilt RENAME TO review_issues")
+    connection.execute("""CREATE INDEX idx_issues_case_open
+        ON review_issues(id_case, status)""")
+    connection.execute("""CREATE UNIQUE INDEX idx_review_issues_open_unique
+        ON review_issues(id_document, code, field_name)
+        WHERE status='open'""")
+    connection.execute("""CREATE TRIGGER history_manual_correction
+        AFTER INSERT ON manual_corrections
+        BEGIN
+            INSERT INTO case_history_events(id_case, id_document, event_type, details_json)
+            SELECT issue.id_case, issue.id_document, 'manual_correction',
+                json_object('issue_id', issue.id_issue, 'field', issue.field_name,
+                            'code', issue.code, 'from', NEW.original_value,
+                            'to', NEW.corrected_value, 'reason', NEW.reason,
+                            'by', NEW.resolved_by)
+            FROM review_issues AS issue WHERE issue.id_issue = NEW.id_issue;
+        END""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS reading_observations (
+        id_observation INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_propietario INTEGER NOT NULL REFERENCES propietarios(id_propietario),
+        tipo TEXT NOT NULL,
+        fecha_lectura TEXT NOT NULL,
+        observed_value REAL NOT NULL,
+        source_path TEXT NOT NULL,
+        id_document INTEGER REFERENCES source_documents(id_document) ON DELETE SET NULL,
+        status TEXT NOT NULL CHECK(status IN ('observed','carried_forward','conflict','review_required')),
+        effective_reading_id INTEGER REFERENCES lecturas_vecino(id_lectura) ON DELETE SET NULL,
+        previous_reading_id INTEGER REFERENCES lecturas_vecino(id_lectura) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_reading_observations_owner_service_date
+        ON reading_observations(id_propietario, tipo, fecha_lectura)""")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -573,6 +630,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     7: _migration_7,
     8: _migration_8,
     9: _migration_9,
+    10: _migration_10,
 }
 
 
@@ -580,6 +638,16 @@ def migrate(connection: sqlite3.Connection) -> int:
     """Aplica en orden las migraciones pendientes o revierte todo el lote."""
     if connection.in_transaction:
         connection.commit()
+
+    applied = {
+        row[0] for row in connection.execute("SELECT version FROM schema_migrations")
+    } if connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    ).fetchone() else set()
+    rebuild_review_issues = 10 not in applied
+    foreign_keys_enabled = bool(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+    if rebuild_review_issues and foreign_keys_enabled:
+        connection.execute("PRAGMA foreign_keys = OFF")
 
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -605,6 +673,9 @@ def migrate(connection: sqlite3.Connection) -> int:
     except Exception:
         connection.rollback()
         raise
+    finally:
+        if rebuild_review_issues and foreign_keys_enabled:
+            connection.execute("PRAGMA foreign_keys = ON")
 
     row = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
     return int(row[0] or 0)

@@ -264,7 +264,7 @@ def create_missing_field_issues(connection: sqlite3.Connection, case_id: int,
                     """INSERT INTO review_issues
                        (id_case, id_document, code, field_name, detected_value, message, status, origin)
                        VALUES (?, ?, ?, ?, NULL, ?, 'open', 'automatic')
-                       ON CONFLICT(id_document, code, field_name, status) DO NOTHING""",
+                       ON CONFLICT(id_document, code, field_name) WHERE status='open' DO NOTHING""",
                     (
                         case_id, document_id, _MISSING_FIELD_CODE, field_name,
                         f"Falta el campo requerido: {field_name}",
@@ -327,7 +327,7 @@ def _create_review_issue(
             """INSERT INTO review_issues
                (id_case,id_document,code,field_name,detected_value,message,status,origin)
                VALUES (?,?,?,?,?,?,'open',?)
-               ON CONFLICT(id_document,code,field_name,status) DO NOTHING""",
+               ON CONFLICT(id_document,code,field_name) WHERE status='open' DO NOTHING""",
             (
                 case_id,
                 document_id,
