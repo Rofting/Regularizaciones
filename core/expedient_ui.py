@@ -127,6 +127,80 @@ def show_issue_context(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     )
 
 
+def _history_event_label(event_type: str, details_json: str) -> str:
+    """Turn durable audit events into concise labels for the period review."""
+    try:
+        details = json.loads(details_json or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    labels = {
+        "source_registered": "Fuente archivada",
+        "source_status_changed": "Estado de fuente actualizado",
+        "manual_correction": "Decisión registrada",
+        "case_status_changed": "Estado del expediente actualizado",
+        "excel_export_recorded": "Excel oficial registrado",
+        "letters_recorded": "Lote de cartas registrado",
+    }
+    title = labels.get(event_type, event_type.replace("_", " ").capitalize())
+    meaningful = [
+        str(details[key]) for key in ("name", "field", "reason", "to", "status", "output_path")
+        if details.get(key) not in (None, "")
+    ]
+    return title + (" · " + " · ".join(meaningful) if meaningful else "")
+
+
+def open_case_history_dialog(app: "AppGestionFincas", case_id: int) -> None:
+    """Lets a manager audit any selected historical period without reprocessing it."""
+    dialog = _dialog(app, "Historial del período", 820, 620)
+    panel = ctk.CTkScrollableFrame(dialog)
+    panel.pack(fill="both", expand=True, padx=16, pady=16)
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        rows = connection.execute(
+            """SELECT h.event_type,h.details_json,h.created_at,d.original_name
+                 FROM case_history_events h
+                 LEFT JOIN source_documents d ON d.id_document=h.id_document
+                WHERE h.id_case=?
+                ORDER BY h.created_at DESC,h.id_event DESC""",
+            (case_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    if not rows:
+        ctk.CTkLabel(
+            panel,
+            text=("Todavía no hay eventos del período. Las fuentes, lecturas y resultados "
+                  "se conservarán aquí a medida que se incorporen o validen."),
+            justify="left", wraplength=720, text_color=C["texto_sec"],
+        ).pack(anchor="w", padx=14, pady=18)
+        return
+    ctk.CTkLabel(
+        panel,
+        text="Historial inmutable del expediente",
+        font=UIM.fuente(17, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=12, pady=(10, 3))
+    ctk.CTkLabel(
+        panel,
+        text=("Incluye fuentes archivadas, decisiones manuales y salidas. "
+              "Las lecturas originales no se sustituyen."),
+        wraplength=720, justify="left", text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=12, pady=(0, 12))
+    for row in rows:
+        card = ctk.CTkFrame(panel, fg_color=C["panel"], corner_radius=10,
+                            border_width=1, border_color=C["borde"])
+        card.pack(fill="x", padx=8, pady=4)
+        ctk.CTkLabel(
+            card, text=_history_event_label(row["event_type"], row["details_json"]),
+            font=UIM.fuente(11, "bold"), text_color=C["texto"], anchor="w",
+            wraplength=670,
+        ).pack(fill="x", padx=12, pady=(9, 2))
+        source = f" · {row['original_name']}" if row["original_name"] else ""
+        ctk.CTkLabel(
+            card, text=f"{row['created_at']}{source}", font=UIM.fuente(10),
+            text_color=C["texto_sec"], anchor="w", wraplength=670,
+        ).pack(fill="x", padx=12, pady=(0, 9))
+
+
 @dataclass(frozen=True)
 class GuidedStep:
     """One visible step in the guided regularization workspace."""
@@ -145,6 +219,27 @@ class GuidedWorkspaceState:
     headline: str
     detail: str
     steps: tuple[GuidedStep, ...]
+
+
+@dataclass(frozen=True)
+class ReviewSummary:
+    """Separates stored technical checks from the decisions a manager must take."""
+
+    technical_count: int
+    groups: tuple[dict[str, object], ...]
+
+    @property
+    def actionable_count(self) -> int:
+        return len(self.groups)
+
+
+def review_summary(issues: Sequence[ReviewIssue]) -> ReviewSummary:
+    """Collapse repeatable checks without hiding their underlying audit rows."""
+    items = tuple(issues)
+    return ReviewSummary(
+        technical_count=len(items),
+        groups=group_review_issues(items),
+    )
 
 
 _GUIDED_STEP_LABELS = (
@@ -166,7 +261,7 @@ def guided_workspace_state(
     elif open_issue_count:
         active_step, next_action = "validar", "resolver_incidencias"
         headline = "Resuelve las incidencias"
-        detail = f"Hay {open_issue_count} dato(s) pendiente(s) antes de continuar."
+        detail = f"Hay {open_issue_count} decisión(es) pendiente(s) antes de continuar."
     elif case_status in {"ready_for_calculation"}:
         active_step, next_action = "reparto", "generar_excel"
         headline = "Genera el Excel oficial"

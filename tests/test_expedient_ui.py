@@ -452,6 +452,28 @@ class SourceActionsTest(unittest.TestCase):
 
 
 class GuidedWorkspaceStateTest(unittest.TestCase):
+    def test_review_summary_treats_resets_from_one_source_as_one_action(self):
+        issues = tuple(
+            expedient_ui.ReviewIssue(
+                id_issue=index,
+                id_case=1,
+                id_document=9,
+                code="COUNTER_RESET",
+                field_name=f"reading.{index}.ACS",
+                detected_value=None,
+                message="El contador disminuye",
+                archived_path=Path("lecturas_anuales.xls"),
+                status="open",
+            )
+            for index in range(1, 51)
+        )
+
+        summary = expedient_ui.review_summary(issues)
+
+        self.assertEqual(50, summary.technical_count)
+        self.assertEqual(1, summary.actionable_count)
+        self.assertEqual(50, summary.groups[0]["count"])
+
     def test_under_review_without_issues_routes_to_source_confirmation(self):
         """Guards against a silent attempt to generate Excel before applying sources."""
         state = expedient_ui.guided_workspace_state(
@@ -485,6 +507,7 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
             ("validar", "resolver_incidencias"),
             (state.active_step, state.next_action),
         )
+        self.assertEqual("Hay 2 decisión(es) pendiente(s) antes de continuar.", state.detail)
 
     def test_ready_case_routes_to_excel_generation(self):
         state = expedient_ui.guided_workspace_state(

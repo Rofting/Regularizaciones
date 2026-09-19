@@ -72,7 +72,7 @@ class DatabaseMigrationTest(unittest.TestCase):
 
         self.assertTrue(EXPECTED_TABLES.issubset(tables))
         self.assertIn("email", columns)
-        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8, 9], [row[0] for row in versions])
         self.assertEqual(
             [
                 "acs_fixed",
@@ -100,8 +100,73 @@ class DatabaseMigrationTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM regularization_concepts"
             ).fetchone()[0]
 
-        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8, 9], [row[0] for row in versions])
         self.assertEqual(8, concept_count)
+
+    def test_migration_nine_creates_an_immutable_case_history(self):
+        with redirect_stdout(StringIO()):
+            gestor_bd.crear_bd(str(self.database_path))
+
+        with closing(self._connect()) as connection:
+            tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(case_history_events)"
+                )
+            }
+            triggers = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                )
+            }
+
+        self.assertIn("case_history_events", tables)
+        self.assertTrue({"id_case", "id_document", "event_type", "details_json", "created_at"}.issubset(columns))
+        self.assertTrue({
+            "history_source_registered",
+            "history_source_status_changed",
+            "history_manual_correction",
+            "history_case_status_changed",
+        }.issubset(triggers))
+
+    def test_migration_nine_backfills_source_history_for_existing_periods(self):
+        import db_migrations
+
+        with closing(self._connect()) as connection:
+            for statement in gestor_bd.TABLAS:
+                connection.execute(statement)
+            connection.execute(
+                "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT)"
+            )
+            connection.commit()
+            for version in range(1, 9):
+                db_migrations.MIGRATIONS[version](connection)
+            connection.execute("INSERT INTO comunidades(codigo,nombre) VALUES ('HIS','Histórica')")
+            connection.execute(
+                "INSERT INTO periodos(id_comunidad,nombre,fecha_inicio,fecha_fin) VALUES (1,'2024','2024-01-01','2024-12-31')"
+            )
+            connection.execute(
+                """INSERT INTO regularization_cases(id_comunidad,id_periodo,nombre,fecha_inicio,fecha_fin,estado)
+                   VALUES (1,1,'2024','2024-01-01','2024-12-31','ready_for_calculation')"""
+            )
+            connection.execute(
+                """INSERT INTO source_documents(id_case,original_name,archived_path,sha256,document_kind,status)
+                   VALUES (1,'factura.pdf','archivo/factura.pdf','hash-historico','invoice','validated')"""
+            )
+            connection.commit()
+
+            db_migrations.MIGRATIONS[9](connection)
+            events = connection.execute(
+                "SELECT event_type, details_json FROM case_history_events WHERE id_case=1"
+            ).fetchall()
+
+        self.assertEqual(1, len(events))
+        self.assertEqual("source_registered", events[0][0])
+        self.assertIn("factura.pdf", events[0][1])
 
     def test_migration_two_creates_case_and_review_tables(self):
         with closing(self._connect()) as connection:
@@ -138,7 +203,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 8)
+        self.assertEqual(version, 9)
         self.assertTrue({
             "regularization_cases", "source_documents", "extraction_candidates",
             "review_issues", "manual_corrections",
@@ -158,13 +223,13 @@ class DatabaseMigrationTest(unittest.TestCase):
             for statement in gestor_bd.TABLAS:
                 connection.execute(statement)
             connection.commit()
-            self.assertEqual(8, gestor_bd.aplicar_migraciones(connection))
-            self.assertEqual(8, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(9, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(9, gestor_bd.aplicar_migraciones(connection))
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
 
-        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], [row[0] for row in versions])
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8, 9], [row[0] for row in versions])
 
     def test_migration_three_links_cases_and_creates_export_audit_tables(self):
         with closing(self._connect()) as connection:
@@ -192,7 +257,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(8, version)
+        self.assertEqual(9, version)
         self.assertTrue({
             "invoice_components",
             "period_parameters",

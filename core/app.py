@@ -365,7 +365,7 @@ class AppGestionFincas(ctk.CTk):
             self.botones[name] = row
         ctk.CTkFrame(nav, fg_color=C["borde"], height=1).pack(fill="x", padx=16, pady=16)
         ctk.CTkLabel(nav, text="OTRAS ACCIONES", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(0, 7))
-        for name, command in (("Regularización guiada", self._accion_regularizacion_guiada), ("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
+        for name, command in (("Regularización guiada", self._accion_regularizacion_guiada), ("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Historial del período", self._accion_ver_historial_periodo), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
             button = ctk.CTkButton(nav, text=name, command=command, height=32, corner_radius=8, anchor="w", font=UIM.fuente(11), fg_color="transparent", hover_color=C["acento_suave"], text_color=C["texto_sec"])
             button.pack(fill="x", padx=12, pady=1)
             self.botones[name] = button
@@ -1206,6 +1206,16 @@ class AppGestionFincas(ctk.CTk):
         self._refrescar_bandeja_incidencias(issues)
         ui.open_issue_dialog(self, issues[0])
 
+    def _accion_ver_historial_periodo(self):
+        if not self.id_expediente:
+            self.log("Selecciona un expediente para consultar su historial.", "aviso")
+            return
+        ui = MOD.get("expedient_ui")
+        if ui is None:
+            self.log("No está disponible el historial del expediente.", "error")
+            return
+        ui.open_case_history_dialog(self, self.id_expediente)
+
     def _refrescar_expediente(self):
         service = MOD.get("expedient_service")
         review = MOD.get("document_review")
@@ -1227,7 +1237,9 @@ class AppGestionFincas(ctk.CTk):
                 connection, self.id_expediente
             )
             issues = review.list_open_issues(connection, self.id_expediente)
-            open_count = len(issues)
+            review_summary = MOD.get("expedient_ui").review_summary(issues)
+            open_count = review_summary.actionable_count
+            technical_issue_count = review_summary.technical_count
             workflow = MOD.get("case_workflow_actions")
             if workflow:
                 try:
@@ -1266,7 +1278,8 @@ class AppGestionFincas(ctk.CTk):
         status_label = status_labels.get(case.status, case.status)
         summary = (
             f"{case.name}\n{date_range}\n{document_count} fuente(s) · "
-            f"Perfil: {profile_label}\n{open_count} incidencia(s) abierta(s)\n"
+            f"Perfil: {profile_label}\n{open_count} decisión(es) pendiente(s)"
+            f" · {technical_issue_count} comprobación(es) registrada(s)\n"
             f"Estado: {status_label}"
         )
         self._resumen_ejercicio(summary)
@@ -1284,7 +1297,7 @@ class AppGestionFincas(ctk.CTk):
                 "perfil": profile_label,
                 "fuentes": str(document_count),
                 "estado": status_label,
-                "incidencias": f"{open_count} abiertas",
+                "incidencias": f"{open_count} decisión(es)",
             }
             for key, value in values.items():
                 if key in metrics:
@@ -1301,12 +1314,17 @@ class AppGestionFincas(ctk.CTk):
         self.after(0, update_metrics)
         self.log(
             f"{case.name} · {date_range} · {document_count} fuente(s) · "
-            f"estado {case.status} · {open_count} incidencia(s) abierta(s)",
+            f"estado {case.status} · {open_count} decisión(es) pendiente(s) · "
+            f"{technical_issue_count} comprobación(es) registrada(s)",
             "info",
         )
         if open_count:
             self._actualizar_etapa("validacion")
-            self.log(f"{open_count} incidencia(s) por resolver antes de generar el Excel oficial", "aviso")
+            self.log(
+                f"{open_count} decisión(es) por resolver antes de generar el Excel oficial "
+                f"({technical_issue_count} comprobación(es) agrupada(s))",
+                "aviso",
+            )
         elif case.status == "ready_for_calculation":
             self._actualizar_etapa("calculo")
             self.log("Listo para generar el Excel oficial", "ok")
@@ -1360,7 +1378,10 @@ class AppGestionFincas(ctk.CTk):
                 return
             for child in tray.winfo_children():
                 child.destroy()
-            self.lbl_incidencias_bandeja.configure(text=str(len(issues)))
+            expedient_ui = MOD.get("expedient_ui")
+            summary = expedient_ui.review_summary(issues)
+            groups = summary.groups
+            self.lbl_incidencias_bandeja.configure(text=str(summary.actionable_count))
 
             if not self.id_expediente:
                 ctk.CTkLabel(
@@ -1382,16 +1403,19 @@ class AppGestionFincas(ctk.CTk):
                 ).pack(anchor="w", padx=9, pady=12)
                 return
 
-            expedient_ui = MOD.get("expedient_ui")
-            visible_issues, current_page, total_pages = expedient_ui.issue_page(
-                issues, self._issues_page,
+            visible_groups, current_page, total_pages = expedient_ui.issue_page(
+                groups, self._issues_page,
             )
             self._issues_page = current_page
             controls = ctk.CTkFrame(tray, fg_color="transparent")
             controls.pack(fill="x", padx=4, pady=(2, 6))
             ctk.CTkLabel(
                 controls,
-                text=f"{len(issues)} pendientes · Página {current_page}/{total_pages}",
+                text=(
+                    f"{summary.actionable_count} decisión(es) · "
+                    f"{summary.technical_count} comprobación(es) · "
+                    f"Página {current_page}/{total_pages}"
+                ),
                 font=UIM.fuente(10), text_color=C["texto_sec"],
             ).pack(side="left")
             if total_pages > 1:
@@ -1410,7 +1434,10 @@ class AppGestionFincas(ctk.CTk):
                     **UIM.secondary_button_kwargs(),
                 ).pack(side="right")
 
-            for issue in visible_issues:
+            for grouped in visible_groups:
+                issue = grouped["representative"]
+                reset_count = int(grouped["count"])
+                is_reset_group = issue.code == "COUNTER_RESET" and reset_count > 1
                 row = ctk.CTkFrame(
                     tray,
                     fg_color=C["panel"],
@@ -1428,14 +1455,22 @@ class AppGestionFincas(ctk.CTk):
                 detail.pack(side="left", fill="both", expand=True, pady=7)
                 ctk.CTkLabel(
                     detail,
-                    text=issue.field_name,
+                    text=(
+                        f"{reset_count} reinicios de contador por revisar"
+                        if is_reset_group else issue.field_name
+                    ),
                     font=UIM.fuente(11, "bold"),
                     text_color=C["texto"],
                     anchor="w",
                 ).pack(fill="x")
                 ctk.CTkLabel(
                     detail,
-                    text=f"{issue.archived_path.name} · {issue.message}",
+                    text=(
+                        f"{issue.archived_path.name} · Se aplica un único criterio temporal "
+                        "a todas las viviendas de este informe; las lecturas originales "
+                        "y la decisión se conservan en el histórico."
+                        if is_reset_group else f"{issue.archived_path.name} · {issue.message}"
+                    ),
                     font=UIM.fuente(10),
                     text_color=C["texto_sec"],
                     anchor="w",
@@ -1444,6 +1479,15 @@ class AppGestionFincas(ctk.CTk):
                 ).pack(fill="x", pady=(2, 0))
                 actions = ctk.CTkFrame(row, fg_color="transparent")
                 actions.pack(side="right", padx=8, pady=7)
+                if is_reset_group:
+                    resolve_command = lambda current=issue, count=reset_count: expedient_ui.open_counter_reset_carry_forward_dialog(
+                        self, current.id_case, current.id_document, count,
+                        current.archived_path.name,
+                    )
+                else:
+                    resolve_command = lambda current=issue: expedient_ui.open_issue_dialog(
+                        self, current
+                    )
                 ctk.CTkButton(
                     actions,
                     text="Abrir archivo",
@@ -1461,15 +1505,13 @@ class AppGestionFincas(ctk.CTk):
                 ).pack(pady=(0, 4))
                 ctk.CTkButton(
                     actions,
-                    text="Resolver",
+                    text="Revisar grupo" if is_reset_group else "Resolver",
                     width=86,
                     height=28,
                     corner_radius=7,
                     fg_color=C["primario"],
                     hover_color=C["primario_hover"],
-                    command=lambda current=issue: expedient_ui.open_issue_dialog(
-                        self, current
-                    ),
+                    command=resolve_command,
                 ).pack()
 
         self.after(0, update_tray)

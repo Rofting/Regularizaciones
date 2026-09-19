@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 
 MIGRATION_1_SQL = (
@@ -449,6 +449,120 @@ def _migration_8(connection: sqlite3.Connection) -> None:
         FROM lecturas_vecino l JOIN reading_periods p ON p.id_lectura=l.id_lectura""")
 
 
+def _migration_9(connection: sqlite3.Connection) -> None:
+    """Keep an immutable, per-case timeline without duplicating source data."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS case_history_events (
+        id_event INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_case INTEGER NOT NULL REFERENCES regularization_cases(id_case) ON DELETE CASCADE,
+        id_document INTEGER REFERENCES source_documents(id_document) ON DELETE SET NULL,
+        event_type TEXT NOT NULL,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_case_history_case_date
+        ON case_history_events(id_case, created_at DESC)""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS history_source_registered
+        AFTER INSERT ON source_documents
+        BEGIN
+            INSERT INTO case_history_events(id_case, id_document, event_type, details_json)
+            VALUES (NEW.id_case, NEW.id_document, 'source_registered',
+                json_object('name', NEW.original_name, 'kind', NEW.document_kind,
+                            'sha256', NEW.sha256, 'status', NEW.status));
+        END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS history_source_status_changed
+        AFTER UPDATE OF status ON source_documents
+        WHEN OLD.status <> NEW.status
+        BEGIN
+            INSERT INTO case_history_events(id_case, id_document, event_type, details_json)
+            VALUES (NEW.id_case, NEW.id_document, 'source_status_changed',
+                json_object('from', OLD.status, 'to', NEW.status));
+        END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS history_manual_correction
+        AFTER INSERT ON manual_corrections
+        BEGIN
+            INSERT INTO case_history_events(id_case, id_document, event_type, details_json)
+            SELECT issue.id_case, issue.id_document, 'manual_correction',
+                json_object('issue_id', issue.id_issue, 'field', issue.field_name,
+                            'code', issue.code, 'from', NEW.original_value,
+                            'to', NEW.corrected_value, 'reason', NEW.reason,
+                            'by', NEW.resolved_by)
+            FROM review_issues AS issue WHERE issue.id_issue = NEW.id_issue;
+        END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS history_case_status_changed
+        AFTER UPDATE OF estado ON regularization_cases
+        WHEN OLD.estado <> NEW.estado
+        BEGIN
+            INSERT INTO case_history_events(id_case, event_type, details_json)
+            VALUES (NEW.id_case, 'case_status_changed',
+                json_object('from', OLD.estado, 'to', NEW.estado));
+        END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS history_export_created
+        AFTER INSERT ON excel_export_runs
+        BEGIN
+            INSERT INTO case_history_events(id_case, event_type, details_json)
+            VALUES (NEW.id_case, 'excel_export_recorded',
+                json_object('export_run_id', NEW.id_export_run, 'status', NEW.status,
+                            'output_path', NEW.output_path));
+        END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS history_letter_run_created
+        AFTER INSERT ON letter_generation_runs
+        BEGIN
+            INSERT INTO case_history_events(id_case, event_type, details_json)
+            VALUES (NEW.id_case, 'letters_recorded',
+                json_object('letter_run_id', NEW.id_letter_run, 'status', NEW.status,
+                            'output_path', NEW.output_path));
+        END""")
+    # Databases created before this migration already retain their canonical
+    # rows.  Seed their timeline once so historical periods are equally
+    # reviewable; the NOT EXISTS guards make this safe on every later startup.
+    connection.execute("""INSERT INTO case_history_events
+            (id_case, id_document, event_type, details_json, created_at)
+        SELECT d.id_case, d.id_document, 'source_registered',
+               json_object('name', d.original_name, 'kind', d.document_kind,
+                           'sha256', d.sha256, 'status', d.status), d.created_at
+          FROM source_documents d
+         WHERE NOT EXISTS (
+             SELECT 1 FROM case_history_events h
+              WHERE h.id_document=d.id_document AND h.event_type='source_registered'
+         )""")
+    connection.execute("""INSERT INTO case_history_events
+            (id_case, id_document, event_type, details_json, created_at)
+        SELECT i.id_case, i.id_document, 'manual_correction',
+               json_object('issue_id', i.id_issue, 'field', i.field_name,
+                           'code', i.code, 'from', c.original_value,
+                           'to', c.corrected_value, 'reason', c.reason,
+                           'by', c.resolved_by), c.created_at
+          FROM manual_corrections c
+          JOIN review_issues i ON i.id_issue=c.id_issue
+         WHERE NOT EXISTS (
+             SELECT 1 FROM case_history_events h
+              WHERE h.event_type='manual_correction'
+                AND json_extract(h.details_json, '$.issue_id')=i.id_issue
+         )""")
+    connection.execute("""INSERT INTO case_history_events
+            (id_case, event_type, details_json, created_at)
+        SELECT e.id_case, 'excel_export_recorded',
+               json_object('export_run_id', e.id_export_run, 'status', e.status,
+                           'output_path', e.output_path), e.created_at
+          FROM excel_export_runs e
+         WHERE NOT EXISTS (
+             SELECT 1 FROM case_history_events h
+              WHERE h.id_case=e.id_case AND h.event_type='excel_export_recorded'
+                AND json_extract(h.details_json, '$.export_run_id')=e.id_export_run
+         )""")
+    connection.execute("""INSERT INTO case_history_events
+            (id_case, event_type, details_json, created_at)
+        SELECT l.id_case, 'letters_recorded',
+               json_object('letter_run_id', l.id_letter_run, 'status', l.status,
+                           'output_path', l.output_path), l.created_at
+          FROM letter_generation_runs l
+         WHERE NOT EXISTS (
+             SELECT 1 FROM case_history_events h
+              WHERE h.id_case=l.id_case AND h.event_type='letters_recorded'
+                AND json_extract(h.details_json, '$.letter_run_id')=l.id_letter_run
+         )""")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -458,6 +572,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     6: _migration_6,
     7: _migration_7,
     8: _migration_8,
+    9: _migration_9,
 }
 
 
