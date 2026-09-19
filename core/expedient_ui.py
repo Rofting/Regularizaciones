@@ -1855,11 +1855,11 @@ def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                     )
                 elif issue.code == "READING_ZERO_REVIEW" and reset_count > 1:
                     message = (
-                        f"Se detectaron {reset_count} lecturas iniciales a 0 en el mismo informe. "
-                        "Confirma una sola vez si esos ceros son valores reales de inicio; cada lectura "
-                        "y la decisión quedarán conservadas en el histórico."
+                        f"Se detectaron {reset_count} lecturas a 0 en el mismo informe. "
+                        "Se conserva una lectura canónica ya existente; si no la hay, el cero se confirma "
+                        "como lectura inicial. Cada decisión queda auditada."
                     )
-                    action_text = f"Confirmar ceros iniciales ({reset_count})"
+                    action_text = f"Aplicar criterio a ceros ({reset_count})"
                     action = lambda selected=issue, count=reset_count: (
                         dialog.destroy(),
                         open_initial_zero_confirmation_dialog(
@@ -1992,24 +1992,23 @@ def open_initial_zero_confirmation_dialog(
     app: "AppGestionFincas", case_id: int, document_id: int, count: int, source_name: str,
 ) -> None:
     """Pide una única confirmación humana para ceros iniciales de una fuente."""
-    dialog = _dialog(app, "Confirmar lecturas iniciales a 0", 700, 430)
+    dialog = _dialog(app, "Resolver lecturas a 0", 700, 430)
     panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16)
     panel.pack(fill="both", expand=True, padx=18, pady=18)
     ctk.CTkLabel(
-        panel, text="Confirmar ceros iniciales", font=UIM.fuente(20, "bold"), text_color=C["texto"],
+        panel, text="Aplicar criterio a las lecturas a 0", font=UIM.fuente(20, "bold"), text_color=C["texto"],
     ).pack(anchor="w", padx=22, pady=(22, 6))
     ctk.CTkLabel(
         panel,
         text=(
-            f"{source_name} contiene {count} lecturas a 0 sin histórico previo. "
-            "Úsalo sólo si el archivo representa la primera lectura fiable de esos contadores. "
-            "Se guardará cada cero como lectura real inicial y las lecturas posteriores del archivo "
-            "podrán continuar normalmente."
+            f"{source_name} contiene {count} lecturas a 0. Si ya hay una lectura canónica fiable "
+            "para esa fecha, se conservará; si no existe, el cero se guardará como lectura inicial real. "
+            "Las lecturas posteriores del archivo podrán continuar normalmente."
         ),
         wraplength=600, justify="left", text_color=C["texto_sec"],
     ).pack(anchor="w", padx=22, pady=(0, 14))
     reason = _packed_field(panel, "Motivo y fuente consultada")
-    reason.insert(0, "Primer informe fiable; los contadores parten de lectura 0.")
+    reason.insert(0, "Ceros contrastados; se conserva la lectura canónica existente cuando la haya.")
 
     actions = ctk.CTkFrame(panel, fg_color="transparent")
     actions.pack(fill="x", padx=22, pady=(22, 18))
@@ -2023,7 +2022,7 @@ def open_initial_zero_confirmation_dialog(
             return
         rationale = reason.get().strip()
         if not rationale:
-            messagebox.showwarning("Motivo requerido", "Indica por qué estos ceros son lecturas iniciales.", parent=dialog)
+            messagebox.showwarning("Motivo requerido", "Indica el criterio aplicado a estos ceros.", parent=dialog)
             return
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
@@ -2037,7 +2036,7 @@ def open_initial_zero_confirmation_dialog(
                 ready = document_review.validate_case_ready(connection, case_id)
         except Exception as error:
             connection.rollback()
-            messagebox.showwarning("No se pudieron confirmar los ceros", str(error), parent=dialog)
+            messagebox.showwarning("No se pudo aplicar el criterio", str(error), parent=dialog)
             return
         finally:
             connection.close()
@@ -2045,12 +2044,12 @@ def open_initial_zero_confirmation_dialog(
         app._refrescar_lista_expedientes(select_case_id=case_id)
         app._refrescar_expediente()
         if ready is not None and ready.status == "ready_for_calculation":
-            app.log(f"Confirmadas {resolved} lecturas iniciales a 0. Listo para cálculo.", "ok")
+            app.log(f"Criterio aplicado a {resolved} lecturas a 0. Listo para cálculo.", "ok")
         else:
-            app.log(f"Confirmadas {resolved} lecturas iniciales a 0. Quedan {remaining} incidencia(s).", "aviso")
+            app.log(f"Criterio aplicado a {resolved} lecturas a 0. Quedan {remaining} incidencia(s).", "aviso")
 
     ctk.CTkButton(
-        actions, text=f"Confirmar los {count} ceros", command=confirm_zeroes,
+        actions, text=f"Aplicar a los {count} ceros", command=confirm_zeroes,
         height=38, corner_radius=9, fg_color=C["exito"], hover_color=C["exito_hover"],
         font=UIM.fuente(12, "bold"),
     ).pack(side="right", padx=(0, 8))

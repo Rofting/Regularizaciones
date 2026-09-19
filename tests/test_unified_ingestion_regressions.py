@@ -350,6 +350,63 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             )],
         )
 
+    def test_confirming_zeroes_preserves_an_existing_canonical_reading(self):
+        self.connection.execute(
+            """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'B','Vecino B')""",
+            (self.community_id,),
+        )
+        owner_id = self.connection.execute(
+            "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda='B'",
+            (self.community_id,),
+        ).fetchone()[0]
+        period_id = expedient_service.link_case_to_period(self.connection, self.case.id_case)
+        self.connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente)
+               VALUES (?,?,'ACS','2026-01-01',9,'real','histórico')""",
+            (owner_id, period_id),
+        )
+        self.connection.commit()
+        document = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.reading_file,
+            archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"vecinos": json.dumps([{
+                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2026-01-01",
+                "val_ant": 0, "fecha_act": "2026-01-31", "val_act": 0,
+            }])},
+            required_fields=(),
+        ).document
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        document_review.create_review_issue(
+            self.connection, self.case.id_case, document.id_document,
+            code="READING_ZERO_REVIEW", field_name="reading.B.ACS",
+            message="La lectura cero no tiene una lectura anterior fiable para conservar",
+        )
+
+        resolved = document_review.confirm_initial_zero_readings_for_source(
+            self.connection, case_id=self.case.id_case, document_id=document.id_document,
+            reason="La fuente posterior contiene 0, pero ya existe una lectura fiable", approved_by="Jose",
+        )
+
+        self.assertEqual(1, resolved)
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        self.assertEqual(
+            [("2026-01-01", 9, "real"), ("2026-01-31", 9, "estimado")],
+            [tuple(row) for row in self.connection.execute(
+                "SELECT fecha_lectura,valor_acumulado,estado FROM lecturas_vecino ORDER BY fecha_lectura"
+            )],
+        )
+        self.assertEqual(
+            [("carried_forward",), ("carried_forward",)],
+            [tuple(row) for row in self.connection.execute(
+                "SELECT status FROM reading_observations ORDER BY fecha_lectura"
+            )],
+        )
+
     def test_two_resets_in_one_source_have_independent_approval_targets(self):
         self.connection.execute("UPDATE regularization_cases SET fecha_fin='2026-02-28' WHERE id_case=?", (self.case.id_case,))
         self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))

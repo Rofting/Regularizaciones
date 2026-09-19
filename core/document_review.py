@@ -801,18 +801,18 @@ def confirm_initial_zero_readings_for_source(
             observation = connection.execute(
                 """SELECT id_observation,fecha_lectura FROM reading_observations
                    WHERE id_document=? AND id_propietario=? AND tipo=?
-                     AND observed_value=0 AND status='review_required'
+                     AND observed_value=0
                    ORDER BY fecha_lectura,id_observation LIMIT 1""",
                 (document_id, owner["id_propietario"], service),
             ).fetchone()
             if observation is None:
                 raise LookupError("No existe una observación inicial a cero pendiente")
             current = connection.execute(
-                """SELECT id_lectura,valor_acumulado FROM lecturas_vecino
+                """SELECT id_lectura,valor_acumulado,estado FROM lecturas_vecino
                    WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
                 (owner["id_propietario"], service, observation["fecha_lectura"]),
             ).fetchone()
-            if current is not None and float(current["valor_acumulado"]) != 0:
+            if current is not None and float(current["valor_acumulado"]) != 0 and current["estado"] != "real":
                 raise ValueError("Ya existe una lectura canónica distinta de cero para esta fecha")
             if current is None:
                 cursor = connection.execute(
@@ -828,23 +828,27 @@ def confirm_initial_zero_readings_for_source(
                     ),
                 )
                 reading_id = int(cursor.lastrowid)
+                observation_status = "observed"
+                corrected_value = "0"
             else:
                 reading_id = int(current["id_lectura"])
+                observation_status = "observed" if float(current["valor_acumulado"]) == 0 else "carried_forward"
+                corrected_value = _decimal_text(Decimal(str(current["valor_acumulado"])))
             connection.execute(
                 "INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
                 (reading_id, period_id),
             )
             connection.execute(
                 """UPDATE reading_observations
-                   SET status='observed',effective_reading_id=?,previous_reading_id=NULL
+                   SET status=?,effective_reading_id=?,previous_reading_id=NULL
                    WHERE id_observation=?""",
-                (reading_id, observation["id_observation"]),
+                (observation_status, reading_id, observation["id_observation"]),
             )
             connection.execute(
                 """INSERT INTO manual_corrections
                    (id_issue,original_value,corrected_value,reason,resolved_by)
                    VALUES (?,?,?,?,?)""",
-                (issue["id_issue"], "0", "0", normalized_reason, normalized_approver),
+                (issue["id_issue"], "0", corrected_value, normalized_reason, normalized_approver),
             )
             connection.execute(
                 """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')

@@ -623,7 +623,7 @@ class PackedModalLayoutTest(unittest.TestCase):
 
         self.assertFalse(grid_calls)
         self.assertIn(
-            "Confirmar los 12 ceros",
+            "Aplicar a los 12 ceros",
             [widget.options.get("text") for widget in dialog.descendants()],
         )
 

@@ -1459,7 +1459,7 @@ class AppGestionFincas(ctk.CTk):
                     text=(
                         f"{reset_count} reinicios de contador por revisar"
                         if is_reset_group else
-                        f"{reset_count} lecturas iniciales a 0 por revisar" if is_zero_group else
+                        f"{reset_count} lecturas a 0 por revisar" if is_zero_group else
                         issue.field_name
                     ),
                     font=UIM.fuente(11, "bold"),
@@ -1473,8 +1473,8 @@ class AppGestionFincas(ctk.CTk):
                         "a todas las viviendas de este informe; las lecturas originales "
                         "y la decisión se conservan en el histórico."
                         if is_reset_group else
-                        (f"{issue.archived_path.name} · Confirma una vez que los ceros son lecturas "
-                         "iniciales reales; cada observación quedará conservada en el histórico.")
+                        (f"{issue.archived_path.name} · Aplica un único criterio: se conserva la lectura "
+                         "canónica si existe; si no, el cero queda como lectura inicial auditada.")
                         if is_zero_group else f"{issue.archived_path.name} · {issue.message}"
                     ),
                     font=UIM.fuente(10),
