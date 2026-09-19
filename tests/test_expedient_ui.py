@@ -571,6 +571,63 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
         )
 
 
+class PackedModalLayoutTest(unittest.TestCase):
+    def _app_and_widgets(self):
+        grid_calls = []
+
+        class TrackingWidget(FakeWidget):
+            def grid(self, **kwargs):
+                grid_calls.append(kwargs)
+
+            def insert(self, *_args):
+                pass
+
+        dialog = TrackingWidget()
+        app = type("DialogApp", (), {
+            "_procesando": False,
+            "_preparar_dialogo": lambda _self, *_args: dialog,
+        })()
+        return app, dialog, grid_calls, TrackingWidget
+
+    def test_counter_reset_dialog_keeps_reason_and_action_in_the_packed_panel(self):
+        app, dialog, grid_calls, TrackingWidget = self._app_and_widgets()
+        with patch.object(expedient_ui.UIM, "fuente", return_value=None), patch.multiple(
+            expedient_ui.ctk,
+            CTkFrame=TrackingWidget,
+            CTkLabel=TrackingWidget,
+            CTkEntry=TrackingWidget,
+            CTkButton=TrackingWidget,
+        ):
+            expedient_ui.open_counter_reset_carry_forward_dialog(
+                app, case_id=1, document_id=2, count=50, source_name="lecturas.xls",
+            )
+
+        self.assertFalse(grid_calls)
+        self.assertIn(
+            "Aplicar a los 50 contadores",
+            [widget.options.get("text") for widget in dialog.descendants()],
+        )
+
+    def test_initial_zero_dialog_keeps_reason_and_action_in_the_packed_panel(self):
+        app, dialog, grid_calls, TrackingWidget = self._app_and_widgets()
+        with patch.object(expedient_ui.UIM, "fuente", return_value=None), patch.multiple(
+            expedient_ui.ctk,
+            CTkFrame=TrackingWidget,
+            CTkLabel=TrackingWidget,
+            CTkEntry=TrackingWidget,
+            CTkButton=TrackingWidget,
+        ):
+            expedient_ui.open_initial_zero_confirmation_dialog(
+                app, case_id=1, document_id=2, count=12, source_name="lecturas.xls",
+            )
+
+        self.assertFalse(grid_calls)
+        self.assertIn(
+            "Confirmar los 12 ceros",
+            [widget.options.get("text") for widget in dialog.descendants()],
+        )
+
+
 class WorkflowVisualStyleTest(unittest.TestCase):
     def test_secondary_button_style_is_neutral_and_bordered(self):
         style = ui_moderna.secondary_button_kwargs()

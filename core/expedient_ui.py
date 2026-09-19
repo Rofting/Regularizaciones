@@ -1515,6 +1515,28 @@ def _field(parent, label: str, row: int, *, placeholder: str = ""):
     return entry
 
 
+def _packed_field(parent, label: str, *, placeholder: str = ""):
+    """Campo apilado para paneles que ya distribuyen sus hijos con ``pack``."""
+    ctk.CTkLabel(
+        parent,
+        text=label.upper(),
+        font=UIM.fuente(10, "bold"),
+        text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=22, pady=(13, 4))
+    entry = ctk.CTkEntry(
+        parent,
+        height=38,
+        corner_radius=9,
+        border_color=C["borde"],
+        fg_color=C["panel_2"],
+        text_color=C["texto"],
+        placeholder_text=placeholder,
+        font=UIM.fuente(12),
+    )
+    entry.pack(fill="x", padx=22)
+    return entry
+
+
 def open_create_case_dialog(app: "AppGestionFincas") -> None:
     if not getattr(app, "id_comunidad", None):
         messagebox.showwarning(
@@ -1918,7 +1940,7 @@ def open_counter_reset_carry_forward_dialog(
         ),
         wraplength=600, justify="left", text_color=C["texto_sec"],
     ).pack(anchor="w", padx=22, pady=(0, 14))
-    reason = _field(panel, "Motivo y fuente consultada", 3)
+    reason = _packed_field(panel, "Motivo y fuente consultada")
     reason.insert(0, "Reinicio masivo; se conserva la última lectura válida hasta la siguiente lectura fiable.")
 
     actions = ctk.CTkFrame(panel, fg_color="transparent")
@@ -1986,7 +2008,7 @@ def open_initial_zero_confirmation_dialog(
         ),
         wraplength=600, justify="left", text_color=C["texto_sec"],
     ).pack(anchor="w", padx=22, pady=(0, 14))
-    reason = _field(panel, "Motivo y fuente consultada", 3)
+    reason = _packed_field(panel, "Motivo y fuente consultada")
     reason.insert(0, "Primer informe fiable; los contadores parten de lectura 0.")
 
     actions = ctk.CTkFrame(panel, fg_color="transparent")
