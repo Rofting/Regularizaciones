@@ -423,6 +423,23 @@ class SourceActionsTest(unittest.TestCase):
 
         review_ui.open_confirm_sources_dialog.assert_called_once_with(self.app, self.case.id_case)
 
+    def test_resolve_incidents_action_routes_initial_zeroes_to_the_grouped_view(self):
+        self.ingest()
+        document_id = self.connection.execute(
+            "SELECT id_document FROM source_documents WHERE id_case=? ORDER BY id_document LIMIT 1",
+            (self.case.id_case,),
+        ).fetchone()[0]
+        expedient_ui.document_review.create_review_issue(
+            self.connection, self.case.id_case, document_id,
+            code="READING_ZERO_REVIEW", field_name="reading.A.ACS",
+            message="La lectura cero no tiene una lectura anterior fiable para conservar",
+        )
+        review_ui = Mock()
+        with patch.dict(self.app_module.MOD, {"expedient_ui": review_ui}):
+            self.app_module.AppGestionFincas._accion_resolver_incidencias(self.app)
+
+        review_ui.open_confirm_sources_dialog.assert_called_once_with(self.app, self.case.id_case)
+
     def test_reset_cancellation_failure_and_success_preserve_or_clear_ui_at_the_right_time(self):
         from database_reset import DatabaseResetError, ResetResult
         self.assertTrue(hasattr(self.app_module.AppGestionFincas, "_accion_nueva_base_segura"))
@@ -473,6 +490,28 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
         self.assertEqual(50, summary.technical_count)
         self.assertEqual(1, summary.actionable_count)
         self.assertEqual(50, summary.groups[0]["count"])
+
+    def test_review_summary_treats_initial_zeroes_from_one_source_as_one_action(self):
+        issues = tuple(
+            expedient_ui.ReviewIssue(
+                id_issue=index,
+                id_case=1,
+                id_document=9,
+                code="READING_ZERO_REVIEW",
+                field_name=f"reading.{index}.ACS",
+                detected_value="0",
+                message="La lectura cero no tiene una lectura anterior fiable para conservar",
+                archived_path=Path("lecturas_iniciales.xls"),
+                status="open",
+            )
+            for index in range(1, 13)
+        )
+
+        summary = expedient_ui.review_summary(issues)
+
+        self.assertEqual(12, summary.technical_count)
+        self.assertEqual(1, summary.actionable_count)
+        self.assertEqual(12, summary.groups[0]["count"])
 
     def test_under_review_without_issues_routes_to_source_confirmation(self):
         """Guards against a silent attempt to generate Excel before applying sources."""

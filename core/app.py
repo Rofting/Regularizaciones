@@ -1200,7 +1200,7 @@ class AppGestionFincas(ctk.CTk):
         if not issues:
             self._accion_confirmar_fuentes()
             return
-        if any(issue.code == "COUNTER_RESET" for issue in issues):
+        if any(issue.code in {"COUNTER_RESET", "READING_ZERO_REVIEW"} for issue in issues):
             ui.open_confirm_sources_dialog(self, self.id_expediente)
             return
         self._refrescar_bandeja_incidencias(issues)
@@ -1438,6 +1438,7 @@ class AppGestionFincas(ctk.CTk):
                 issue = grouped["representative"]
                 reset_count = int(grouped["count"])
                 is_reset_group = issue.code == "COUNTER_RESET" and reset_count > 1
+                is_zero_group = issue.code == "READING_ZERO_REVIEW" and reset_count > 1
                 row = ctk.CTkFrame(
                     tray,
                     fg_color=C["panel"],
@@ -1457,7 +1458,9 @@ class AppGestionFincas(ctk.CTk):
                     detail,
                     text=(
                         f"{reset_count} reinicios de contador por revisar"
-                        if is_reset_group else issue.field_name
+                        if is_reset_group else
+                        f"{reset_count} lecturas iniciales a 0 por revisar" if is_zero_group else
+                        issue.field_name
                     ),
                     font=UIM.fuente(11, "bold"),
                     text_color=C["texto"],
@@ -1469,7 +1472,10 @@ class AppGestionFincas(ctk.CTk):
                         f"{issue.archived_path.name} · Se aplica un único criterio temporal "
                         "a todas las viviendas de este informe; las lecturas originales "
                         "y la decisión se conservan en el histórico."
-                        if is_reset_group else f"{issue.archived_path.name} · {issue.message}"
+                        if is_reset_group else
+                        (f"{issue.archived_path.name} · Confirma una vez que los ceros son lecturas "
+                         "iniciales reales; cada observación quedará conservada en el histórico.")
+                        if is_zero_group else f"{issue.archived_path.name} · {issue.message}"
                     ),
                     font=UIM.fuente(10),
                     text_color=C["texto_sec"],
@@ -1481,6 +1487,11 @@ class AppGestionFincas(ctk.CTk):
                 actions.pack(side="right", padx=8, pady=7)
                 if is_reset_group:
                     resolve_command = lambda current=issue, count=reset_count: expedient_ui.open_counter_reset_carry_forward_dialog(
+                        self, current.id_case, current.id_document, count,
+                        current.archived_path.name,
+                    )
+                elif is_zero_group:
+                    resolve_command = lambda current=issue, count=reset_count: expedient_ui.open_initial_zero_confirmation_dialog(
                         self, current.id_case, current.id_document, count,
                         current.archived_path.name,
                     )
@@ -1505,7 +1516,7 @@ class AppGestionFincas(ctk.CTk):
                 ).pack(pady=(0, 4))
                 ctk.CTkButton(
                     actions,
-                    text="Revisar grupo" if is_reset_group else "Resolver",
+                    text="Revisar grupo" if (is_reset_group or is_zero_group) else "Resolver",
                     width=86,
                     height=28,
                     corner_radius=7,

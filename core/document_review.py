@@ -7,7 +7,7 @@ from itertools import count
 from typing import Collection, Iterator, Mapping
 
 from expedient_models import RegularizationCase, ReviewIssue, review_issue_from_row
-from expedient_service import get_case, set_case_status
+from expedient_service import get_case, link_case_to_period, set_case_status
 
 
 _savepoint_counter = count()
@@ -750,6 +750,110 @@ def carry_forward_counter_resets_for_source(
                 (issue["id_issue"],),
             )
         _reapply_reviewed_document(connection, case_id, document_id)
+    return len(rows)
+
+
+def confirm_initial_zero_readings_for_source(
+    connection: sqlite3.Connection,
+    *,
+    case_id: int,
+    document_id: int,
+    reason: str,
+    approved_by: str,
+) -> int:
+    """Confirma en bloque ceros iniciales de una fuente y reanuda su aplicación."""
+    normalized_reason = reason.strip()
+    normalized_approver = approved_by.strip()
+    if not normalized_reason:
+        raise ValueError("El motivo para confirmar los ceros iniciales es obligatorio")
+    if not normalized_approver:
+        raise ValueError("La persona que confirma los ceros iniciales es obligatoria")
+
+    with _transaction(connection):
+        case = get_case(connection, case_id)
+        period_id = link_case_to_period(connection, case_id)
+        document = connection.execute(
+            "SELECT id_case,archived_path FROM source_documents WHERE id_document=?",
+            (document_id,),
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        rows = connection.execute(
+            """SELECT id_issue,field_name FROM review_issues
+               WHERE id_case=? AND id_document=? AND code='READING_ZERO_REVIEW'
+                 AND status='open' ORDER BY id_issue""",
+            (case_id, document_id),
+        ).fetchall()
+        if not rows:
+            return 0
+
+        for issue in rows:
+            match = re.fullmatch(r"reading\.(.+)\.(ACS|CALEFACCION)", str(issue["field_name"]))
+            if match is None:
+                raise LookupError("La incidencia no apunta a una lectura inicial válida")
+            property_code, service = match.groups()
+            owner = connection.execute(
+                "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda=?",
+                (case.community_id, property_code),
+            ).fetchone()
+            if owner is None:
+                raise LookupError("La vivienda de la lectura no pertenece al expediente")
+            observation = connection.execute(
+                """SELECT id_observation,fecha_lectura FROM reading_observations
+                   WHERE id_document=? AND id_propietario=? AND tipo=?
+                     AND observed_value=0 AND status='review_required'
+                   ORDER BY fecha_lectura,id_observation LIMIT 1""",
+                (document_id, owner["id_propietario"], service),
+            ).fetchone()
+            if observation is None:
+                raise LookupError("No existe una observación inicial a cero pendiente")
+            current = connection.execute(
+                """SELECT id_lectura,valor_acumulado FROM lecturas_vecino
+                   WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
+                (owner["id_propietario"], service, observation["fecha_lectura"]),
+            ).fetchone()
+            if current is not None and float(current["valor_acumulado"]) != 0:
+                raise ValueError("Ya existe una lectura canónica distinta de cero para esta fecha")
+            if current is None:
+                cursor = connection.execute(
+                    """INSERT INTO lecturas_vecino
+                       (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,
+                        metodo_estimacion,fuente,notas,approved_by,approved_at)
+                       VALUES (?,?,?,?,0,'real','confirmed_initial_zero',?,?,?,datetime('now'))""",
+                    (
+                        owner["id_propietario"], period_id, service, observation["fecha_lectura"],
+                        str(document["archived_path"]),
+                        f"Lectura inicial a 0 confirmada en bloque; motivo={normalized_reason}",
+                        normalized_approver,
+                    ),
+                )
+                reading_id = int(cursor.lastrowid)
+            else:
+                reading_id = int(current["id_lectura"])
+            connection.execute(
+                "INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+                (reading_id, period_id),
+            )
+            connection.execute(
+                """UPDATE reading_observations
+                   SET status='observed',effective_reading_id=?,previous_reading_id=NULL
+                   WHERE id_observation=?""",
+                (reading_id, observation["id_observation"]),
+            )
+            connection.execute(
+                """INSERT INTO manual_corrections
+                   (id_issue,original_value,corrected_value,reason,resolved_by)
+                   VALUES (?,?,?,?,?)""",
+                (issue["id_issue"], "0", "0", normalized_reason, normalized_approver),
+            )
+            connection.execute(
+                """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
+                   WHERE id_issue=?""",
+                (issue["id_issue"],),
+            )
+
+        from case_ingestion import apply_confirmed_source
+        apply_confirmed_source(connection, case_id, document_id)
     return len(rows)
 
 
