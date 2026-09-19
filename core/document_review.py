@@ -808,11 +808,23 @@ def confirm_initial_zero_readings_for_source(
             if observation is None:
                 raise LookupError("No existe una observación inicial a cero pendiente")
             current = connection.execute(
-                """SELECT id_lectura,valor_acumulado,estado FROM lecturas_vecino
+                """SELECT id_lectura,valor_acumulado,estado,metodo_estimacion,approved_by,approved_at
+                   FROM lecturas_vecino
                    WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
                 (owner["id_propietario"], service, observation["fecha_lectura"]),
             ).fetchone()
-            if current is not None and float(current["valor_acumulado"]) != 0 and current["estado"] != "real":
+            approved_counter_reset = current is not None and (
+                current["estado"] == "estimado"
+                and current["metodo_estimacion"] == "counter_reset_carry_forward"
+                and str(current["approved_by"] or "").strip()
+                and str(current["approved_at"] or "").strip()
+            )
+            if (
+                current is not None
+                and float(current["valor_acumulado"]) != 0
+                and current["estado"] != "real"
+                and not approved_counter_reset
+            ):
                 raise ValueError("Ya existe una lectura canónica distinta de cero para esta fecha")
             if current is None:
                 cursor = connection.execute(

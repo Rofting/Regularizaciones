@@ -350,7 +350,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             )],
         )
 
-    def test_confirming_zeroes_preserves_an_existing_canonical_reading(self):
+    def test_confirming_zeroes_preserves_an_approved_counter_reset_reading(self):
         self.connection.execute(
             """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
                VALUES (?,'B','Vecino B')""",
@@ -367,6 +367,14 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
                VALUES (?,?,'ACS','2026-01-01',9,'real','histórico')""",
             (owner_id, period_id),
         )
+        self.connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,
+                metodo_estimacion,fuente,approved_by,approved_at)
+               VALUES (?,?,'ACS','2026-01-31',9,'estimado','counter_reset_carry_forward',
+                       'informe anterior','Jose',datetime('now'))""",
+            (owner_id, period_id),
+        )
         self.connection.commit()
         document = case_ingestion.add_document_to_case(
             self.connection,
@@ -376,7 +384,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             document_kind="reading",
             candidates={"vecinos": json.dumps([{
                 "vivienda": "B", "tipo": "ACS", "fecha_ant": "2026-01-01",
-                "val_ant": 0, "fecha_act": "2026-01-31", "val_act": 0,
+                "val_ant": 9, "fecha_act": "2026-01-31", "val_act": 0,
             }])},
             required_fields=(),
         ).document
@@ -389,7 +397,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
 
         resolved = document_review.confirm_initial_zero_readings_for_source(
             self.connection, case_id=self.case.id_case, document_id=document.id_document,
-            reason="La fuente posterior contiene 0, pero ya existe una lectura fiable", approved_by="Jose",
+            reason="La fuente posterior contiene 0, pero ya existe una lectura aprobada", approved_by="Jose",
         )
 
         self.assertEqual(1, resolved)
@@ -401,7 +409,13 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             )],
         )
         self.assertEqual(
-            [("carried_forward",), ("carried_forward",)],
+            "counter_reset_carry_forward",
+            self.connection.execute(
+                "SELECT metodo_estimacion FROM lecturas_vecino WHERE fecha_lectura='2026-01-31'"
+            ).fetchone()[0],
+        )
+        self.assertEqual(
+            [("observed",), ("carried_forward",)],
             [tuple(row) for row in self.connection.execute(
                 "SELECT status FROM reading_observations ORDER BY fecha_lectura"
             )],
