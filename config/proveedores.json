@@ -242,8 +242,8 @@
       "regex": {
         "num_factura": "FACTURA\\s+N[eº°o]\\s+(?P<valor>\\S+)",
         "fecha_factura": "en su cuenta el\\s+(?P<valor>\\d{2}-\\d{2}-\\d{4})",
-        "fecha_inicio": "(?:del\\s+|Lectura\\s+anterior[^\\n]{0,64}?)(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
-        "fecha_fin": "(?:al\\s+|[UÚu]ltima\\s+lectura[^\\n]{0,64}?)(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
+        "fecha_inicio": "(?:del\\s+|Lectura\\s+anterior[\\s\\S]{0,100}?)(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
+        "fecha_fin": "(?:al\\s+|[UÚu�]ltima\\s+lectura[\\s\\S]{0,100}?)(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
         "dias_facturados": "Dias\\s+de\\s+facturacion\\s+(?P<valor>\\d+)",
         "consumo_m3": "Saneamiento\\s+\\(m[3°o]\\)\\s+(?P<valor>\\d+)",
         "termino_fijo": "Cuota fija.*?Importe.*?\\n.*?(?P<valor>[\\d\\.,]+)\\s*$",

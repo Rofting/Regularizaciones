@@ -285,6 +285,55 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual("2025-08-20", result["fecha_inicio"])
         self.assertEqual("2025-09-21", result["fecha_fin"])
 
+    def test_zaragoza_water_profile_reads_multiline_mojibake_meter_dates(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["AGUA_ZARAGOZA"]
+
+        result = lector_pdf.extraer_datos_factura(
+            "OFICINA MUNICIPAL DEL AGUA TOTAL A PAGAR 200,61 €\n"
+            "Lectura anterior (m�)\n1.445 21-09-25\n"
+            "�ltima lectura (m�)\n1.509 21-10-25",
+            config,
+        )
+
+        self.assertEqual("2025-09-21", result["fecha_inicio"])
+        self.assertEqual("2025-10-21", result["fecha_fin"])
+
+    def test_zaragoza_water_processor_retries_the_counter_region_for_required_dates(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        cover_text = (
+            "OFICINA MUNICIPAL DEL AGUA Ayuntamiento de Zaragoza "
+            "FACTURA Nº 0001 en su cuenta el 16-02-2026 "
+            "TOTAL A PAGAR 177,84"
+        )
+        counter_text = (
+            "Lectura anterior (m3) 1.509 21-10-25\n"
+            "Ultima lectura (m3) 1.569 15-11-25"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "water.pdf"
+            path.touch()
+            with (
+                mock.patch("lector_pdf.extraer_texto", return_value=cover_text),
+                mock.patch(
+                    "lector_pdf._extraer_texto_contador_agua_ocr",
+                    return_value=counter_text,
+                    create=True,
+                ) as counter_ocr,
+            ):
+                result = lector_pdf.procesar_archivo(
+                    str(path), "658", proveedores=providers,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("2025-10-21", result["datos"]["fecha_inicio"])
+        self.assertEqual("2025-11-15", result["datos"]["fecha_fin"])
+        counter_ocr.assert_called_once_with(str(path))
+
     def test_naturgy_profile_interprets_dotted_kwh_as_thousands(self):
         providers = lector_pdf.cargar_proveedores(
             str(PROJECT_ROOT / "config" / "proveedores.json")

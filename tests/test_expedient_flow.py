@@ -726,7 +726,14 @@ class ExpedientFlowTest(unittest.TestCase):
 
         self.assertEqual("reading", reanalysed[0].document.document_kind)
         self.assertEqual("reading", repeated.document.document_kind)
-        self.assertEqual(0, len(document_review.list_open_issues(self.connection, self.case.id_case)))
+        open_issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(
+            {"tipo", "fecha_inicio", "fecha_fin", "vecinos"},
+            {issue.field_name for issue in open_issues},
+        )
+        self.assertNotIn(
+            "document_kind", {issue.field_name for issue in open_issues},
+        )
         self.assertEqual(
             [(classification_issue.id_issue, "resolved")],
             [tuple(row) for row in self.connection.execute(
@@ -769,7 +776,15 @@ class ExpedientFlowTest(unittest.TestCase):
 
         self.assertEqual("reading", reanalysed[0].document.document_kind)
         self.assertEqual("reading", repeated.document.document_kind)
-        self.assertEqual((), document_review.list_open_issues(self.connection, self.case.id_case))
+        self.assertEqual(
+            {"tipo", "fecha_inicio", "fecha_fin", "vecinos"},
+            {
+                issue.field_name
+                for issue in document_review.list_open_issues(
+                    self.connection, self.case.id_case,
+                )
+            },
+        )
         self.assertEqual("reading", self.connection.execute(
             "SELECT document_kind FROM source_documents WHERE id_document = ?",
             (result.document.id_document,),

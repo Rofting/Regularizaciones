@@ -90,26 +90,61 @@ def _required_fields_for_kind(analysis: SourceAnalysis, document_kind: str) -> t
     return tuple(required_by_kind.get(document_kind, ()))
 
 
-def _replace_unvalidated_candidates_not_in_analysis(
+def _is_unmistakable_invoice(analysis: SourceAnalysis, candidates: Mapping[str, str | None]) -> bool:
+    """Exige evidencia completa antes de corregir una clasificación manual."""
+    if analysis.kind != "invoice" or analysis.confidence.strip().lower() != "high":
+        return False
+    if not candidates.get("proveedor") or candidates.get("vecinos") or candidates.get("propietarios"):
+        return False
+    for field_name in ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"):
+        value = candidates.get(field_name)
+        if value is None or not str(value).strip():
+            return False
+        try:
+            document_review.validate_candidate_value(field_name, str(value))
+        except ValueError:
+            return False
+    return True
+
+
+def _recover_invalid_confirmed_candidates(
     connection: sqlite3.Connection,
+    case_id: int,
     document_id: int,
+    analysis: SourceAnalysis,
     candidates: Mapping[str, str | None],
 ) -> None:
-    """Evita que valores automáticos obsoletos bloqueen una nueva revisión."""
-    candidate_names = {field.strip() for field in candidates}
+    """Recupera sólo valores manuales inválidos con una extracción fiable."""
+    if analysis.confidence.strip().lower() != "high":
+        return
     rows = connection.execute(
-        """SELECT field_name FROM extraction_candidates
-           WHERE id_document = ?
-             AND validation_status NOT IN ('validated', 'rejected')""",
+        """SELECT field_name,value FROM extraction_candidates
+           WHERE id_document=? AND source='manual' AND validation_status='validated'""",
         (document_id,),
     ).fetchall()
     for row in rows:
-        if row["field_name"] not in candidate_names:
-            connection.execute(
-                """DELETE FROM extraction_candidates
-                   WHERE id_document = ? AND field_name = ?
-                     AND validation_status NOT IN ('validated', 'rejected')""",
-                (document_id, row["field_name"]),
+        field_name = row["field_name"]
+        replacement = candidates.get(field_name)
+        if replacement is None or not str(replacement).strip():
+            continue
+        try:
+            document_review.validate_candidate_value(field_name, str(row["value"] or ""))
+        except ValueError:
+            try:
+                document_review.validate_candidate_value(field_name, str(replacement))
+            except ValueError:
+                continue
+            document_review.record_automatic_candidate_recovery(
+                connection,
+                case_id,
+                document_id,
+                field_name=field_name,
+                original_value=row["value"],
+                corrected_value=str(replacement),
+                reason=(
+                    "El valor confirmado no supera la validación semántica y "
+                    "se recupera desde un análisis de confianza alta."
+                ),
             )
 
 
@@ -124,21 +159,59 @@ def _persist_analysis(
     analysis = _normalised_analysis(analysis)
     candidates = {field.strip(): value for field, value in analysis.candidates.items()}
     with _transaction(connection):
+        stored = connection.execute(
+            """SELECT document_kind,classification_confidence,source_context
+               FROM source_documents WHERE id_document=? AND id_case=?""",
+            (document.id_document, case_id),
+        ).fetchone()
+        if stored is None:
+            raise LookupError("El documento no pertenece al expediente")
         confirmed_kind = document_review.resolved_classification_kind(
             connection, document.id_document,
         )
-        effective_kind = confirmed_kind or analysis.kind.strip()
+        if (
+            confirmed_kind in {"reading", "owners"}
+            and _is_unmistakable_invoice(analysis, candidates)
+        ):
+            document_review.record_automatic_candidate_recovery(
+                connection,
+                case_id,
+                document.id_document,
+                field_name="document_kind",
+                original_value=confirmed_kind,
+                corrected_value="invoice",
+                reason=(
+                    "Proveedor y campos completos de factura detectados con confianza alta; "
+                    "la clasificación anterior no contiene lecturas ni propietarios."
+                ),
+            )
+            confirmed_kind = None
+        uninformative = analysis.kind == "unknown" and not any(
+            value is not None and str(value).strip() for value in candidates.values()
+        )
+        effective_kind = confirmed_kind or (
+            stored["document_kind"] if uninformative else analysis.kind.strip()
+        )
+        effective_confidence = (
+            stored["classification_confidence"]
+            if uninformative and stored["classification_confidence"]
+            else analysis.confidence.strip()
+        )
+        effective_context = (
+            stored["source_context"]
+            if uninformative and stored["source_context"]
+            else _compact_context(analysis)
+        )
         required_fields = _required_fields_for_kind(analysis, effective_kind)
         connection.execute(
             """UPDATE source_documents
                SET document_kind = ?, classification_confidence = ?, source_context = ?
                WHERE id_document = ? AND id_case = ?""",
-            (effective_kind, analysis.confidence.strip(), _compact_context(analysis), document.id_document, case_id),
+            (effective_kind, effective_confidence, effective_context, document.id_document, case_id),
         )
-        if reanalysis:
-            _replace_unvalidated_candidates_not_in_analysis(
-                connection, document.id_document, candidates,
-            )
+        _recover_invalid_confirmed_candidates(
+            connection, case_id, document.id_document, analysis, candidates,
+        )
         document_review.record_candidates(
             connection,
             document.id_document,
@@ -611,7 +684,9 @@ def _apply_confirmed_invoice(
     values: Mapping[str, str],
     already_applied: sqlite3.Row | None,
 ) -> int | None:
-    _required_confirmed(values, "tipo_suministro", "importe_total")
+    _required_confirmed(
+        values, "tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total",
+    )
     numeric_fields = (
         "consumo_total", "termino_fijo", "termino_variable", "impuestos", "iva",
     )

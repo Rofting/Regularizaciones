@@ -120,7 +120,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual(("ACS", "manual", "validated"), tuple(stored))
 
-    def test_reanalysis_of_invoice_candidates_misclassified_as_reading_requests_one_reclassification(self):
+    def test_reanalysis_auto_corrects_unmistakable_invoice_misclassified_as_reading(self):
         document = self.ingest(SourceAnalysis.unknown())
         issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
         document_review.resolve_issue(
@@ -131,14 +131,94 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         case_ingestion.reanalyze_case_documents(
             self.connection, self.case.id_case,
             analyser=lambda _: SourceAnalysis.invoice({
+                "proveedor": "OFICINA MUNICIPAL DEL AGUA",
                 "tipo_suministro": "AGUA", "fecha_inicio": "2026-01-01",
                 "fecha_fin": "2026-01-31", "importe_total": "177.84",
-            }, confidence="medium"),
+            }, confidence="high"),
         )
 
         issues = document_review.list_open_issues(self.connection, self.case.id_case)
-        self.assertEqual(1, len(issues))
-        self.assertEqual("DOCUMENT_CLASSIFICATION_REQUIRED", issues[0].code)
+        self.assertEqual((), issues)
+        stored_kind = self.connection.execute(
+            "SELECT document_kind FROM source_documents WHERE id_document=?",
+            (document.id_document,),
+        ).fetchone()[0]
+        self.assertEqual("invoice", stored_kind)
+        audit = self.connection.execute(
+            """SELECT corrected_value,resolved_by FROM manual_corrections AS correction
+               JOIN review_issues AS issue ON issue.id_issue=correction.id_issue
+               WHERE issue.id_document=? AND issue.field_name='document_kind'
+               ORDER BY correction.id_correction DESC LIMIT 1""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual(("invoice", "deteccion_automatica"), tuple(audit))
+
+    def test_unknown_reanalysis_does_not_erase_previous_candidates(self):
+        document = self.ingest(SourceAnalysis.invoice({
+            "proveedor": "Proveedor fiable",
+            "tipo_suministro": "GAS",
+            "fecha_inicio": "2026-01-01",
+            "fecha_fin": "2026-01-31",
+            "importe_total": "128.10",
+        }, confidence="medium"))
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection, self.case.id_case,
+            analyser=lambda _: SourceAnalysis.unknown(),
+        )
+
+        stored = {
+            row["field_name"]: row["value"]
+            for row in self.connection.execute(
+                "SELECT field_name,value FROM extraction_candidates WHERE id_document=?",
+                (document.id_document,),
+            ).fetchall()
+        }
+        self.assertEqual("Proveedor fiable", stored["proveedor"])
+        self.assertEqual("128.10", stored["importe_total"])
+        self.assertEqual("2026-01-01", stored["fecha_inicio"])
+        self.assertEqual("2026-01-31", stored["fecha_fin"])
+
+    def test_reanalysis_replaces_invalid_manual_type_with_high_confidence_extraction(self):
+        rows = [{
+            "vivienda": "A", "fecha_ant": "2026-01-01", "val_ant": 1,
+            "fecha_act": "2026-01-31", "val_act": 2,
+        }]
+        document = self.ingest(SourceAnalysis(
+            "reading", "medium", {
+                "tipo": "ACS", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "vecinos": json.dumps(rows),
+            }, (),
+        ))
+        document_review.record_candidates(
+            self.connection, document.id_document, {"tipo": "12123"},
+            source="manual", validation_status="validated",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection, self.case.id_case,
+            analyser=lambda _: SourceAnalysis.reading({
+                "tipo": "ACS", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "vecinos": json.dumps(rows),
+            }),
+        )
+
+        stored = self.connection.execute(
+            """SELECT value,source FROM extraction_candidates
+               WHERE id_document=? AND field_name='tipo'""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual("ACS", stored["value"])
+        self.assertIn(stored["source"], {"analysis", "analysis_recovery"})
+        audit = self.connection.execute(
+            """SELECT original_value,corrected_value,resolved_by
+               FROM manual_corrections AS correction
+               JOIN review_issues AS issue ON issue.id_issue=correction.id_issue
+               WHERE issue.id_document=? AND issue.field_name='tipo'
+               ORDER BY correction.id_correction DESC LIMIT 1""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual(("12123", "ACS", "deteccion_automatica"), tuple(audit))
 
     def test_resolving_classification_updates_effective_document_kind_immediately(self):
         document = self.ingest(SourceAnalysis.unknown())
@@ -264,6 +344,28 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
 
         issues = document_review.list_open_issues(self.connection, self.case.id_case)
         self.assertEqual(["importe_total"], [issue.field_name for issue in issues])
+
+    def test_direct_invoice_application_always_requires_both_period_dates(self):
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.source_path, archive_root=self.archive_root,
+            document_kind="invoice",
+            candidates={"tipo_suministro": "GAS", "importe_total": "128.10"},
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE extraction_candidates SET validation_status='validated'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        with self.assertRaisesRegex(ValueError, "fecha_inicio.*fecha_fin"):
+            case_ingestion.apply_confirmed_source(
+                self.connection, self.case.id_case, document.id_document,
+            )
+        self.assertEqual(
+            0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0],
+        )
 
     def test_invoice_confirmation_does_not_apply_rejected_required_dates(self):
         document = self.ingest(self.invoice_analysis())

@@ -417,6 +417,77 @@ def create_invalid_field_issue(
     )
 
 
+def record_automatic_candidate_recovery(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    field_name: str,
+    original_value: str | None,
+    corrected_value: str,
+    reason: str,
+) -> int:
+    """Sustituye un valor confirmado pero inválido dejando trazabilidad completa.
+
+    Se usa únicamente cuando un nuevo análisis de confianza alta ofrece un
+    valor semánticamente válido. La incidencia nace ya resuelta porque no hay
+    una decisión humana pendiente, pero la corrección queda en el mismo
+    historial inmutable que las correcciones manuales.
+    """
+    normalized_field = field_name.strip()
+    normalized_reason = reason.strip()
+    normalized_value = _normalise_value(corrected_value)
+    if not normalized_field or not normalized_reason or normalized_value is None:
+        raise ValueError("Campo, valor y motivo de recuperación son obligatorios")
+    normalized_value = _validate_issue_value(normalized_field, normalized_value)
+
+    with _transaction(connection):
+        document = connection.execute(
+            "SELECT id_case FROM source_documents WHERE id_document=?",
+            (document_id,),
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        cursor = connection.execute(
+            """INSERT INTO review_issues
+               (id_case,id_document,code,field_name,detected_value,message,
+                status,origin,resolved_at)
+               VALUES (?,?,?,?,?,?,'resolved','automatic',datetime('now'))""",
+            (
+                case_id,
+                document_id,
+                "AUTOMATIC_ANALYSIS_RECOVERY",
+                normalized_field,
+                _normalise_value(original_value),
+                normalized_reason,
+            ),
+        )
+        issue_id = int(cursor.lastrowid)
+        connection.execute(
+            """INSERT INTO manual_corrections
+               (id_issue,original_value,corrected_value,reason,resolved_by)
+               VALUES (?,?,?,?,?)""",
+            (
+                issue_id,
+                _normalise_value(original_value),
+                normalized_value,
+                normalized_reason,
+                "deteccion_automatica",
+            ),
+        )
+        connection.execute(
+            """INSERT INTO extraction_candidates
+               (id_document,field_name,value,source,validation_status)
+               VALUES (?,?,?,'analysis_recovery','candidate')
+               ON CONFLICT(id_document,field_name) DO UPDATE SET
+                   value=excluded.value,
+                   source=excluded.source,
+                   validation_status=excluded.validation_status""",
+            (document_id, normalized_field, normalized_value),
+        )
+    return issue_id
+
+
 def create_classification_required_issue(
     connection: sqlite3.Connection,
     case_id: int,
