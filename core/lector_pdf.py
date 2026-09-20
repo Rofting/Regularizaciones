@@ -683,6 +683,65 @@ def extraer_texto_ocr(ruta_archivo: str) -> str:
     return extraer_texto_ocr_con_diagnostico(ruta_archivo).text
 
 
+def _extraer_texto_contador_agua_ocr(ruta_archivo: str) -> str:
+    """Relee a mayor resolución la franja del contador de un recibo de agua.
+
+    La portada completa a 200 dpi basta para proveedor, factura e importe,
+    pero la tabla de lecturas usa una tipografía mucho menor. Este segundo
+    pase sólo se ejecuta para Agua Zaragoza cuando falta alguna de las dos
+    fechas obligatorias.
+    """
+    if Path(ruta_archivo).suffix.lower() != ".pdf":
+        return ""
+    try:
+        from pdf2image import convert_from_path
+        from PIL import ImageOps
+
+        images = convert_from_path(
+            ruta_archivo,
+            dpi=350,
+            poppler_path=_poppler_path(),
+            first_page=1,
+            last_page=1,
+        )
+        if not images:
+            return ""
+        image = images[0]
+        counter_region = image.crop((
+            0,
+            int(image.height * 0.40),
+            image.width,
+            int(image.height * 0.90),
+        ))
+        counter_region = ImageOps.autocontrast(counter_region.convert("L"))
+    except Exception:
+        return ""
+
+    rapid_text = _rapidocr_text(ruta_archivo, counter_region)
+    if re.search(r"(?i)lectura\s+anterior", rapid_text) and re.search(
+        r"(?i)[uú�]?ltima\s+lectura", rapid_text,
+    ):
+        return _normalizar_decimales_ocr(rapid_text)
+
+    try:
+        import pytesseract
+
+        engine = _tesseract_executable()
+        if not engine:
+            return rapid_text
+        pytesseract.pytesseract.tesseract_cmd = engine
+        languages = set(pytesseract.get_languages(config=""))
+        language = "spa" if "spa" in languages else "eng" if "eng" in languages else None
+        if language is None:
+            return rapid_text
+        text = pytesseract.image_to_string(
+            counter_region, lang=language, config="--psm 6",
+        )
+        return _normalizar_decimales_ocr(text or rapid_text)
+    except Exception:
+        return rapid_text
+
+
 def _normalizar_firma_proveedor(value: str) -> str:
     """Normaliza firmas para resistir tildes, huecos y la O leída como cero."""
     decomposed = unicodedata.normalize("NFKD", value.upper())
@@ -1352,6 +1411,16 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
         datos = extraer_datos_rios(texto, config_prov)
     elif clave_prov == "AGUA_ZARAGOZA":
         datos = extraer_datos_agua_zaragoza(texto, config_prov)
+        if not datos.get("fecha_inicio") or not datos.get("fecha_fin"):
+            counter_text = _extraer_texto_contador_agua_ocr(ruta_archivo)
+            if counter_text:
+                recovered = extraer_datos_factura(counter_text, config_prov)
+                datos["fecha_inicio"] = (
+                    datos.get("fecha_inicio") or recovered.get("fecha_inicio")
+                )
+                datos["fecha_fin"] = datos.get("fecha_fin") or recovered.get("fecha_fin")
+                datos["lec_ini"] = datos.get("lec_ini") or recovered.get("lec_ini")
+                datos["lec_fin"] = datos.get("lec_fin") or recovered.get("lec_fin")
     else:
         datos = extraer_datos_factura(texto, config_prov)
 
