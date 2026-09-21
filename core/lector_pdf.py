@@ -1257,7 +1257,8 @@ def extraer_lecturas_metrigest(texto_paginas: list[str], config: dict) -> dict:
 
 def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
                      con_bd=None, ruta_proveedores: str = None,
-                     proveedores: dict | None = None) -> dict:
+                     proveedores: dict | None = None,
+                     extracted_text: str | None = None) -> dict:
     """
     Procesa un archivo de factura o resumen Metrigest.
 
@@ -1271,6 +1272,9 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
         codigo_comunidad:   Código conocido (ej: '644'). Si es None, se autodetecta por CIF.
         con_bd:             Conexión SQLite activa (opcional). Si se pasa, habilita autodetección por CIF.
         ruta_proveedores:   Ruta a proveedores.json (opcional)
+        extracted_text:     Texto ya obtenido por el servicio documental. Si se
+                            proporciona, el PDF no se vuelve a abrir ni a pasar
+                            por OCR aunque el texto esté vacío.
 
     Returns:
         dict con: ok, tipo, datos, proveedor_clave, hash_md5, nombre_archivo,
@@ -1283,11 +1287,15 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
     # 1. Los PDFs de imagen se detectan sin recorrerlos con pdfplumber: así el
     # OCR de portada evita bloqueos en facturas escaneadas de varias páginas.
     ruta = Path(ruta_archivo)
-    texto = "" if _pdf_probablemente_escaneado(ruta) else extraer_texto(ruta_archivo)
+    texto = (
+        extracted_text
+        if extracted_text is not None
+        else ("" if _pdf_probablemente_escaneado(ruta) else extraer_texto(ruta_archivo))
+    )
 
     # Si no hay texto, intentar OCR automáticamente
     ocr_result = None
-    if not texto.strip():
+    if extracted_text is None and not texto.strip():
         ocr_result = extraer_texto_ocr_con_diagnostico(ruta_archivo)
         texto = ocr_result.text
 
