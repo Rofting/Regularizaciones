@@ -289,7 +289,11 @@ def analyse_tabular(path: Path) -> SourceAnalysis:
             owner_keys = {
                 "codigo_vivienda": ("fdenominacion", "vivienda", "propiedad", "codigo vivienda"),
                 "nombre_propietario": ("nombre", "propietario", "nombre propietario"),
-                "coeficiente": ("coeficiente",), "email": ("email", "correo"),
+                "coeficiente": (
+                    "coeficiente", "participacion", "entero participacion",
+                    "enteros participacion", "enteros de participacion",
+                ),
+                "email": ("email", "correo"),
             }
             reading_columns = _matching_columns(keys, reading_keys)
             owner_columns = _matching_columns(keys, owner_keys)
@@ -450,8 +454,12 @@ def _meditrade_owner_rows(rows, headers):
         return None
     except ValueError:
         return None
+    coefficient_aliases = {
+        "coeficiente", "participacion", "entero participacion",
+        "enteros participacion", "enteros de participacion",
+    }
     coefficient_column = next(
-        (index for index, value in enumerate(labels) if value == "coeficiente"), None,
+        (index for index, value in enumerate(labels) if value in coefficient_aliases), None,
     )
     result = []
     current = None

@@ -440,6 +440,19 @@ class SourceActionsTest(unittest.TestCase):
 
         review_ui.open_confirm_sources_dialog.assert_called_once_with(self.app, self.case.id_case)
 
+    def test_background_workflow_error_is_shown_in_a_dialog(self):
+        def fail():
+            raise ValueError("Falta importar el modelo inicial")
+
+        self.app_module.AppGestionFincas._ejecutar_hilo(self.app, fail)
+        self.complete()
+
+        self.messages.showerror.assert_called_once()
+        title, detail = self.messages.showerror.call_args.args[:2]
+        self.assertEqual("No se pudo completar", title)
+        self.assertIn("Falta importar el modelo inicial", detail)
+        self.assertIn("No se ha modificado", detail)
+
     def test_reset_cancellation_failure_and_success_preserve_or_clear_ui_at_the_right_time(self):
         from database_reset import DatabaseResetError, ResetResult
         self.assertTrue(hasattr(self.app_module.AppGestionFincas, "_accion_nueva_base_segura"))
@@ -558,6 +571,27 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
             ("reparto", "generar_excel"),
             (state.active_step, state.next_action),
         )
+
+    def test_ready_case_without_registered_template_still_generates(self):
+        """Sin plantilla propia se genera igual: la crea el modelo canónico.
+
+        Exigir antes un Excel maestro elegido a mano dejaba parado un
+        expediente que ya tenía todas sus fuentes validadas.
+        """
+        state = expedient_ui.guided_workspace_state(
+            has_case=True,
+            document_count=4,
+            open_issue_count=0,
+            case_status="ready_for_calculation",
+            has_registered_template=False,
+        )
+
+        self.assertEqual(
+            ("reparto", "generar_excel"),
+            (state.active_step, state.next_action),
+        )
+        self.assertEqual("Genera el Excel oficial", state.headline)
+        self.assertIn("modelo del despacho", state.detail)
 
     def test_reconciled_case_routes_to_letters(self):
         state = expedient_ui.guided_workspace_state(

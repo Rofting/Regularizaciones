@@ -272,6 +272,17 @@ def _source_document(connection: sqlite3.Connection, document_id: int) -> Source
     return document_from_row(row)
 
 
+def _community_has_owners(connection: sqlite3.Connection, case_id: int) -> bool:
+    """¿Hay ya propietarios contra los que emparejar las lecturas?"""
+    return connection.execute(
+        """SELECT 1 FROM propietarios AS owners
+           JOIN regularization_cases AS cases ON cases.id_comunidad = owners.id_comunidad
+           WHERE cases.id_case = ? AND owners.activo = 1 LIMIT 1""",
+        (case_id,),
+    ).fetchone() is not None
+
+
+
 def _auto_apply_clean_analysis(
     connection: sqlite3.Connection,
     case_id: int,
@@ -289,6 +300,12 @@ def _auto_apply_clean_analysis(
     if analysis.confidence.strip().lower() != "high":
         return document
     if document.document_kind not in {"invoice", "owners", "reading"}:
+        return document
+    if document.document_kind == "reading" and not _community_has_owners(connection, case_id):
+        # Sin el listado de propietarios, cada vivienda de cada fichero de
+        # lecturas abriría su propia incidencia de "vivienda desconocida".
+        # La fuente espera: auto_apply_case_sources la aplicará después, ya
+        # en su orden (propietarios, facturas y luego lecturas).
         return document
     if _has_open_document_issues(connection, document.id_document):
         return document
@@ -565,7 +582,7 @@ def apply_confirmed_source(
                 connection, case, period_id, document, values, already_applied,
             )
         elif document.document_kind == "owners":
-            _apply_confirmed_owners(connection, case, values)
+            _apply_confirmed_owners(connection, case, document, values)
         else:
             raise ValueError("Sólo se pueden aplicar facturas, lecturas o propietarios confirmados")
 
@@ -615,12 +632,17 @@ def confirm_source_candidates(connection: sqlite3.Connection, case_id: int,
         return result
 
 
-def _apply_confirmed_owners(connection: sqlite3.Connection, case: RegularizationCase,
-                            values: Mapping[str, str]) -> None:
+def _apply_confirmed_owners(
+    connection: sqlite3.Connection,
+    case: RegularizationCase,
+    document: SourceDocument,
+    values: Mapping[str, str],
+) -> None:
     _required_confirmed(values, "propietarios")
     rows = json.loads(values["propietarios"])
     if not isinstance(rows, list) or not rows:
         raise ValueError("La fuente debe contener propietarios confirmados")
+    coefficient_conflicts: list[dict[str, object]] = []
     for row in rows:
         if not isinstance(row, dict) or not row.get("codigo_vivienda") or not row.get("nombre_propietario"):
             raise ValueError("Cada propietario necesita vivienda y nombre")
@@ -630,17 +652,51 @@ def _apply_confirmed_owners(connection: sqlite3.Connection, case: Regularization
             if coefficient is None or coefficient < 0:
                 raise ValueError("El coeficiente debe ser un número no negativo")
             fields["coeficiente"] = coefficient
-        owner = connection.execute("SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda=?",
-                                   (case.community_id, row["codigo_vivienda"])).fetchone()
+        # El mismo piso llega de fuentes distintas ('MP-1ºA' y 'MP-1ºA    ');
+        # sin normalizar, la búsqueda falla y se inserta una segunda fila que
+        # duplica el coeficiente y parte las lecturas en dos.
+        codigo = gestor_bd.normalizar_codigo_vivienda(row["codigo_vivienda"])
+        owner = connection.execute(
+            """SELECT id_propietario,coeficiente FROM propietarios
+               WHERE id_comunidad=? AND codigo_vivienda=?""",
+            (case.community_id, codigo),
+        ).fetchone()
         if owner:
+            incoming = fields.get("coeficiente")
+            current = owner["coeficiente"]
+            if (
+                incoming is not None and current is not None
+                and abs(float(incoming) - float(current)) > 0.0001
+            ):
+                coefficient_conflicts.append({
+                    "vivienda": codigo,
+                    "guardado": float(current),
+                    "detectado": float(incoming),
+                })
+                # La participación registral sólo cambia mediante una
+                # corrección explícita. El resto de datos de la fuente sí se
+                # puede actualizar sin perder la discrepancia.
+                fields.pop("coeficiente", None)
             assignments = ','.join(f'{key}=?' for key in fields)
             connection.execute(f"UPDATE propietarios SET {assignments} WHERE id_propietario=?",
                                (*fields.values(), owner[0]))
         else:
+            fields["tipo_unidad"] = gestor_bd.clasificar_tipo_unidad(codigo)
             columns = ','.join(fields)
             placeholders = ','.join('?' for _ in fields)
             connection.execute(f"INSERT INTO propietarios(id_comunidad,codigo_vivienda,{columns}) VALUES (?,?,{placeholders})",
-                               (case.community_id, row["codigo_vivienda"], *fields.values()))
+                               (case.community_id, codigo, *fields.values()))
+    if coefficient_conflicts:
+        document_review.create_review_issue(
+            connection, case.id_case, document.id_document,
+            code="OWNER_COEFFICIENT_CONFLICT", field_name="coeficientes",
+            detected_value=json.dumps(coefficient_conflicts, ensure_ascii=False),
+            message=(
+                f"{len(coefficient_conflicts)} participación(es) difieren de los valores "
+                "registrales guardados. Se han conservado los valores existentes; "
+                "revise el listado y confirme sólo si realmente han cambiado."
+            ),
+        )
 
 
 def _confirmed_candidate_values(

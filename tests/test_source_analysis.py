@@ -705,6 +705,24 @@ class SourceAnalysisTest(unittest.TestCase):
             json.loads(analysis.candidates["propietarios"]),
         )
 
+    def test_owner_table_accepts_enteros_participacion_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "propietarios-644.csv"
+            path.write_text(
+                "Codigo Vivienda;Nombre Propietario;Enteros Participación\n"
+                "1-A;ANA VECINA;0,676\n",
+                encoding="utf-8",
+            )
+
+            analysis = source_analysis.analyse_tabular(path)
+
+        self.assertEqual("owners", analysis.kind)
+        self.assertEqual(
+            [{"codigo_vivienda": "1-A", "nombre_propietario": "ANA VECINA",
+              "coeficiente": 0.676}],
+            json.loads(analysis.candidates["propietarios"]),
+        )
+
     def test_reference_workbook_is_not_mistaken_for_a_source_invoice(self):
         from openpyxl import Workbook
 

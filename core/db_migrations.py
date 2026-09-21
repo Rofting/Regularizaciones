@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 13
 
 
 MIGRATION_1_SQL = (
@@ -620,6 +620,158 @@ def _migration_10(connection: sqlite3.Connection) -> None:
         ON reading_observations(id_propietario, tipo, fecha_lectura)""")
 
 
+def _migration_11(connection: sqlite3.Connection) -> None:
+    """Una fila por unidad, con su tipo, y sin duplicados por espacios.
+
+    Los listados de propietarios llegaban de fuentes distintas y el mismo piso
+    entraba dos veces ('MP-1ºA' y 'MP-1ºA        '), duplicando coeficientes y
+    repartiendo las lecturas entre las dos copias. Aquí se fusionan las copias
+    conservando la que tiene lecturas, se normaliza el código y se marca qué
+    unidades son garaje o local, que no entran en la regularización.
+
+    La normalización se escribe entera aquí, sin importar ayudas de otros
+    módulos, para que la migración siga haciendo lo mismo el día que aquéllas
+    cambien.
+    """
+    columnas = {
+        row[1] for row in connection.execute("PRAGMA table_info(propietarios)")
+    }
+    if "tipo_unidad" not in columnas:
+        connection.execute(
+            "ALTER TABLE propietarios ADD COLUMN tipo_unidad TEXT NOT NULL DEFAULT 'vivienda'"
+        )
+
+    def normalizar(valor) -> str:
+        return " ".join(str(valor or "").split())
+
+    def clasificar(codigo: str) -> str:
+        texto = codigo.upper()
+        if any(marca in texto for marca in ("GAR", "PK", "PARKING", "APARCAMIENTO", "TRASTERO")):
+            return "garaje"
+        if any(marca in texto for marca in ("LOC", "COMERCIAL")):
+            return "local"
+        return "vivienda"
+
+    hijas = (
+        ("lecturas_vecino", "id_propietario"),
+        ("repartos", "id_propietario"),
+        ("owner_concept_results", "id_propietario"),
+        ("generated_letters", "id_propietario"),
+        ("reading_observations", "id_propietario"),
+    )
+    existentes = {
+        row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+
+    grupos: dict[tuple[int, str], list[int]] = {}
+    for id_propietario, id_comunidad, codigo in connection.execute(
+        "SELECT id_propietario,id_comunidad,codigo_vivienda FROM propietarios ORDER BY id_propietario"
+    ):
+        grupos.setdefault((id_comunidad, normalizar(codigo)), []).append(id_propietario)
+
+    for (_comunidad, codigo), identificadores in grupos.items():
+        if len(identificadores) > 1:
+            def lecturas(identificador: int) -> int:
+                if "lecturas_vecino" not in existentes:
+                    return 0
+                return connection.execute(
+                    "SELECT COUNT(*) FROM lecturas_vecino WHERE id_propietario=?",
+                    (identificador,),
+                ).fetchone()[0]
+
+            conservado = max(identificadores, key=lambda item: (lecturas(item), -item))
+            for descartado in identificadores:
+                if descartado == conservado:
+                    continue
+                for tabla, columna in hijas:
+                    if tabla in existentes:
+                        connection.execute(
+                            f"UPDATE OR IGNORE {tabla} SET {columna}=? WHERE {columna}=?",
+                            (conservado, descartado),
+                        )
+                connection.execute(
+                    "DELETE FROM propietarios WHERE id_propietario=?", (descartado,)
+                )
+        else:
+            conservado = identificadores[0]
+        connection.execute(
+            "UPDATE propietarios SET codigo_vivienda=?, tipo_unidad=? WHERE id_propietario=?",
+            (codigo, clasificar(codigo), conservado),
+        )
+
+
+def _migration_12(connection: sqlite3.Connection) -> None:
+    """Libro de lo cobrado a los propietarios por ACS y calefacción.
+
+    Es el lado de los ingresos del estudio: las cuotas fijas mensuales que la
+    comunidad gira y las liquidaciones variables de cada lectura. No sale de
+    ninguna factura ni de ningún contador —lo decide la comunidad—, así que
+    hasta ahora no había dónde guardarlo y la hoja de cobros quedaba vacía.
+
+    De aquí salen el 'importe cobrado' del análisis (su fila 66) y, por
+    diferencia con el coste real, la regularización de cada propietario.
+    """
+    connection.execute("""CREATE TABLE IF NOT EXISTS cuotas_servicio (
+        id_cuota INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_comunidad INTEGER NOT NULL REFERENCES comunidades(id_comunidad),
+        id_periodo INTEGER NOT NULL REFERENCES periodos(id_periodo),
+        servicio TEXT NOT NULL CHECK(servicio IN ('ACS','CALEFACCION')),
+        concepto TEXT NOT NULL CHECK(concepto IN ('fija','variable')),
+        fecha TEXT NOT NULL,
+        importe REAL NOT NULL,
+        consumo REAL,
+        fecha_inicio TEXT,
+        fecha_fin TEXT,
+        notas TEXT,
+        creado_en TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(id_comunidad, id_periodo, servicio, concepto, fecha)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_cuotas_periodo
+        ON cuotas_servicio(id_comunidad, id_periodo, servicio, fecha)""")
+
+
+def _migration_13(connection: sqlite3.Connection) -> None:
+    """Conserva cada reparto y los coeficientes exactos que lo originaron.
+
+    ``owner_concept_results`` continúa siendo la proyección vigente que usa la
+    interfaz. Estas tablas son el historial inmutable necesario para poder
+    reconstruir una regularización antigua aunque después cambie un
+    propietario, un coeficiente o una regla del perfil.
+    """
+    connection.execute("""CREATE TABLE IF NOT EXISTS distribution_runs (
+        id_distribution_run INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_case INTEGER NOT NULL REFERENCES regularization_cases(id_case),
+        id_periodo INTEGER NOT NULL REFERENCES periodos(id_periodo),
+        input_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_distribution_runs_case
+        ON distribution_runs(id_case, created_at DESC, id_distribution_run DESC)""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS owner_distribution_snapshots (
+        id_snapshot INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_distribution_run INTEGER NOT NULL
+            REFERENCES distribution_runs(id_distribution_run) ON DELETE CASCADE,
+        id_propietario INTEGER NOT NULL REFERENCES propietarios(id_propietario),
+        concept_key TEXT NOT NULL REFERENCES regularization_concepts(concept_key),
+        coefficient_raw REAL,
+        coefficient_eligible_total REAL,
+        coefficient_applied REAL,
+        consumption REAL,
+        consumption_unit TEXT,
+        billed_cents INTEGER NOT NULL,
+        actual_cents INTEGER NOT NULL,
+        difference_cents INTEGER NOT NULL,
+        UNIQUE(id_distribution_run, id_propietario, concept_key)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_distribution_snapshots_owner
+        ON owner_distribution_snapshots(id_propietario, id_distribution_run)""")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -631,6 +783,9 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     8: _migration_8,
     9: _migration_9,
     10: _migration_10,
+    11: _migration_11,
+    12: _migration_12,
+    13: _migration_13,
 }
 
 

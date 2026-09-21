@@ -187,6 +187,42 @@ class CaseLetterServiceTest(unittest.TestCase):
             ).fetchone()[0],
         )
 
+    def test_four_technical_concepts_become_three_ordinary_rows(self):
+        from case_letter_service import _group_letter_concepts
+
+        grouped = _group_letter_concepts([
+            {"key": "acs_fixed", "label": "Cuota fija ACS", "importe_cobrado": 10,
+             "importe_real": 11, "diferencia": 1, "consumption": None, "unit": "€/mes"},
+            {"key": "heating_fixed", "label": "Cuota fija calefacción", "importe_cobrado": 20,
+             "importe_real": 22, "diferencia": 2, "consumption": None, "unit": "€/mes"},
+            {"key": "acs_variable", "label": "Consumo ACS", "importe_cobrado": 30,
+             "importe_real": 33, "diferencia": 3, "consumption": 12, "unit": "m³"},
+            {"key": "heating_variable", "label": "Consumo calefacción", "importe_cobrado": 40,
+             "importe_real": 44, "diferencia": 4, "consumption": 80, "unit": "kWh"},
+        ])
+
+        self.assertEqual(["ACS", "Calefacción", "Cuota fija"], [row["label"] for row in grouped])
+        self.assertEqual((30, 33, 3), tuple(grouped[2][key] for key in (
+            "importe_cobrado", "importe_real", "diferencia",
+        )))
+
+    def test_generated_letter_shows_registry_and_applied_coefficients(self):
+        from case_letter_service import generate_case_letters
+
+        result = generate_case_letters(
+            self.database_path, id_case=self.case_id, project_root=self.root
+        )
+        document = next(result.output_path.glob("*.docx"))
+        with zipfile.ZipFile(document) as archive:
+            text = "\n".join(
+                archive.read(name).decode("utf-8", errors="ignore")
+                for name in archive.namelist()
+                if name.startswith("word/") and name.endswith(".xml")
+            )
+        self.assertIn("Participación registral", text)
+        self.assertIn("Coeficiente aplicado", text)
+        self.assertIn("33,3333 %", text)
+
     def test_case_letters_only_accept_selected_concepts_from_the_active_profile(self):
         from case_letter_service import LetterGenerationBlockedError, generate_case_letters
 
@@ -203,9 +239,9 @@ class CaseLetterServiceTest(unittest.TestCase):
                 for name in archive.namelist()
                 if name.startswith("word/") and name.endswith(".xml")
             )
-        self.assertIn("Cuota fija de ACS", text)
+        self.assertIn("Cuota fija", text)
         self.assertIn("Abono", text)
-        self.assertNotIn("Consumo de ACS", text)
+        self.assertNotIn(">ACS<", text)
 
         with self.assertRaisesRegex(LetterGenerationBlockedError, "no está activo"):
             generate_case_letters(
@@ -227,8 +263,8 @@ class CaseLetterServiceTest(unittest.TestCase):
                 archive.read(name).decode("utf-8", errors="ignore")
                 for name in archive.namelist() if name.startswith("word/") and name.endswith(".xml")
             )
-        self.assertIn("Cuota fija de ACS", text)
-        self.assertIn("Consumo de ACS", text)
+        self.assertIn("Cuota fija", text)
+        self.assertIn("ACS", text)
         self.assertIn("Abono", text)
         self.assertNotIn("Calefacci", text)
         self.assertIn("Gesti", text)

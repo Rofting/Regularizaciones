@@ -18,6 +18,7 @@ import document_review
 import excel_bootstrap_importer
 import excel_export_service
 import expedient_service
+import plantilla_comunidad
 from excel_profiles import (
     ExcelProfile,
     calculate_profile_sha256,
@@ -140,6 +141,40 @@ def _forward_progress(
     return forward
 
 
+def _prepare_explicit_rerun(
+    connection: sqlite3.Connection, id_case: int, target_status: str,
+) -> str | None:
+    """Retrocede sólo la proyección de estado; nunca borra ejecuciones previas."""
+    row = connection.execute(
+        "SELECT estado FROM regularization_cases WHERE id_case=?", (id_case,)
+    ).fetchone()
+    if row is None:
+        raise WorkflowBlockedError("El expediente no existe")
+    original = str(row["estado"])
+    if original in {"deliveries_generated", "closed"}:
+        connection.execute(
+            """UPDATE regularization_cases
+               SET estado=?,updated_at=datetime('now') WHERE id_case=?""",
+            (target_status, id_case),
+        )
+        connection.commit()
+        return original
+    return None
+
+
+def _restore_failed_rerun(
+    connection: sqlite3.Connection, id_case: int, original_status: str | None,
+) -> None:
+    if original_status is None:
+        return
+    connection.execute(
+        """UPDATE regularization_cases
+           SET estado=?,updated_at=datetime('now') WHERE id_case=?""",
+        (original_status, id_case),
+    )
+    connection.commit()
+
+
 def run_bootstrap_import(
     database_path: str | Path,
     *,
@@ -199,13 +234,39 @@ def run_generate_excel(
         database_path, id_case=id_case, active_community_id=active_community_id,
         project_root=project_root,
     )
+    original_status = _prepare_explicit_rerun(
+        connection, id_case, "ready_for_calculation"
+    )
     try:
+        # El modelo de estudio es el mismo para todas las comunidades, así que
+        # no hay motivo para exigir que alguien elija un Excel maestro antes de
+        # empezar: si la comunidad no tiene plantilla, se crea desde el modelo
+        # canónico. «Importar modelo inicial» sigue disponible para las que ya
+        # tengan su libro propio y quieran partir de él.
+        try:
+            creada = plantilla_comunidad.asegurar_plantilla(
+                connection, community_id=active_community_id, project_root=Path(project_root),
+            )
+        except plantilla_comunidad.PlantillaNoDisponible as error:
+            raise WorkflowBlockedError(
+                f"{error}. Restaura el modelo canónico o usa «Importar modelo inicial» "
+                "para instalar el Excel maestro de esta comunidad."
+            ) from error
+        if creada is not None and not creada.reutilizada:
+            _emit(progress, "prepare_template", template=str(creada.plantilla))
         _emit(progress, "generar_excel", id_case=id_case)
-        return generate_official_excel(
+        result = generate_official_excel(
             connection, id_case=id_case, project_root=Path(project_root),
             output_root=Path(output_root),
             progress=_forward_progress(progress, "generar_excel"),
         )
+        case = expedient_service.get_case(connection, id_case)
+        if case.status == "ready_for_calculation":
+            expedient_service.set_case_status(connection, id_case, "calculated")
+        return result
+    except Exception:
+        _restore_failed_rerun(connection, id_case, original_status)
+        raise
     finally:
         connection.close()
 
@@ -223,6 +284,7 @@ def run_calculate_distribution(
         database_path, id_case=id_case, active_community_id=active_community_id,
         project_root=project_root,
     )
+    original_status = _prepare_explicit_rerun(connection, id_case, "calculated")
     try:
         _emit(progress, "calcular_reparto", id_case=id_case)
         result = calculate_case_distribution(
@@ -236,6 +298,9 @@ def run_calculate_distribution(
         if case.status == "calculated":
             expedient_service.set_case_status(connection, id_case, "reconciled")
         return result
+    except Exception:
+        _restore_failed_rerun(connection, id_case, original_status)
+        raise
     finally:
         connection.close()
 
@@ -254,13 +319,22 @@ def run_generate_letters(
         database_path, id_case=id_case, active_community_id=active_community_id,
         project_root=project_root,
     )
+    original_status = _prepare_explicit_rerun(connection, id_case, "reconciled")
     connection.close()
     _emit(progress, "generar_cartas", id_case=id_case)
-    result = generate_case_letters(
-        database_path, id_case=id_case, project_root=Path(project_root),
-        selected_concepts=selected_concepts,
-        progress=_forward_progress(progress, "generar_cartas"),
-    )
+    try:
+        result = generate_case_letters(
+            database_path, id_case=id_case, project_root=Path(project_root),
+            selected_concepts=selected_concepts,
+            progress=_forward_progress(progress, "generar_cartas"),
+        )
+    except Exception:
+        connection = _connection(database_path)
+        try:
+            _restore_failed_rerun(connection, id_case, original_status)
+        finally:
+            connection.close()
+        raise
     if not result.failures:
         connection = _connection(database_path)
         try:

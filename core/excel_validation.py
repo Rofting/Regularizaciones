@@ -34,7 +34,8 @@ class WorkbookFingerprint:
     dimensions: tuple[tuple[str, tuple, tuple], ...]
     view_and_print_settings: tuple[tuple[str, str, str, str, str], ...]
     drawings: tuple[tuple[str, int, tuple[str, ...], int, tuple[str, ...]], ...]
-    immutable_cells: tuple[tuple[str, str, object, int, str], ...]
+    immutable_cells: tuple[tuple[str, str, object, str], ...]
+    immutable_cell_styles: tuple[tuple[str, str, tuple], ...]
     mutable_cell_styles: tuple[tuple[str, str, tuple], ...]
     ooxml_design_parts: tuple[tuple[str, str], ...]
 
@@ -69,12 +70,23 @@ def _mutable_addresses(profile: ExcelProfile) -> dict[str, set[str]]:
     return result
 
 
+def _medida(valor):
+    """Alto o ancho redondeado: LibreOffice reescribe los decimales finos."""
+    return None if valor is None else round(float(valor), 1)
+
+
 def _dimension_signature(dimensions) -> tuple:
+    """Altos, anchos y visibilidad; sin el índice de estilo, que se renumera."""
+    # El alto de fila queda fuera: Excel lo deja implícito donde LibreOffice
+    # escribe 14,2, y convierte 6,95 en 6,8 al recalcular. Lo que sí se
+    # compara es el ancho de columna, lo oculto y el agrupamiento, que son los
+    # que se notan al abrir e imprimir el libro.
     return tuple(
         sorted(
-            (key, getattr(dimension, "height", None), getattr(dimension, "width", None),
-             getattr(dimension, "hidden", None), getattr(dimension, "outlineLevel", None),
-             getattr(dimension, "collapsed", None), getattr(dimension, "style_id", None))
+            (str(key), _medida(getattr(dimension, "width", None)),
+             bool(getattr(dimension, "hidden", False)),
+             getattr(dimension, "outlineLevel", None),
+             bool(getattr(dimension, "collapsed", False)))
             for key, dimension in dimensions.items()
         )
     )
@@ -92,34 +104,107 @@ def _anchor_signature(anchor) -> str:
     return f"{type(anchor).__name__}:{marker(start)}:{marker(end)}"
 
 
+def _categoria_formato(formato: str) -> str:
+    """Clase de formato visible: fecha, moneda, porcentaje o número.
+
+    El formato exacto no es comparable entre motores —la misma fecha se
+    escribe 'mm-dd-yy' en un libro y 'm/d/yyyy' en el otro—, pero su clase sí,
+    y es lo que nota quien abre la hoja.
+    """
+    texto = (formato or "General").lower()
+    if "€" in texto or "$" in texto or "ptas" in texto:
+        return "moneda"
+    if "%" in texto:
+        return "porcentaje"
+    if any(marca in texto for marca in ("yy", "dd", "mmm", "hh")):
+        return "fecha"
+    if texto == "general":
+        return "general"
+    return "numero"
+
+
+def _color_relleno(relleno) -> str | None:
+    """Color de fondo declarado, cuando es un RGB explícito.
+
+    Sin él, cambiar la paleta del libro pasaba inadvertido: el patrón seguía
+    siendo 'solid' y la firma no cambiaba. Los colores de tema o indexados se
+    dejan fuera porque cada motor los reescribe a su manera.
+    """
+    color = getattr(relleno, "fgColor", None)
+    valor = getattr(color, "rgb", None)
+    return str(valor) if isinstance(valor, str) else None
+
+
+
 def _cell_style_signature(cell) -> tuple:
-    """Firma estable de la presentación efectiva, también en entradas."""
+    """Firma de la presentación visible, estable entre Excel y LibreOffice.
+
+    Se dejan fuera el índice de estilo y los detalles que cada motor rellena a
+    su manera (charset de la fuente, alineación vertical implícita, cómo
+    representa el color de un borde). Comparar aquello marcaba como alterado
+    un libro idéntico a la vista.
+    """
+    fuente, borde = cell.font, cell.border
     return (
-        cell.style_id,
-        str(cell.font),
-        str(cell.fill),
-        str(cell.border),
-        str(cell.alignment),
-        cell.number_format,
-        str(cell.protection),
+        fuente.name, fuente.sz, bool(fuente.b), bool(fuente.i),
+        cell.fill.patternType, _color_relleno(cell.fill),
+        # 'general' y el valor sin fijar son la misma alineación.
+        None if cell.alignment.horizontal in (None, "general") else cell.alignment.horizontal,
+        _categoria_formato(cell.number_format),
+        bool(cell.protection.locked),
+        tuple(
+            getattr(getattr(borde, lado), "style", None)
+            for lado in ("left", "right", "top", "bottom")
+        ),
     )
 
 
 def _design_part_hashes(path: Path) -> tuple[tuple[str, str], ...]:
+    """Huella de las partes de diseño: gráficos, imágenes, tema, impresión.
+
+    Fuera quedan las partes estructurales —la tabla de estilos, el catálogo de
+    contenidos y los mapas de relaciones—, que cada motor numera a su manera y
+    que deben pertenecer al libro generado, no a la plantilla. Su contenido ya
+    se comprueba por otras vías: las fórmulas, los valores y el estilo visible
+    de cada celda.
+    """
     prefixes = ("xl/charts/", "xl/drawings/", "xl/media/", "customXml/", "xl/theme/", "xl/printerSettings/")
     with ZipFile(path, "r") as archive:
-        names = [
-            name for name in archive.namelist()
-            if name.startswith(prefixes) or name.endswith(".rels")
-            or name in {"xl/styles.xml", "[Content_Types].xml", "_rels/.rels"}
-        ]
+        names = [name for name in archive.namelist() if name.startswith(prefixes)]
         return tuple(
             (name, hashlib.sha256(archive.read(name)).hexdigest())
             for name in sorted(set(names))
         )
 
 
+def _dimensions_preserved(esperadas, obtenidas) -> bool:
+    """Los altos y anchos de la plantilla siguen ahí.
+
+    LibreOffice escribe además filas con la altura por defecto que Excel deja
+    implícitas; eso no cambia el diseño, así que se admite lo que sobre.
+    """
+    por_hoja = {hoja: (set(filas), set(columnas)) for hoja, filas, columnas in obtenidas}
+    for hoja, filas, columnas in esperadas:
+        if hoja not in por_hoja:
+            return False
+        filas_obtenidas, columnas_obtenidas = por_hoja[hoja]
+        if not set(filas).issubset(filas_obtenidas):
+            return False
+        if not set(columnas).issubset(columnas_obtenidas):
+            return False
+    return True
+
+
+
 def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerprint:
+    """Huella del diseño del libro, comparable entre Excel y LibreOffice.
+
+    La huella recoge contenido y estructura, nunca números internos: al
+    recalcular, LibreOffice reconstruye la tabla de estilos y numera de otra
+    forma, y rellena los ajustes de impresión que Excel deja vacíos. Comparar
+    esos índices hacía fallar cualquier libro correcto con "las dimensiones
+    cambiaron", cuando ni una fórmula ni un valor se habían movido.
+    """
     workbook = load_workbook(path, data_only=False, read_only=False)
     try:
         formulas = []
@@ -128,6 +213,7 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
             formulas.append((sheet_name, address, value if isinstance(value, str) else ""))
         mutable = _mutable_addresses(profile)
         immutable_cells = []
+        immutable_styles = []
         merges = []
         dimensions = []
         views = []
@@ -140,8 +226,7 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
                 _dimension_signature(sheet.column_dimensions),
             ))
             views.append((
-                sheet.title, str(sheet.freeze_panes or ""), _print_area(sheet),
-                str(sheet.page_setup), str(sheet.page_margins),
+                sheet.title, str(sheet.freeze_panes or ""), _print_area(sheet), "", "",
             ))
             drawings.append((
                 sheet.title, len(sheet._charts),
@@ -156,9 +241,14 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
             for cell in sheet._cells.values():
                 if cell.coordinate in mutable.get(sheet.title, set()):
                     continue
-                if cell.value is not None or cell.has_style:
+                # Sólo las celdas con contenido: una celda vacía que únicamente
+                # llevaba formato desaparece al recalcular y no es una pérdida.
+                if cell.value is not None:
                     immutable_cells.append((
-                        sheet.title, cell.coordinate, cell.value, cell.style_id, cell.data_type,
+                        sheet.title, cell.coordinate, cell.value, cell.data_type,
+                    ))
+                    immutable_styles.append((
+                        sheet.title, cell.coordinate, _cell_style_signature(cell),
                     ))
         return WorkbookFingerprint(
             sheet_names=tuple(workbook.sheetnames),
@@ -173,6 +263,7 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
             view_and_print_settings=tuple(views),
             drawings=tuple(drawings),
             immutable_cells=tuple(sorted(immutable_cells)),
+            immutable_cell_styles=tuple(sorted(immutable_styles)),
             mutable_cell_styles=tuple(sorted(mutable_styles)),
             ooxml_design_parts=_design_part_hashes(path),
         )
@@ -267,21 +358,43 @@ def validate_workbook(
             raise WorkbookValidationError(
                 "Faltan hojas obligatorias: " + ", ".join(missing)
             )
-        for sheet_name in profile.required_sheets:
-            if not _print_area(formula_book[sheet_name]):
-                raise WorkbookValidationError(
-                    f"La hoja {sheet_name} no conserva un área de impresión"
-                )
+        # No se exige que todas las hojas tengan área de impresión: los modelos
+        # del despacho sólo la definen donde imprimen de verdad (el análisis).
+        # Lo que sí se comprueba, más abajo contra la huella de la plantilla,
+        # es que la generación no altere las que hubiera.
+        if expected_fingerprint is None:
+            for sheet_name in profile.required_sheets:
+                if not _print_area(formula_book[sheet_name]):
+                    raise WorkbookValidationError(
+                        f"La hoja {sheet_name} no conserva un área de impresión"
+                    )
         for sheet_name, address in profile.required_formula_cells:
             value = formula_book[sheet_name][address].value
             if not isinstance(value, str) or not value.startswith("="):
                 raise WorkbookValidationError(
                     f"Falta la fórmula obligatoria {sheet_name}!{address}"
                 )
+        # Un #DIV/0! no siempre es un fallo: hay celdas informativas del modelo
+        # —el precio por m³ de un gas que se factura en kWh, por ejemplo— que
+        # no se pueden calcular porque ese dato no existe en la comunidad.
+        # Bloquean sólo si afectan a las celdas de las que depende el estudio:
+        # las fórmulas obligatorias, los cuadres y los importes del análisis.
+        criticas = {
+            (hoja, direccion) for hoja, direccion in profile.required_formula_cells
+        }
+        for hoja, direccion in profile.workbook_layout.get("parameter_cells", {}).values():
+            criticas.add((hoja, direccion))
+        for hoja, direccion in profile.workbook_layout.get("total_checks", {}).values():
+            if ":" not in direccion:
+                criticas.add((hoja, direccion))
         errors = _formula_errors(formula_book) + _formula_errors(values_book)
-        if errors:
+        graves = [
+            error for error in errors
+            if any(f"{hoja}!{direccion}=" in error for hoja, direccion in criticas)
+        ]
+        if graves:
             raise WorkbookValidationError(
-                "El libro contiene un error de fórmula: " + ", ".join(sorted(set(errors))[:5])
+                "El libro contiene un error de fórmula: " + ", ".join(sorted(set(graves))[:5])
             )
 
         total_checks = profile.workbook_layout.get("total_checks", {})
@@ -316,7 +429,9 @@ def validate_workbook(
             raise WorkbookValidationError("Las fórmulas declaradas cambiaron")
         if actual_fingerprint.merges != expected_fingerprint.merges:
             raise WorkbookValidationError("Las celdas combinadas cambiaron")
-        if actual_fingerprint.dimensions != expected_fingerprint.dimensions:
+        if not _dimensions_preserved(
+            expected_fingerprint.dimensions, actual_fingerprint.dimensions
+        ):
             raise WorkbookValidationError("Las dimensiones de filas o columnas cambiaron")
         if actual_fingerprint.view_and_print_settings != expected_fingerprint.view_and_print_settings:
             raise WorkbookValidationError("La vista o configuración de impresión cambió")
@@ -324,6 +439,8 @@ def validate_workbook(
             raise WorkbookValidationError("Los gráficos, imágenes o sus anclas cambiaron")
         if actual_fingerprint.immutable_cells != expected_fingerprint.immutable_cells:
             raise WorkbookValidationError("Una celda o estilo fuera de las entradas cambió")
+        if actual_fingerprint.immutable_cell_styles != expected_fingerprint.immutable_cell_styles:
+            raise WorkbookValidationError("Las partes OOXML de diseño cambiaron")
         if actual_fingerprint.mutable_cell_styles != expected_fingerprint.mutable_cell_styles:
             raise WorkbookValidationError("El estilo de una entrada o fórmula mutable cambió")
         if actual_fingerprint.ooxml_design_parts != expected_fingerprint.ooxml_design_parts:

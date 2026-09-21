@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
 
+from gestor_bd import clasificar_tipo_unidad, normalizar_codigo_vivienda
+
 
 ProgressCallback = Callable[[str, dict], None]
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -60,7 +62,7 @@ def import_owner_csv(
     inserted = updated = skipped = 0
     try:
         for row in valid_rows:
-            property_code = _clean(row.get("Fdenominacion"))
+            property_code = normalizar_codigo_vivienda(_clean(row.get("Fdenominacion")))
             owner_name = _clean(row.get("Nombre"))
             if not owner_name:
                 skipped += 1
@@ -91,11 +93,12 @@ def import_owner_csv(
                 connection.execute(
                     """
                     INSERT INTO propietarios
-                        (id_comunidad, codigo_vivienda, nombre_propietario,
+                        (id_comunidad, codigo_vivienda, tipo_unidad, nombre_propietario,
                          coeficiente, email)
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (id_comunidad, property_code, *values),
+                    (id_comunidad, property_code,
+                     clasificar_tipo_unidad(property_code), *values),
                 )
                 inserted += 1
         connection.commit()

@@ -140,17 +140,29 @@ def _active_results(
         raise LetterGenerationBlockedError("El perfil no declara conceptos para las cartas")
     placeholders = ",".join("?" for _ in profile_keys)
     rows = connection.execute(
-        f"""SELECT r.id_propietario,r.concept_key,r.consumption,r.consumption_unit,
+        f"""WITH latest_distribution AS (
+                SELECT id_distribution_run FROM distribution_runs
+                 WHERE id_case=? AND status='completed'
+                 ORDER BY completed_at DESC,id_distribution_run DESC LIMIT 1
+            )
+            SELECT r.id_propietario,r.concept_key,r.consumption,r.consumption_unit,
                    r.billed_cents,r.actual_cents,r.difference_cents,
                    rc.label,rc.service,rc.unit,rc.display_order,
-                   p.codigo_vivienda,p.nombre_propietario,p.coeficiente
+                   p.codigo_vivienda,p.nombre_propietario,p.coeficiente,
+                   snap.coefficient_raw,snap.coefficient_eligible_total,
+                   snap.coefficient_applied
             FROM owner_concept_results r
             JOIN propietarios p ON p.id_propietario=r.id_propietario
             JOIN regularization_concepts rc ON rc.concept_key=r.concept_key
+            LEFT JOIN latest_distribution latest ON 1=1
+            LEFT JOIN owner_distribution_snapshots snap
+              ON snap.id_distribution_run=latest.id_distribution_run
+             AND snap.id_propietario=r.id_propietario
+             AND snap.concept_key=r.concept_key
             WHERE r.id_periodo=? AND p.id_comunidad=? AND p.activo=1
               AND r.concept_key IN ({placeholders})
             ORDER BY p.id_propietario,rc.display_order,r.concept_key""",
-        (case["id_periodo"], case["id_comunidad"], *profile_keys),
+        (case["id_case"], case["id_periodo"], case["id_comunidad"], *profile_keys),
     ).fetchall()
     active_keys = tuple(
         key for key in profile_keys if any(row["concept_key"] == key for row in rows)
@@ -168,9 +180,14 @@ def _active_results(
                 + ", ".join(unavailable)
             )
         active_keys = tuple(key for key in active_keys if key in requested)
+    # Sólo se escribe a quien entra en la regularización. Garajes y locales no
+    # tienen contador ni cuota de estos servicios, así que no tienen resultado
+    # que comunicar y su ausencia no es una laguna del reparto.
     owner_ids = [
         int(row[0]) for row in connection.execute(
-            "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND activo=1 ORDER BY id_propietario",
+            """SELECT id_propietario FROM propietarios
+               WHERE id_comunidad=? AND activo=1 AND tipo_unidad='vivienda'
+               ORDER BY id_propietario""",
             (case["id_comunidad"],),
         ).fetchall()
     ]
@@ -199,54 +216,124 @@ def _active_results(
     return active_keys, rows
 
 
+def _group_letter_concepts(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convierte conceptos técnicos en las filas comprensibles de la carta."""
+    grouped: dict[str, dict[str, Any]] = {}
+    extras: list[dict[str, Any]] = []
+    mapping = {
+        "acs_variable": ("acs", "ACS"),
+        "heating_variable": ("heating", "Calefacción"),
+        "acs_fixed": ("fixed", "Cuota fija"),
+        "heating_fixed": ("fixed", "Cuota fija"),
+    }
+    for source in concepts:
+        target = mapping.get(str(source.get("key")))
+        if target is None:
+            extras.append(dict(source))
+            continue
+        group_key, label = target
+        row = grouped.setdefault(group_key, {
+            "key": group_key, "label": label, "service": None, "unit": None,
+            "consumption": None, "importe_cobrado": 0.0,
+            "importe_real": 0.0, "diferencia": 0.0,
+        })
+        for key in ("importe_cobrado", "importe_real", "diferencia"):
+            row[key] = round(float(row[key]) + float(source.get(key, 0.0) or 0.0), 2)
+        if source.get("consumption") is not None:
+            row["consumption"] = float(source["consumption"])
+            row["unit"] = source.get("unit")
+        if group_key == "acs":
+            row["service"] = "ACS"
+        elif group_key == "heating":
+            row["service"] = "CALEFACCION"
+    ordinary = [grouped[key] for key in ("acs", "heating", "fixed") if key in grouped]
+    return ordinary + extras
+
+
 def _consumption_graphs(
     connection: sqlite3.Connection,
     case: sqlite3.Row,
     owners: list[dict[str, Any]],
 ) -> dict[int, dict[str, Any]]:
-    """Prepara sólo la comparativa vecinal e histórico, nunca por períodos ajenos."""
-    # La vista combina el período original de lecturas_vecino con las
-    # asociaciones compartidas, conservando también las lecturas antiguas.
-    readings = connection.execute(
+    """Usa consumos efectivos repartidos, nunca diferencias brutas negativas."""
+    current = connection.execute(
+        """SELECT r.id_propietario,r.consumption
+             FROM owner_concept_results r
+             JOIN propietarios p ON p.id_propietario=r.id_propietario
+            WHERE r.id_periodo=? AND r.concept_key='acs_variable'
+              AND p.id_comunidad=? AND p.activo=1 AND p.tipo_unidad='vivienda'
+              AND r.consumption IS NOT NULL AND r.consumption>=0
+            ORDER BY r.id_propietario""",
+        (case["id_periodo"], case["id_comunidad"]),
+    ).fetchall()
+    consumption = {
+        int(row["id_propietario"]): float(row["consumption"]) for row in current
+    }
+    # Compatibilidad con repartos históricos creados antes de que se guardara
+    # ``owner_concept_results.consumption``. Sólo se usa si falta el resultado
+    # canónico y nunca se acepta una diferencia negativa.
+    legacy_current = connection.execute(
         """SELECT l.id_propietario,l.fecha_lectura,l.valor_acumulado
            FROM period_readings l JOIN propietarios p ON p.id_propietario=l.id_propietario
-           WHERE p.id_comunidad=? AND p.activo=1 AND l.id_periodo=? AND l.tipo='ACS'
-             AND l.fecha_lectura IN (?,?)
+           WHERE p.id_comunidad=? AND p.activo=1 AND p.tipo_unidad='vivienda'
+             AND l.id_periodo=? AND l.tipo='ACS' AND l.fecha_lectura IN (?,?)
            ORDER BY l.id_propietario,l.fecha_lectura""",
         (case["id_comunidad"], case["id_periodo"], case["fecha_inicio"], case["fecha_fin"]),
     ).fetchall()
-    values: dict[int, dict[str, float]] = {}
-    for reading in readings:
-        values.setdefault(int(reading["id_propietario"]), {})[reading["fecha_lectura"]] = float(
-            reading["valor_acumulado"]
-        )
-    consumption = {
-        owner_id: value[case["fecha_fin"]] - value[case["fecha_inicio"]]
-        for owner_id, value in values.items()
-        if case["fecha_inicio"] in value and case["fecha_fin"] in value
-        and value[case["fecha_fin"]] >= value[case["fecha_inicio"]]
-    }
+    legacy_values: dict[int, dict[str, float]] = {}
+    for row in legacy_current:
+        legacy_values.setdefault(int(row["id_propietario"]), {})[
+            row["fecha_lectura"]
+        ] = float(row["valor_acumulado"])
+    for owner_id, values in legacy_values.items():
+        if owner_id in consumption:
+            continue
+        if case["fecha_inicio"] in values and case["fecha_fin"] in values:
+            difference = values[case["fecha_fin"]] - values[case["fecha_inicio"]]
+            if difference >= 0:
+                consumption[owner_id] = difference
     neighbors = list(consumption.values())
     graphs: dict[int, dict[str, Any]] = {}
     for owner in owners:
         owner_id = int(owner["id_propietario"])
         historical = connection.execute(
-            """SELECT per.nombre,ini.valor_acumulado AS initial_value,fin.valor_acumulado AS final_value
+            """SELECT per.nombre,r.consumption
+               FROM owner_concept_results r
+               JOIN periodos per ON per.id_periodo=r.id_periodo
+               WHERE r.id_propietario=? AND r.concept_key='acs_variable'
+                 AND per.id_comunidad=? AND per.id_periodo<>?
+                 AND r.consumption IS NOT NULL AND r.consumption>=0
+               ORDER BY per.fecha_inicio""",
+            (owner_id, case["id_comunidad"], case["id_periodo"]),
+        ).fetchall()
+        history_by_period = {
+            row["nombre"]: float(row["consumption"]) for row in historical
+        }
+        legacy_history = connection.execute(
+            """SELECT per.nombre,ini.valor_acumulado AS initial_value,
+                      fin.valor_acumulado AS final_value
                FROM periodos per
                JOIN period_readings ini ON ini.id_periodo=per.id_periodo
-                   AND ini.id_propietario=? AND ini.tipo='ACS' AND ini.fecha_lectura=per.fecha_inicio
+                   AND ini.id_propietario=? AND ini.tipo='ACS'
+                   AND ini.fecha_lectura=per.fecha_inicio
                JOIN period_readings fin ON fin.id_periodo=per.id_periodo
-                   AND fin.id_propietario=? AND fin.tipo='ACS' AND fin.fecha_lectura=per.fecha_fin
-               WHERE per.id_comunidad=? AND per.id_periodo<>? ORDER BY per.fecha_inicio""",
+                   AND fin.id_propietario=? AND fin.tipo='ACS'
+                   AND fin.fecha_lectura=per.fecha_fin
+               WHERE per.id_comunidad=? AND per.id_periodo<>?
+               ORDER BY per.fecha_inicio""",
             (owner_id, owner_id, case["id_comunidad"], case["id_periodo"]),
         ).fetchall()
+        for row in legacy_history:
+            if row["nombre"] in history_by_period:
+                continue
+            difference = float(row["final_value"]) - float(row["initial_value"])
+            if difference >= 0:
+                history_by_period[row["nombre"]] = difference
         graphs[owner_id] = {
             "owner_consumption": consumption.get(owner_id, 0.0),
             "neighbor_consumptions": neighbors,
             "history": [
-                (row["nombre"], float(row["final_value"]) - float(row["initial_value"]))
-                for row in historical
-                if float(row["final_value"]) >= float(row["initial_value"])
+                (name, value) for name, value in history_by_period.items()
             ],
             "unit": "m³",
         }
@@ -414,12 +501,25 @@ def generate_case_letters(
         for row in rows:
             owner_id = int(row["id_propietario"])
             by_owner.setdefault(owner_id, []).append(row)
+            raw_coefficient = (
+                row["coefficient_raw"]
+                if row["coefficient_raw"] is not None else row["coeficiente"]
+            )
             owner_data.setdefault(owner_id, {
                 "id_propietario": owner_id,
                 "nombre": row["nombre_propietario"],
                 "vivienda": row["codigo_vivienda"],
-                "coeficiente": row["coeficiente"],
+                "participacion_registral": raw_coefficient,
+                "coeficiente_aplicado": row["coefficient_applied"],
             })
+        eligible_total = sum(
+            float(owner["participacion_registral"] or 0) for owner in owner_data.values()
+        )
+        for owner in owner_data.values():
+            if owner["coeficiente_aplicado"] is None and eligible_total > 0:
+                owner["coeficiente_aplicado"] = (
+                    float(owner["participacion_registral"] or 0) / eligible_total
+                )
         graphs = _consumption_graphs(connection, case, list(owner_data.values()))
         input_hash = _letter_input_hash(export, identity, rows, active_keys, graphs)
 
@@ -462,7 +562,7 @@ def generate_case_letters(
         generated = 0
         for owner_id in sorted(by_owner):
             owner = owner_data[owner_id]
-            concepts = [
+            technical_concepts = [
                 {
                     "key": row["concept_key"], "label": row["label"], "service": row["service"],
                     "unit": row["unit"], "consumption": row["consumption"],
@@ -472,6 +572,7 @@ def generate_case_letters(
                 }
                 for row in by_owner[owner_id] if row["concept_key"] in active_keys
             ]
+            concepts = _group_letter_concepts(technical_concepts)
             total = {
                 "cobrado": round(sum(item["importe_cobrado"] for item in concepts), 2),
                 "real": round(sum(item["importe_real"] for item in concepts), 2),
@@ -492,7 +593,11 @@ def generate_case_letters(
             connection.commit()
             _emit(progress, "generate_letter", id_propietario=owner_id, total=len(by_owner))
             letter_data = {
-                "vecino": {"nombre": owner["nombre"], "vivienda": owner["vivienda"], "coeficiente": owner["coeficiente"]},
+                "vecino": {
+                    "nombre": owner["nombre"], "vivienda": owner["vivienda"],
+                    "participacion_registral": owner["participacion_registral"],
+                    "coeficiente_aplicado": owner["coeficiente_aplicado"],
+                },
                 "periodo": {"nombre": case["period_name"], "fecha_inicio": case["fecha_inicio"], "fecha_fin": case["fecha_fin"]},
                 "comunidad": case["community_name"], "conceptos": concepts, "total": total,
                 "medias": {"n_vecinos": len(by_owner)}, "consumo_grafica": graphs.get(owner_id, {}),
