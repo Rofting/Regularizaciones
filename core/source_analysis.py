@@ -14,6 +14,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
+from invoice_extractors import FieldEvidence
+
 
 INVOICE_FIELDS = ("fecha_inicio", "fecha_fin", "importe_total")
 _TABULAR_SUFFIXES = {".csv", ".xls", ".xlsx"}
@@ -41,15 +43,27 @@ class SourceAnalysis:
     locator: SourceLocator | None = None
     review_message: str | None = None
     disposition: str = "operational"
+    provider_key: str | None = None
+    field_evidence: Mapping[str, FieldEvidence] = field(default_factory=dict)
+    analysis_version: str = "source-analysis-v2"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "candidates", MappingProxyType(dict(self.candidates)))
+        evidence = dict(self.field_evidence)
+        candidates = dict(self.candidates)
+        for name, item in evidence.items():
+            candidates.setdefault(name, item.value)
+        object.__setattr__(self, "candidates", MappingProxyType(candidates))
         object.__setattr__(self, "required_fields", tuple(self.required_fields))
+        object.__setattr__(self, "field_evidence", MappingProxyType(evidence))
 
     @classmethod
     def invoice(cls, candidates: Mapping[str, str | None] | None = None, *, locator=None,
-                confidence: str = "high") -> "SourceAnalysis":
-        return cls("invoice", confidence, candidates or {}, INVOICE_FIELDS, locator)
+                confidence: str = "high", provider_key: str | None = None,
+                field_evidence: Mapping[str, FieldEvidence] | None = None) -> "SourceAnalysis":
+        return cls(
+            "invoice", confidence, candidates or {}, INVOICE_FIELDS, locator,
+            provider_key=provider_key, field_evidence=field_evidence or {},
+        )
 
     @classmethod
     def reading(cls, candidates: Mapping[str, str | None] | None = None, *, locator=None) -> "SourceAnalysis":
@@ -188,7 +202,22 @@ def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = 
     }
     locator = _locator_from_mapping(result, data)
     if result.get("tipo") == "FACTURA":
-        return SourceAnalysis.invoice(candidates, locator=locator)
+        return SourceAnalysis.invoice(
+            candidates,
+            locator=locator,
+            provider_key=_string_value(
+                result.get("provider_key", result.get("proveedor_clave"))
+            ),
+            field_evidence=(
+                result.get("field_evidence")
+                if isinstance(result.get("field_evidence"), Mapping)
+                and all(
+                    isinstance(item, FieldEvidence)
+                    for item in result.get("field_evidence", {}).values()
+                )
+                else {}
+            ),
+        )
     if result.get("tipo") == "LECTURA_METRIGEST":
         return SourceAnalysis.reading(candidates, locator=locator)
     if result.get("tipo") == "JUSTIFICANTE_PAGO":

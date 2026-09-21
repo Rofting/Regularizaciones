@@ -14,9 +14,28 @@ if str(CORE_DIR) not in sys.path:
 import source_analysis
 import lector_pdf
 import community_discovery
+from invoice_extractors import FieldEvidence
 
 
 class SourceAnalysisTest(unittest.TestCase):
+    def test_field_evidence_remains_available_through_legacy_candidates(self):
+        evidence = FieldEvidence(
+            value="121.00",
+            confidence="high",
+            source="text",
+            locator={"fragment": "Total 121,00 EUR"},
+            rule_id="test:total:v1",
+        )
+
+        result = source_analysis.SourceAnalysis.invoice(
+            provider_key="SYNTHETIC",
+            field_evidence={"importe_total": evidence},
+        )
+
+        self.assertEqual("121.00", result.candidates["importe_total"])
+        self.assertIs(evidence, result.field_evidence["importe_total"])
+        self.assertEqual("SYNTHETIC", result.provider_key)
+
     def test_mail_filename_extracts_community_and_service_hint(self):
         evidence = community_discovery.filename_evidence(
             Path("644 - Limpieza mar 2026.pdf")
