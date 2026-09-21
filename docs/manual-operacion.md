@@ -7,12 +7,20 @@
 1. Selecciona la comunidad y el período de trabajo.
 2. Crea o selecciona el expediente.
 3. Pulsa **Añadir fuentes** y elige archivos o una carpeta. Se admiten PDF,
-   XLS, XLSX y CSV; los originales se archivan sin modificar.
-4. Revisa las incidencias. Al pulsar **Abrir archivo**, contrasta el dato con
-   el original y confirma únicamente el valor que solicita la pantalla.
-5. Cuando no haya incidencias, pulsa **Confirmar fuentes**. Este paso aplica
+   XLS, XLSX y CSV; los originales se archivan sin modificar. La barra inferior
+   muestra las fases **Huella**, **Leyendo texto**, **Clasificando**,
+   **Identificando proveedor**, **Extrayendo campos** y **Finalizado**.
+4. El sistema elimina duplicados por contenido, reutiliza el texto/OCR ya leído
+   y separa facturas, abonos, lecturas, propietarios, presupuestos, albaranes,
+   justificantes e informes. Un archivo ilegible no detiene el resto del lote.
+5. Las fuentes completas y seguras se aplican sin confirmación individual.
+   **Validar** muestra sólo decisiones raíz pendientes. Si falta el emisor se
+   pregunta una vez por el proveedor y después se reanalizan sus campos.
+6. Al pulsar **Abrir archivo**, contrasta el dato con el original y confirma
+   únicamente el valor que solicita la pantalla.
+7. Cuando no haya incidencias, pulsa **Confirmar fuentes**. Este paso aplica
    los datos revisados al expediente.
-6. Pulsa **Generar Excel oficial**, después **Calcular reparto** y, una vez
+8. Pulsa **Generar Excel oficial**, después **Calcular reparto** y, una vez
    conciliado, **Generar cartas**.
 
 El botón lateral **Reparto** nunca salta los pasos anteriores: abre la acción
@@ -39,6 +47,45 @@ para evitar esperas largas. Si no puede leerlo, la incidencia explica si el
 problema fue la imagen, el motor local o el lector PDF. Abre el original y
 clasifícalo o introduce el campo solicitado; no es necesario seguir enlaces de
 instalación desde la incidencia.
+
+El texto se guarda en una caché local por huella SHA-256 y versión del lector.
+Al reanalizar una fuente idéntica no se vuelve a ejecutar OCR. Todo el proceso
+es local: el PDF y su texto no se envían a servicios externos.
+
+## Reconocimiento y aplicación
+
+- Reconocer una factura no significa aplicarla automáticamente. Deben coincidir
+  comunidad, período y módulo activo de la comunidad.
+- Una factura reconocida de un servicio no activo se conserva en el histórico,
+  pero no altera el Excel, el reparto ni las cartas.
+- Un valor de confianza baja queda como evidencia para revisión; nunca pasa a
+  las tablas canónicas.
+- Después de corregir proveedor o tipo documental, pulsa **Reanalizar fuentes**.
+  Se mantienen las correcciones manuales válidas y se recalcula lo pendiente.
+
+## Auditor privado del catálogo
+
+El auditor sirve para medir el reconocimiento sobre una carpeta real sin
+guardar en el repositorio nombres, texto de facturas ni datos personales. Desde
+PowerShell, en la carpeta del proyecto:
+
+```powershell
+$env:REGULARIZACIONES_SOURCE_ROOT = "C:\ruta\de\las\fuentes"
+.\.venv-fase1\Scripts\python.exe scripts\audit_provider_catalog.py `
+  --root "$env:REGULARIZACIONES_SOURCE_ROOT" `
+  --database data\gestion.db `
+  --output .private-audit\provider-catalog.json
+```
+
+El JSON queda en `.private-audit/`, carpeta ignorada por Git. Los indicadores
+principales son:
+
+- `text_invoices_recognised_pct`: porcentaje de facturas con proveedor resuelto;
+  el objetivo operativo es al menos 90 %.
+- `provider_decisions_remaining`: documentos que aún requieren decidir emisor;
+  el objetivo del corpus de referencia es menos de 60.
+- `non_invoice_false_positives`: documentos no facturables tratados como factura;
+  debe permanecer en 0.
 
 ## Reglas de seguridad
 
