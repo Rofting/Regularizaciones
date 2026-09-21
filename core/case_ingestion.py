@@ -157,7 +157,22 @@ def _persist_analysis(
     reanalysis: bool,
 ) -> None:
     analysis = _normalised_analysis(analysis)
-    candidates = {field.strip(): value for field, value in analysis.candidates.items()}
+    candidates = {
+        field.strip(): value
+        for field, value in analysis.candidates.items()
+        if field not in analysis.field_evidence
+        or analysis.field_evidence[field].confidence.lower() != "low"
+    }
+    if analysis.disposition == "non_operational":
+        eligibility_status, eligibility_reason = "not_applicable", "non_operational"
+    elif analysis.kind == "unknown":
+        eligibility_status, eligibility_reason = "review_required", "document_unknown"
+    elif analysis.kind == "invoice" and analysis.field_evidence and not analysis.provider_key:
+        eligibility_status, eligibility_reason = "review_required", "provider_unknown"
+    else:
+        # Legacy analyses already validated by their provider-specific parser
+        # remain compatible while the new orchestrator is rolled out.
+        eligibility_status, eligibility_reason = "eligible", None
     with _transaction(connection):
         stored = connection.execute(
             """SELECT document_kind,classification_confidence,source_context
@@ -224,10 +239,34 @@ def _persist_analysis(
         required_fields = _required_fields_for_kind(analysis, effective_kind)
         connection.execute(
             """UPDATE source_documents
-               SET document_kind = ?, classification_confidence = ?, source_context = ?
+               SET document_kind = ?, classification_confidence = ?, source_context = ?,
+                   provider_key = ?, analysis_version = ?, eligibility_status = ?,
+                   eligibility_reason = ?
                WHERE id_document = ? AND id_case = ?""",
-            (effective_kind, effective_confidence, effective_context, document.id_document, case_id),
+            (
+                effective_kind, effective_confidence, effective_context,
+                analysis.provider_key, analysis.analysis_version,
+                eligibility_status, eligibility_reason,
+                document.id_document, case_id,
+            ),
         )
+        for field_name, evidence in analysis.field_evidence.items():
+            connection.execute(
+                """INSERT INTO source_field_evidence (
+                       id_document,field_name,value,confidence,source,locator_json,
+                       rule_id,extractor_version
+                   ) VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id_document,field_name,rule_id,extractor_version)
+                   DO UPDATE SET value=excluded.value,confidence=excluded.confidence,
+                                 source=excluded.source,locator_json=excluded.locator_json,
+                                 created_at=datetime('now')""",
+                (
+                    document.id_document, field_name, evidence.value,
+                    evidence.confidence, evidence.source,
+                    json.dumps(dict(evidence.locator), ensure_ascii=False),
+                    evidence.rule_id, evidence.extractor_version,
+                ),
+            )
         _recover_invalid_confirmed_candidates(
             connection, case_id, document.id_document, analysis, candidates,
         )
@@ -244,6 +283,20 @@ def _persist_analysis(
             document_review.clear_open_automatic_issues(
                 connection, case_id, document.id_document,
             )
+        if eligibility_reason == "provider_unknown":
+            document_review.create_review_issue(
+                connection,
+                case_id,
+                document.id_document,
+                code="PROVIDER_UNKNOWN",
+                field_name="document.provider",
+                detected_value=None,
+                message=(
+                    "No se ha identificado con seguridad el emisor. Confirma el proveedor "
+                    "una sola vez; después se reanalizarán sus fechas e importes."
+                ),
+            )
+            return
         classification_conflict = bool(
             confirmed_kind
             and effective_kind != analysis.kind
@@ -317,6 +370,12 @@ def _auto_apply_clean_analysis(
     pendientes para la revisión humana normal.
     """
     if analysis.confidence.strip().lower() != "high":
+        return document
+    eligibility = connection.execute(
+        "SELECT eligibility_status FROM source_documents WHERE id_document=?",
+        (document.id_document,),
+    ).fetchone()
+    if eligibility is not None and eligibility[0] != "eligible":
         return document
     if document.document_kind not in {"invoice", "owners", "reading"}:
         return document

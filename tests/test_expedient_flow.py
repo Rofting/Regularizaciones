@@ -21,6 +21,7 @@ import document_review
 import expedient_service
 import gestor_bd
 from source_analysis import SourceAnalysis, SourceLocator
+from invoice_extractors import FieldEvidence
 
 
 class ExpedientFlowTest(unittest.TestCase):
@@ -157,6 +158,68 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
         self.assertFalse(document_review.case_has_unapplied_sources(self.connection, self.case.id_case))
         self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+
+    def test_analysis_persists_provider_and_field_evidence(self):
+        evidence = FieldEvidence(
+            value="123.45", confidence="high", source="text",
+            locator={"page": 1, "fragment": "Total 123,45 EUR"},
+            rule_id="synthetic:total:v1",
+        )
+        result = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.source_path,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.invoice(
+                {
+                    "tipo_suministro": "GAS",
+                    "fecha_inicio": "2026-01-01",
+                    "fecha_fin": "2026-01-31",
+                },
+                provider_key="SYNTHETIC",
+                field_evidence={"importe_total": evidence},
+            ),
+        )
+
+        document = self.connection.execute(
+            """SELECT provider_key,analysis_version,eligibility_status
+                 FROM source_documents WHERE id_document=?""",
+            (result.document.id_document,),
+        ).fetchone()
+        stored = self.connection.execute(
+            """SELECT value,confidence,rule_id FROM source_field_evidence
+                 WHERE id_document=? AND field_name='importe_total'""",
+            (result.document.id_document,),
+        ).fetchone()
+        self.assertEqual(
+            ("SYNTHETIC", "source-analysis-v2", "eligible"), tuple(document)
+        )
+        self.assertEqual(("123.45", "high", "synthetic:total:v1"), tuple(stored))
+
+    def test_unknown_provider_creates_one_root_issue_before_field_issues(self):
+        evidence = FieldEvidence(
+            value="2026-01-01", confidence="high", source="text",
+            locator={"fragment": "Periodo 01/01/2026"}, rule_id="generic:start:v1",
+        )
+        result = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.source_path,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.invoice(
+                {
+                    "tipo_suministro": "GAS",
+                    "fecha_fin": "2026-01-31",
+                    "importe_total": "123.45",
+                },
+                field_evidence={"fecha_inicio": evidence},
+            ),
+        )
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(1, len(issues))
+        self.assertEqual("document.provider", issues[0].field_name)
+        self.assertEqual("under_review", result.document.status)
 
     def test_batch_auto_apply_publishes_owners_before_complete_readings(self):
         owners_file = Path(self.directory.name) / "propietarios.csv"
