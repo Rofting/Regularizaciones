@@ -25,7 +25,8 @@ import excel_generator
 import gestor_bd
 from excel_export_service import (
     ExportBlockedError, _case_context, _input_hash, _profile_for_community,
-    _is_winter, _season_boundary, generate_official_excel,
+    _is_winter, _season_boundary, _validate_normalized_inputs,
+    generate_official_excel,
 )
 from excel_validation import WorkbookValidationError, validate_workbook, workbook_fingerprint
 from office_recalculation import (
@@ -427,6 +428,27 @@ class ExcelExportServiceTest(unittest.TestCase):
             )
 
         self.assertFalse(self.official_output.exists())
+
+    def test_invoice_without_optional_fixed_variable_breakdown_is_exportable(self):
+        invoice_id = self.connection.execute(
+            "SELECT id_factura FROM facturas WHERE tipo_suministro='GAS'"
+        ).fetchone()[0]
+        self.connection.execute(
+            "DELETE FROM invoice_components WHERE id_factura=? AND component_key IN ('fixed','variable')",
+            (invoice_id,),
+        )
+        self.connection.execute(
+            "UPDATE facturas SET termino_fijo=NULL,termino_variable=NULL WHERE id_factura=?",
+            (invoice_id,),
+        )
+        self.connection.commit()
+
+        case = _case_context(self.connection, self.case_id)
+        profile = _profile_for_community(
+            self.connection, self.project_root, "658", self.community_id,
+        )
+
+        _validate_normalized_inputs(self.connection, case, profile)
 
     def test_formula_error_fails_auditable_run_without_replacing_predecessor(self):
         self.official_output.parent.mkdir(parents=True)

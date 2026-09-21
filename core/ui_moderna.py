@@ -322,7 +322,10 @@ class WorkflowStepRow(ctk.CTkFrame):
         self.set_status(status)
 
     def _invoke(self):
-        if self._command is not None and self._status in {"active", "ready"}:
+        # Los pasos completados siguen siendo navegación útil: el usuario
+        # puede volver a Fuentes o Validar para revisar/corregir datos sin
+        # reiniciar el expediente. Sólo los pasos futuros permanecen bloqueados.
+        if self._command is not None and self._status in {"active", "ready", "done"}:
             self._command()
 
     def set_status(self, status: str) -> None:
