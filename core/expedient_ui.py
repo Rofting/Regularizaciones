@@ -20,8 +20,8 @@ import community_onboarding
 import document_review
 import expedient_service
 import gestor_bd
+import source_batch
 import ui_moderna as UIM
-from source_analysis import analyse_source
 from expedient_models import ReviewIssue
 from ui_moderna import C
 
@@ -1749,7 +1749,33 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                     "aviso",
                 )
             total = len(accepted_paths)
-            for index, source_path in enumerate(accepted_paths, start=1):
+            phase_labels = {
+                "hashing": "Calculando huella",
+                "text": "Leyendo texto",
+                "classification": "Clasificando",
+                "provider": "Identificando proveedor",
+                "fields": "Extrayendo campos",
+                "completed": "Finalizado",
+            }
+
+            def batch_progress(event):
+                label = phase_labels.get(event.phase, event.phase)
+                filename = f": {event.filename}" if event.filename else ""
+                app.after(
+                    0,
+                    lambda text=f"{label} {event.completed}/{event.total}{filename}":
+                    app._estado(text, procesando=True),
+                )
+
+            batch_items = source_batch.analyse_batch(
+                accepted_paths,
+                community_code=community_code,
+                database_path=database_path,
+                max_workers=3,
+                progress=batch_progress,
+            )
+            for index, item in enumerate(batch_items, start=1):
+                source_path = item.path
                 path = str(source_path)
                 filename = Path(path).name
                 connection = None
@@ -1758,16 +1784,22 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                     procesando=True,
                 )
                 app.log(f"Fuente {index} de {total}: {filename}", "info")
+                if item.error is not None or item.analysis is None:
+                    errors.append((filename, item.error or "Análisis sin resultado"))
+                    app.log(
+                        f"No se pudo analizar {filename}: {item.error or 'sin resultado'}",
+                        "error",
+                    )
+                    continue
                 try:
                     connection = gestor_bd.conectar(database_path)
                     case_ingestion.assert_case_belongs_to_community(connection, case_id, community_id)
-                    analysis = analyse_source(Path(path), community_code=community_code)
                     result = case_ingestion.add_analysed_document_to_case(
                         connection,
                         case_id,
                         source_path=path,
                         archive_root=archive_root,
-                        analysis=analysis,
+                        analysis=item.analysis,
                     )
                 except Exception as exc:
                     errors.append((filename, str(exc)))
