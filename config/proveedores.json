@@ -1,5 +1,6 @@
 {
   "_descripcion": "Catálogo global de proveedores para todas las comunidades. Las firmas y formatos se editan aquí una sola vez; CUPS, referencias y otros datos particulares pueden seguir asociados a cada comunidad.",
+  "_schema_version": "2",
   "_version": "1.0",
   "_instrucciones": [
     "Cada proveedor tiene: 'tipo_suministro', 'firma_identificacion' (texto único en el PDF),",
