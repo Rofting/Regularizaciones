@@ -764,6 +764,46 @@ class ExpedientFlowTest(unittest.TestCase):
             )],
         )
 
+    def test_reanalysis_overrides_old_invoice_decision_for_recognised_informational_document(self):
+        result = case_ingestion.add_analysed_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.unknown_file,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.unknown(),
+        )
+        classification_issue = document_review.list_open_issues(
+            self.connection, self.case.id_case,
+        )[0]
+        document_review.resolve_issue(
+            self.connection,
+            classification_issue.id_issue,
+            value="invoice",
+            reason="Clasificación antigua antes de reconocer justificantes bancarios",
+        )
+
+        reanalysed = case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            analyser=lambda _path: SourceAnalysis.informational(
+                "Justificante bancario reconocido; se conserva como soporte informativo."
+            ),
+        )
+
+        self.assertEqual("other", reanalysed[0].document.document_kind)
+        self.assertFalse(document_review.list_open_issues(
+            self.connection, self.case.id_case,
+        ))
+        recovery = self.connection.execute(
+            """SELECT corrected_value,resolved_by FROM manual_corrections
+               WHERE id_issue IN (
+                   SELECT id_issue FROM review_issues
+                   WHERE id_document=? AND code='AUTOMATIC_ANALYSIS_RECOVERY'
+               )""",
+            (result.document.id_document,),
+        ).fetchone()
+        self.assertEqual(("other", "deteccion_automatica"), tuple(recovery))
+
     def test_manual_reading_classification_ignores_conflicting_invoice_requirements(self):
         result = case_ingestion.add_analysed_document_to_case(
             self.connection,

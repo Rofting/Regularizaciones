@@ -36,6 +36,28 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual(("644", "658"), tuple(item.community_code for item in proposal.groups))
         self.assertEqual((), proposal.unassigned_paths)
 
+    def test_mail_invoice_suffix_routes_to_its_community(self):
+        evidence = community_discovery.filename_evidence(
+            Path("Factura_01_601.pdf")
+        )
+
+        self.assertEqual("601", evidence.community_code)
+
+    def test_selected_case_partition_rejects_another_community(self):
+        accepted, foreign = community_discovery.partition_sources_for_community(
+            (
+                Path("Factura_01_601.pdf"),
+                Path("644_agua.pdf"),
+                Path("factura_sin_codigo.pdf"),
+            ),
+            "644",
+        )
+
+        self.assertEqual(
+            (Path("644_agua.pdf"), Path("factura_sin_codigo.pdf")), accepted,
+        )
+        self.assertEqual((Path("Factura_01_601.pdf"),), foreign)
+
     def test_invoice_result_requires_only_missing_invoice_fields(self):
         result = source_analysis.analyse_pdf(
             Path("invoice.pdf"),
@@ -154,6 +176,63 @@ class SourceAnalysisTest(unittest.TestCase):
 
         self.assertEqual("MANTENIMIENTOS_ZARAGOZA", key)
         self.assertEqual("MANTENIMIENTO", config["tipo_suministro"])
+
+    def test_global_maintenance_profile_reads_new_format_for_any_community(self):
+        text = (
+            "MANTENIMIENTOS ZARAGOZA S.L. FACTURA Nº: 2026-05-601-1 "
+            "Fecha de emisión: 05 de mayo de 2026 DATOS DEL CLIENTE: "
+            "NIF/CIF del cliente: H1000601A Código interno de cliente: 601 "
+            "CONCEPTO DE LOS SERVICIOS: Cuota de mantenimiento integral mensual. "
+            "Base Imponible: 450 EUR IVA (21%): 94.5 EUR "
+            "TOTAL A PAGAR: 544.5 EUR"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "Factura_01_601.pdf"
+            path.touch()
+            with mock.patch("lector_pdf.extraer_texto", return_value=text):
+                result = source_analysis.analyse_pdf(path, community_code="601")
+
+        self.assertEqual("invoice", result.kind)
+        self.assertEqual("high", result.confidence)
+        self.assertEqual("2026-05-05", result.candidates["fecha_inicio"])
+        self.assertEqual("2026-05-05", result.candidates["fecha_fin"])
+        self.assertEqual("544.5", result.candidates["importe_total"])
+        self.assertEqual("MANTENIMIENTO", result.candidates["tipo_suministro"])
+
+    def test_maintenance_invoice_for_another_community_is_non_operational(self):
+        text = (
+            "MANTENIMIENTOS ZARAGOZA S.L. FACTURA Nº: 2026-05-601-1 "
+            "Fecha de emisión: 05 de mayo de 2026 "
+            "Código interno de cliente: 601 TOTAL A PAGAR: 544.5 EUR"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "Factura_01_601.pdf"
+            path.touch()
+            with mock.patch("lector_pdf.extraer_texto", return_value=text):
+                result = source_analysis.analyse_pdf(path, community_code="644")
+
+        self.assertEqual("other", result.kind)
+        self.assertEqual("high", result.confidence)
+        self.assertEqual((), result.required_fields)
+        self.assertIn("601", result.review_message)
+
+    def test_bank_transfer_receipt_is_informational_not_an_invoice(self):
+        text = (
+            "Bankinter Adeudo por transferencia Número de transferencia 15052026008018400001 "
+            "Ordenante METRIGEST GESTION DE CONSUMO SL Beneficiario CDAD.PROP. "
+            "Fecha emisión Importe 15-05-26 2.325,96 "
+            "El presente documento acredita que Bankinter ha recibido la orden BKBKESMM"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bankinter-644.pdf"
+            path.touch()
+            with mock.patch("lector_pdf.extraer_texto", return_value=text):
+                result = source_analysis.analyse_pdf(path, community_code="644")
+
+        self.assertEqual("other", result.kind)
+        self.assertEqual("high", result.confidence)
+        self.assertEqual((), result.required_fields)
+        self.assertIn("justificante", result.review_message.lower())
 
     def test_catalogue_identifies_naturgy_clientes_gas_invoice(self):
         providers = lector_pdf.cargar_proveedores(

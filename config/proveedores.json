@@ -1,5 +1,5 @@
 {
-  "_descripcion": "Firmas de identificación de facturas por proveedor. Editable sin tocar código.",
+  "_descripcion": "Catálogo global de proveedores para todas las comunidades. Las firmas y formatos se editan aquí una sola vez; CUPS, referencias y otros datos particulares pueden seguir asociados a cada comunidad.",
   "_version": "1.0",
   "_instrucciones": [
     "Cada proveedor tiene: 'tipo_suministro', 'firma_identificacion' (texto único en el PDF),",
@@ -361,14 +361,16 @@
       "periodo_por_fecha_factura": true,
       "firmas_identificacion": [
         "INSTALACIONES\\s+ZARAGOZA\\s+S\\.L\\.",
+        "MANTENIMIENTOS\\s+ZARAGOZA\\s+S\\.L\\.",
         "B99091316",
         "MANTENIMIENTO DE SALAS DE CALDERAS",
         "presupuestos@mantenimientoszaragoza.com"
       ],
+      "regex_codigo_comunidad": "C[oó�]digo\\s+interno\\s+de\\s+cliente:\\s*(?P<valor>\\d{3,6})",
       "regex": {
-        "num_factura": "Factura\\s+N[úu]mero\\s*#?\\s*(?P<valor>[A-Z]\\d+)",
-        "fecha_factura": "Fecha\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
-        "importe_total": "[A-Z]\\d+\\s*-\\s*(?P<valor>[\\d.,]+)\\s*(?:€|�)"
+        "num_factura": "(?:Factura\\s+N[úu]mero\\s*#?\\s*|FACTURA\\s+N[^:\\n]{0,3}:\\s*)(?P<valor>[A-Z]?\\d[\\w/-]*)",
+        "fecha_factura": "Fecha(?:\\s+de\\s+emisi.n)?[:\\s]+(?P<valor>(?:\\d{1,2}[./-]\\d{1,2}[./-]\\d{2,4})|(?:\\d{1,2}\\s+de\\s+\\w+\\s+de\\s+\\d{4}))",
+        "importe_total": "(?:[A-Z]\\d+\\s*-\\s*|TOTAL\\s+A\\s+PAGAR:\\s*)(?P<valor>[\\d.,]+)\\s*(?:EUR|€|�)"
       },
       "cups_comunidades": {}
     },

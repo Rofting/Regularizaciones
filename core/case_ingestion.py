@@ -170,6 +170,25 @@ def _persist_analysis(
             connection, document.id_document,
         )
         if (
+            confirmed_kind
+            and analysis.kind == "other"
+            and analysis.confidence.strip().lower() == "high"
+            and analysis.disposition == "non_operational"
+        ):
+            document_review.record_automatic_candidate_recovery(
+                connection,
+                case_id,
+                document.id_document,
+                field_name="document_kind",
+                original_value=confirmed_kind,
+                corrected_value="other",
+                reason=(
+                    analysis.review_message
+                    or "Documento informativo reconocido con confianza alta; no interviene en el cálculo."
+                ),
+            )
+            confirmed_kind = None
+        if (
             confirmed_kind in {"reading", "owners"}
             and _is_unmistakable_invoice(analysis, candidates)
         ):

@@ -1728,8 +1728,29 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
             duplicate_count = 0
             errors = []
             kinds = []
-            total = len(paths)
-            for index, path in enumerate(paths, start=1):
+            lookup = gestor_bd.conectar(database_path)
+            try:
+                case_ingestion.assert_case_belongs_to_community(
+                    lookup, case_id, community_id,
+                )
+                community = lookup.execute(
+                    "SELECT codigo FROM comunidades WHERE id_comunidad = ?", (community_id,),
+                ).fetchone()
+                community_code = community["codigo"]
+            finally:
+                lookup.close()
+            accepted_paths, foreign_paths = community_discovery.partition_sources_for_community(
+                (Path(path) for path in paths), community_code,
+            )
+            if foreign_paths:
+                app.log(
+                    f"Se han apartado {len(foreign_paths)} fuente(s) que indican otra comunidad. "
+                    "Impórtalas desde Bandeja global.",
+                    "aviso",
+                )
+            total = len(accepted_paths)
+            for index, source_path in enumerate(accepted_paths, start=1):
+                path = str(source_path)
                 filename = Path(path).name
                 connection = None
                 app._estado(
@@ -1740,10 +1761,7 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 try:
                     connection = gestor_bd.conectar(database_path)
                     case_ingestion.assert_case_belongs_to_community(connection, case_id, community_id)
-                    community = connection.execute(
-                        "SELECT codigo FROM comunidades WHERE id_comunidad = ?", (community_id,),
-                    ).fetchone()
-                    analysis = analyse_source(Path(path), community_code=community["codigo"])
+                    analysis = analyse_source(Path(path), community_code=community_code)
                     result = case_ingestion.add_analysed_document_to_case(
                         connection,
                         case_id,
@@ -1778,6 +1796,11 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                     "Fuentes analizadas",
                     f"{source_summary(kinds)}\n\n{created_count} nuevas · {duplicate_count} duplicadas · {len(errors)} con error\n"
                     "Revisa las incidencias del expediente para confirmar los datos pendientes."
+                    + (
+                        f"\n\n{len(foreign_paths)} fuente(s) de otras comunidades se apartaron. "
+                        "Usa Bandeja global para clasificarlas."
+                        if foreign_paths else ""
+                    )
                     + ("\n\n" + "\n".join(f"{name}: {error}" for name, error in errors) if errors else ""),
                     parent=app,
                 )
