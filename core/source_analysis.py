@@ -40,6 +40,7 @@ class SourceAnalysis:
     required_fields: tuple[str, ...] = ()
     locator: SourceLocator | None = None
     review_message: str | None = None
+    disposition: str = "operational"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidates", MappingProxyType(dict(self.candidates)))
@@ -69,7 +70,13 @@ class SourceAnalysis:
         return cls(
             "other", "high", {}, (), locator,
             "Modelo Excel de referencia detectado; impórtalo desde «Importar modelo inicial» si quieres usarlo como histórico.",
+            "non_operational",
         )
+
+    @classmethod
+    def informational(cls, message: str, *, locator=None) -> "SourceAnalysis":
+        """Recognised document that must be archived without entering calculations."""
+        return cls("other", "high", {}, (), locator, message, "non_operational")
 
     @classmethod
     def unknown(cls, message: str | None = None, *, locator=None) -> "SourceAnalysis":
@@ -158,6 +165,12 @@ def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = 
         locator = _locator_from_mapping(result, {})
         reason = _string_value(result.get("motivo"))
         detail = _string_value(result.get("detalle"))
+        if reason == "COMUNIDAD_NO_COINCIDE":
+            detected = _string_value(result.get("codigo_comunidad_detectado"))
+            return SourceAnalysis.informational(
+                detail or f"Documento perteneciente a la comunidad {detected or 'indicada en la fuente'}.",
+                locator=locator,
+            )
         if reason == "PROVEEDOR_NO_IDENTIFICADO":
             generic = classify_generic_invoice_text(
                 _string_value(result.get("fragment")) or "", locator=locator,
@@ -178,6 +191,11 @@ def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = 
         return SourceAnalysis.invoice(candidates, locator=locator)
     if result.get("tipo") == "LECTURA_METRIGEST":
         return SourceAnalysis.reading(candidates, locator=locator)
+    if result.get("tipo") == "JUSTIFICANTE_PAGO":
+        return SourceAnalysis.informational(
+            "Justificante bancario reconocido; se conserva como soporte y no se incorpora como factura.",
+            locator=locator,
+        )
     return SourceAnalysis.unknown(locator=locator)
 
 

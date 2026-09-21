@@ -17,6 +17,7 @@ from lector_pdf import extraer_cif_pdf, extraer_texto
 
 
 _CODE_AT_START = re.compile(r"^\s*(\d{3,6})(?=[_\s-]|$)")
+_CODE_AT_END = re.compile(r"(?:^|[_\s-])(\d{3,6})\s*$")
 _CODE_LABELLED = re.compile(
     r"\b(?:comunidad|cdad\.?|c\.?\s*p\.?)\s*[-#:]*\s*(\d{3,6})\b",
     re.IGNORECASE,
@@ -226,7 +227,11 @@ def discover_communities(paths: Iterable[Path]) -> tuple[DetectedCommunity, ...]
 def code_from_path(path: Path) -> str | None:
     """Return a code only when the pathname gives an unambiguous signal."""
     name = Path(path).stem
-    match = _CODE_AT_START.search(name) or _CODE_LABELLED.search(name)
+    match = (
+        _CODE_AT_START.search(name)
+        or _CODE_LABELLED.search(name)
+        or _CODE_AT_END.search(name)
+    )
     if match:
         return match.group(1)
 
@@ -236,6 +241,24 @@ def code_from_path(path: Path) -> str | None:
         if re.fullmatch(r"\d{3,6}", parent.name):
             return parent.name
     return None
+
+
+def partition_sources_for_community(
+    paths: Iterable[Path], community_code: str,
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Separate compatible sources from files explicitly naming another community.
+
+    Sources without a code remain reviewable in the selected case.  Only an
+    unambiguous code in the path is enough to reject a cross-community file.
+    """
+    accepted: list[Path] = []
+    foreign: list[Path] = []
+    expected = str(community_code).strip()
+    for raw_path in paths:
+        path = Path(raw_path)
+        detected = code_from_path(path)
+        (foreign if detected and detected != expected else accepted).append(path)
+    return tuple(accepted), tuple(foreign)
 
 
 def _name_from_text(text: str) -> str | None:

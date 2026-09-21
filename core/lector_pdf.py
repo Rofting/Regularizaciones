@@ -1309,6 +1309,30 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
                 "fragment": re.sub(r"\s+", " ", texto).strip()[:1000],
                 "nombre_archivo": nombre, "hash_md5": hash_md5}
 
+    # Algunos proveedores declaran de forma inequívoca el código interno de
+    # la comunidad. Es una regla del proveedor, no una suposición global sobre
+    # cualquier número de cliente que pueda aparecer en una factura.
+    patron_codigo = config_prov.get("regex_codigo_comunidad")
+    codigo_del_documento = (
+        _extraer_campo(texto, patron_codigo) if patron_codigo else None
+    )
+    if codigo_del_documento:
+        codigo_del_documento = codigo_del_documento.strip()
+        if codigo_comunidad and str(codigo_comunidad).strip() != codigo_del_documento:
+            return {
+                "ok": False,
+                "motivo": "COMUNIDAD_NO_COINCIDE",
+                "detalle": (
+                    f"La fuente pertenece a la comunidad {codigo_del_documento}, "
+                    f"no a la comunidad seleccionada {codigo_comunidad}."
+                ),
+                "codigo_comunidad_detectado": codigo_del_documento,
+                "nombre_archivo": nombre,
+                "hash_md5": hash_md5,
+                "fragment": re.sub(r"\s+", " ", texto).strip()[:1000],
+            }
+        codigo_comunidad = codigo_del_documento
+
     # ----------------------------------------------------------------
     # NIVEL 1 — Comunidad por nombre de archivo
     # ----------------------------------------------------------------
