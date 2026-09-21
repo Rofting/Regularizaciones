@@ -18,6 +18,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from openpyxl import load_workbook
 
 import document_review
+import cuotas_servicio
 from excel_profiles import (
     ExcelProfile,
     calculate_profile_sha256,
@@ -266,12 +267,17 @@ def _validate_normalized_inputs(
                 fixed != _cents(invoice["fixed_component"])
                 or variable != _cents(invoice["variable_component"])
                 or total != _cents(invoice["total_component"])
-                or fixed + variable != total
             ):
                 raise ExportBlockedError(
                     f"Los componentes de la factura {invoice['id_factura']} de {module} "
-                    "no concilian con su total"
+                    "no coinciden con los guardados en la factura"
                 )
+            # El desglose de término fijo y variable se extrae del PDF y no es
+            # fiable: unas facturas no lo traen, en otras deja fuera impuestos
+            # o alquiler de equipos, y en las de varias páginas mezcla cifras.
+            # El importe total sí es de fiar y es el que usa el reparto, así
+            # que un desglose que no cuadre no detiene el expediente: se
+            # escribe sólo el total (ver _write_derived_formula).
 
     parameters = {
         row[0]
@@ -281,19 +287,53 @@ def _validate_normalized_inputs(
             (case["id_comunidad"], period_id),
         )
     }
-    missing_parameters = sorted(_required_parameter_keys(profile).difference(parameters))
+    # Los importes de ACS y calefacción no son entradas: el libro los calcula
+    # en su hoja de análisis a partir de las facturas (coste real) y de la hoja
+    # de cobros (importe cobrado). Exigirlos aquí pedía a mano justo lo que el
+    # modelo deduce, y escribirlos habría machacado sus fórmulas. Sólo se
+    # reclaman cuando la comunidad no tiene cuotas anotadas de las que partir.
+    calculados = {
+        clave
+        for servicio, prefijo in (("ACS", "acs"), ("CALEFACCION", "heating"))
+        if servicio in profile.active_modules
+        and cuotas_servicio.resumen(
+            connection, community_id=case["id_comunidad"],
+            period_id=period_id, servicio=servicio,
+        ).apuntes
+        for clave in (
+            f"{prefijo}_fixed_actual", f"{prefijo}_variable_actual",
+            f"{prefijo}_fixed_billed", f"{prefijo}_variable_billed",
+        )
+    }
+    missing_parameters = sorted(
+        _required_parameter_keys(profile).difference(parameters).difference(calculados)
+    )
     if missing_parameters:
+        servicios = sorted({
+            "ACS" if clave.startswith("acs_") else "calefacción"
+            for clave in missing_parameters
+            if clave.startswith(("acs_", "heating_"))
+        })
+        if servicios:
+            raise ExportBlockedError(
+                "Faltan las cuotas cobradas de " + " y ".join(servicios)
+                + ". Anótalas en «Cuotas cobradas» y vuelve a generar: de ellas "
+                "sale el importe cobrado del análisis."
+            )
         raise ExportBlockedError(
             "Faltan parámetros normalizados: " + ", ".join(missing_parameters)
         )
     for reading_type in _profile_reading_types(profile):
+        # Garajes y locales no tienen contador de ACS ni de calefacción: pedirles
+        # lecturas de apertura y cierre hacía fallar a toda la comunidad.
         owners = connection.execute(
-            "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND activo=1",
+            """SELECT id_propietario FROM propietarios
+               WHERE id_comunidad=? AND activo=1 AND tipo_unidad='vivienda'""",
             (case["id_comunidad"],),
         ).fetchall()
         if not owners:
             raise ExportBlockedError(
-                f"No hay propietarios activos para las lecturas {reading_type}"
+                f"No hay viviendas activas para las lecturas {reading_type}"
             )
         for owner in owners:
             readings = connection.execute(
@@ -303,9 +343,15 @@ def _validate_normalized_inputs(
                 (owner[0], period_id, reading_type),
             ).fetchall()
             dates = {reading["fecha_lectura"] for reading in readings}
-            if case["fecha_inicio"] not in dates or case["fecha_fin"] not in dates:
+            # Mismas fechas que usará la hoja: la última lectura antes de que
+            # arranque el período y la última que cabe dentro, no el día exacto
+            # de inicio y fin del ejercicio.
+            fecha_inicial, fecha_final = _boundary_reading_dates(
+                connection, case, reading_type,
+            )
+            if fecha_inicial not in dates or fecha_final not in dates:
                 raise ExportBlockedError(
-                    f"Faltan lecturas {reading_type} de inicio o cierre"
+                    f"Faltan lecturas {reading_type} de {fecha_inicial} o {fecha_final}"
                 )
             if any(reading["estado"] in ("sin_lectura", "contador_averiado") for reading in readings):
                 raise ExportBlockedError(f"Hay una lectura {reading_type} sin validar")
@@ -493,8 +539,13 @@ def _set_cell_value(cell, value: Any) -> None:
 
 
 def _clear_table(sheet, table: Mapping[str, Any]) -> None:
+    season = table.get("season_columns") or {}
+    seasonal = [
+        str(season[key]) for key in ("winter", "summer") if season.get(key)
+    ]
     for row in range(int(table["start_row"]), int(table["end_row"]) + 1):
-        for column in (*_input_columns(table).values(), *_derived_columns(table).values()):
+        for column in (*_input_columns(table).values(),
+                       *_derived_columns(table).values(), *seasonal):
             cell = sheet[f"{column}{row}"]
             cell.value = None
 
@@ -504,16 +555,101 @@ def _available_table_rows(sheet, table: Mapping[str, Any]) -> list[int]:
     return list(range(int(table["start_row"]), int(table["end_row"]) + 1))
 
 
-def _write_derived_formula(sheet, row: int, columns: Mapping[str, str]) -> None:
-    """Escribe únicamente fórmulas que se derivan de insumos normalizados."""
+def _write_derived_formula(
+    sheet, row: int, columns: Mapping[str, str], total_value: float | None = None,
+) -> None:
+    """Escribe únicamente fórmulas que se derivan de insumos normalizados.
+
+    Con desglose, el total es la suma de sus términos y se escribe como
+    fórmula viva. Sin desglose —facturas que sólo traen el importe— se escribe
+    el total tal cual: la fórmula daría cero y borraría el importe real.
+    """
     total = columns.get("total")
     fixed = columns.get("fixed")
     variable = columns.get("variable")
-    if total and fixed and variable and not (
-        isinstance(sheet[f"{total}{row}"].value, str)
-        and sheet[f"{total}{row}"].value.startswith("=")
-    ):
-        _set_cell_value(sheet[f"{total}{row}"], f"={fixed}{row}+{variable}{row}")
+    if not total:
+        return
+    celda = sheet[f"{total}{row}"]
+    if isinstance(celda.value, str) and celda.value.startswith("="):
+        return
+    if fixed and variable:
+        terminos = [sheet[f"{columna}{row}"].value for columna in (fixed, variable)]
+        numericos = [valor for valor in terminos if isinstance(valor, (int, float))]
+        suma = sum(numericos)
+        if numericos and (
+            total_value is None or abs(suma - float(total_value)) <= 0.01
+        ):
+            _set_cell_value(celda, f"={fixed}{row}+{variable}{row}")
+            return
+        # Si el desglose no cuadra con el total se conserva —es lo que dice la
+        # factura y con ello concilia la base—, pero el total deja de ser su
+        # suma y se escribe el importe real cobrado.
+    if total_value is not None:
+        _set_cell_value(celda, total_value)
+
+
+_TEMPORADA_POR_DEFECTO = ("12-01", "05-31")
+
+
+def _season_boundary(value: Any, fallback: str) -> tuple[int, int]:
+    """Lee un 'MM-DD' de configuración y lo deja como (mes, día)."""
+    texto = str(value or fallback).strip()
+    try:
+        month, _, day = texto.partition("-")
+        boundary = (int(month), int(day))
+    except ValueError:
+        raise ExportBlockedError(f"Límite de temporada no válido: {texto!r}") from None
+    if not (1 <= boundary[0] <= 12 and 1 <= boundary[1] <= 31):
+        raise ExportBlockedError(f"Límite de temporada fuera de rango: {texto!r}")
+    return boundary
+
+
+def _season_columns(
+    connection: sqlite3.Connection,
+    case: sqlite3.Row,
+    module: str,
+    table: Mapping[str, Any],
+) -> tuple[str, str, tuple[int, int], tuple[int, int]] | None:
+    """Columnas y fechas de la temporada de calefacción de un suministro.
+
+    Cada suministro tiene la suya: en el modelo del despacho el gas cuenta como
+    invierno lo que cierra entre el 1 de diciembre y el 31 de mayo, y la
+    electricidad entre el 1 de noviembre y el 30 de abril. El período puede
+    redefinirlas sin tocar el perfil.
+    """
+    # El perfil congela sus mapas (MappingProxyType), así que no basta con
+    # comprobar dict: sin esto el reparto verano/invierno se saltaba entero.
+    columnas = table.get("season_columns")
+    if not isinstance(columnas, Mapping):
+        return None
+    invierno, verano = columnas.get("winter"), columnas.get("summer")
+    if not invierno or not verano:
+        return None
+    parametros = {
+        row["parameter_key"]: row["text_value"]
+        for row in connection.execute(
+            """SELECT parameter_key,text_value FROM period_parameters
+               WHERE id_comunidad=? AND id_periodo=?""",
+            (case["id_comunidad"], case["id_periodo"]),
+        )
+    }
+    inicio = parametros.get(f"winter_season_start:{module}") or columnas.get("winter_start")
+    fin = parametros.get(f"winter_season_end:{module}") or columnas.get("winter_end")
+    return (
+        str(invierno), str(verano),
+        _season_boundary(inicio, _TEMPORADA_POR_DEFECTO[0]),
+        _season_boundary(fin, _TEMPORADA_POR_DEFECTO[1]),
+    )
+
+
+def _is_winter(day: date | None, start: tuple[int, int], end: tuple[int, int]) -> bool:
+    """La temporada cruza el cambio de año, así que se comprueba en dos tramos."""
+    if day is None:
+        return False
+    moment = (day.month, day.day)
+    if start <= end:
+        return start <= moment <= end
+    return moment >= start or moment <= end
 
 
 def _write_invoice_table(
@@ -538,6 +674,7 @@ def _write_invoice_table(
         raise ExportBlockedError(f"La plantilla no tiene filas suficientes para {module}")
     columns = _input_columns(table)
     derived = _derived_columns(table)
+    season = _season_columns(connection, case, module, table)
     for row_number, invoice in zip(available_rows, invoices):
         values = {
             "invoice_date": _safe_date(invoice["fecha_factura"]),
@@ -553,7 +690,20 @@ def _write_invoice_table(
         for key, column in columns.items():
             if key in values:
                 _set_cell_value(sheet[f"{column}{row_number}"], values[key])
-        _write_derived_formula(sheet, row_number, {**columns, **derived})
+        _write_derived_formula(
+            sheet, row_number, {**columns, **derived}, total_value=values["total"],
+        )
+        if season is not None and columns.get("consumption"):
+            winter_column, summer_column, start, end = season
+            # El consumo entero va a una de las dos columnas, nunca a las dos:
+            # de ahí salen los % de ACS y calefacción de la fila de sumas.
+            destino = winter_column if _is_winter(values["end_date"], start, end) else summer_column
+            otra = summer_column if destino == winter_column else winter_column
+            _set_cell_value(
+                sheet[f"{destino}{row_number}"],
+                f"={columns['consumption']}{row_number}",
+            )
+            _set_cell_value(sheet[f"{otra}{row_number}"], None)
 
 
 def _write_other_expenses(connection, workbook, case, table) -> None:
@@ -584,6 +734,41 @@ def _write_other_expenses(connection, workbook, case, table) -> None:
         _set_cell_value(sheet[f"{columns['amount']}{row_number}"], float(expense[2]))
 
 
+def _boundary_reading_dates(
+    connection: sqlite3.Connection, case: sqlite3.Row, reading_type: str,
+) -> tuple[str, str]:
+    """Fechas de lectura que abren y cierran el período.
+
+    Los contadores no se leen el día que empieza el ejercicio: la lectura
+    inicial es la última tomada antes de que arranque —normalmente el cierre
+    del período anterior— y la final, la última que cabe dentro. Exigir que
+    coincidieran exactamente con las fechas del expediente hacía fallar a
+    cualquier comunidad por un día de diferencia.
+    """
+    fila = connection.execute(
+        """SELECT
+             (SELECT MAX(fecha_lectura) FROM period_readings r
+               JOIN propietarios p ON p.id_propietario=r.id_propietario
+               WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda' AND r.tipo=?
+                 AND r.fecha_lectura<=?) AS inicial,
+             (SELECT MAX(fecha_lectura) FROM period_readings r
+               JOIN propietarios p ON p.id_propietario=r.id_propietario
+               WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda' AND r.tipo=?
+                 AND r.fecha_lectura<=?) AS final""",
+        (
+            case["id_comunidad"], reading_type, case["fecha_inicio"],
+            case["id_comunidad"], reading_type, case["fecha_fin"],
+        ),
+    ).fetchone()
+    inicial, final = fila["inicial"], fila["final"]
+    if inicial is None or final is None or inicial >= final:
+        raise ExportBlockedError(
+            f"Faltan lecturas {reading_type} que abran y cierren el período"
+        )
+    return inicial, final
+
+
+
 def _write_meter_readings(
     connection,
     workbook,
@@ -599,7 +784,8 @@ def _write_meter_readings(
     readings = connection.execute(
         """SELECT p.codigo_vivienda,l.fecha_lectura,l.valor_acumulado
            FROM period_readings l JOIN propietarios p ON p.id_propietario=l.id_propietario
-           WHERE p.id_comunidad=? AND p.activo=1 AND l.id_periodo=? AND l.tipo=?
+           WHERE p.id_comunidad=? AND p.activo=1 AND p.tipo_unidad='vivienda'
+             AND l.id_periodo=? AND l.tipo=?
            ORDER BY p.codigo_vivienda,l.fecha_lectura""",
         (case["id_comunidad"], case["id_periodo"], module),
     ).fetchall()
@@ -608,11 +794,17 @@ def _write_meter_readings(
         by_owner.setdefault(reading["codigo_vivienda"], {})[reading["fecha_lectura"]] = float(
             reading["valor_acumulado"]
         )
-    if any(
-        case["fecha_inicio"] not in values or case["fecha_fin"] not in values
-        for values in by_owner.values()
-    ):
-        raise ExportBlockedError(f"Faltan lecturas {module} de inicio o cierre")
+    fecha_inicial, fecha_final = _boundary_reading_dates(connection, case, module)
+    sin_lectura = sorted(
+        vivienda for vivienda, values in by_owner.items()
+        if fecha_inicial not in values or fecha_final not in values
+    )
+    if sin_lectura:
+        muestra = ", ".join(sin_lectura[:5])
+        resto = f" y {len(sin_lectura) - 5} más" if len(sin_lectura) > 5 else ""
+        raise ExportBlockedError(
+            f"Faltan lecturas {module} de {fecha_inicial} o {fecha_final} en: {muestra}{resto}"
+        )
     if len(available_rows) < 2:
         raise ExportBlockedError(f"La plantilla no tiene filas suficientes para {module}")
     columns = _input_columns(table)
@@ -626,27 +818,83 @@ def _write_meter_readings(
         )
     }
     prefix = "acs" if module == "ACS" else "heating"
+    tiene_cuotas = cuotas_servicio.resumen(
+        connection, community_id=case["id_comunidad"],
+        period_id=case["id_periodo"], servicio=module,
+    ).apuntes > 0
     required = (f"{prefix}_variable_actual", f"{prefix}_fixed_actual")
     missing = [key for key in required if parameters.get(key) is None]
-    if missing:
-        raise ExportBlockedError(f"Faltan parámetros {module}: " + ", ".join(missing))
+    if missing and not tiene_cuotas:
+        raise ExportBlockedError(
+            f"Faltan las cuotas cobradas de {module}, o los parámetros "
+            + ", ".join(missing)
+        )
 
-    initial = sum(values[case["fecha_inicio"]] for values in by_owner.values())
-    final = sum(values[case["fecha_fin"]] for values in by_owner.values())
-    variable_row, fixed_row = available_rows[:2]
-    variable_values = {
-        "charge_date": _safe_date(case["fecha_fin"]),
-        "final_date": _safe_date(case["fecha_fin"]),
-        "final": final,
-        "initial_date": _safe_date(case["fecha_inicio"]),
-        "initial": initial,
-        "variable_fee": float(parameters[f"{prefix}_variable_actual"]),
-    }
-    fixed_values = {
-        "charge_date": _safe_date(case["fecha_fin"]),
-        "fixed_fee": float(parameters[f"{prefix}_fixed_actual"]),
-    }
-    for row, values in ((variable_row, variable_values), (fixed_row, fixed_values)):
+    initial = sum(values[fecha_inicial] for values in by_owner.values())
+    final = sum(values[fecha_final] for values in by_owner.values())
+
+    # La hoja de cobros lleva dos clases de apunte, como en el libro del
+    # despacho: una fila por cada cuota fija mensual y una fila por cada
+    # liquidación de consumo. De su suma sale el 'importe cobrado' del
+    # análisis. Si la comunidad aún no tiene cuotas anotadas se conserva el
+    # resumen de dos filas de siempre, para no dejar la hoja vacía.
+    apuntes = cuotas_servicio.listar(
+        connection, community_id=case["id_comunidad"],
+        period_id=case["id_periodo"], servicio=module,
+    )
+    filas: list[dict] = []
+    if apuntes:
+        for apunte in apuntes:
+            if apunte["concepto"] == "fija":
+                filas.append({
+                    "charge_date": _safe_date(apunte["fecha"]),
+                    "fixed_fee": float(apunte["importe"]),
+                })
+            else:
+                fila = {
+                    "charge_date": _safe_date(apunte["fecha"]),
+                    "variable_fee": float(apunte["importe"]),
+                }
+                if apunte["consumo"] is not None:
+                    fila["consumption"] = float(apunte["consumo"])
+                if apunte["fecha_inicio"]:
+                    fila["initial_date"] = _safe_date(apunte["fecha_inicio"])
+                if apunte["fecha_fin"]:
+                    fila["final_date"] = _safe_date(apunte["fecha_fin"])
+                filas.append(fila)
+        # El consumo leído del período se apunta en la última liquidación, que
+        # es la que cierra las lecturas de los contadores. Si la comunidad sólo
+        # gira cuota fija y no tiene liquidaciones, se añade igualmente la fila
+        # de cierre: sin ella el consumo del período no llegaría a la hoja.
+        cierre = next((fila for fila in reversed(filas) if "variable_fee" in fila), None)
+        if cierre is None:
+            cierre = {
+                "charge_date": _safe_date(fecha_final),
+                "variable_fee": float(parameters.get(f"{prefix}_variable_actual") or 0),
+            }
+            filas.append(cierre)
+        cierre.setdefault("final_date", _safe_date(fecha_final))
+        cierre.setdefault("initial_date", _safe_date(fecha_inicial))
+        cierre["final"], cierre["initial"] = final, initial
+    else:
+        filas = [
+            {
+                "charge_date": _safe_date(fecha_final),
+                "final_date": _safe_date(fecha_final), "final": final,
+                "initial_date": _safe_date(fecha_inicial), "initial": initial,
+                "variable_fee": float(parameters[f"{prefix}_variable_actual"]),
+            },
+            {
+                "charge_date": _safe_date(case["fecha_fin"]),
+                "fixed_fee": float(parameters[f"{prefix}_fixed_actual"]),
+            },
+        ]
+    if len(filas) > len(available_rows):
+        raise ExportBlockedError(
+            f"La plantilla no tiene filas suficientes para las cuotas de {module}"
+        )
+    escritas = list(zip(available_rows, filas))
+    for row, values in escritas:
         for key, column in columns.items():
             if key in values:
                 _set_cell_value(sheet[f"{column}{row}"], values[key])
@@ -655,29 +903,37 @@ def _write_meter_readings(
     total = derived.get("total")
     variable_unit = derived.get("variable_unit")
     fixed_unit = derived.get("fixed_unit")
-    if consumption and columns.get("final") and columns.get("initial"):
-        _set_cell_value(
-            sheet[f"{consumption}{variable_row}"],
-            final - initial
-            if materialize_consumption
-            else f"={columns['final']}{variable_row}-{columns['initial']}{variable_row}",
-        )
-    if total and columns.get("variable_fee") and columns.get("fixed_fee"):
-        for row in (variable_row, fixed_row):
+    # Cada apunte lleva sus propias fórmulas, según sea cuota fija mensual o
+    # liquidación por consumo, igual que en el libro del despacho.
+    for row, values in escritas:
+        if total and columns.get("variable_fee") and columns.get("fixed_fee"):
             _set_cell_value(
                 sheet[f"{total}{row}"],
                 f"=SUM({columns['variable_fee']}{row}:{columns['fixed_fee']}{row})",
             )
-    if variable_unit and consumption and columns.get("variable_fee"):
-        _set_cell_value(
-            sheet[f"{variable_unit}{variable_row}"],
-            f"={columns['variable_fee']}{variable_row}/{consumption}{variable_row}",
-        )
-    if fixed_unit and columns.get("fixed_fee"):
-        _set_cell_value(
-            sheet[f"{fixed_unit}{fixed_row}"],
-            f"={columns['fixed_fee']}{fixed_row}/'DATOS'!$D$4",
-        )
+        es_variable = "variable_fee" in values
+        if es_variable and consumption:
+            if "final" in values and "initial" in values:
+                _set_cell_value(
+                    sheet[f"{consumption}{row}"],
+                    final - initial
+                    if materialize_consumption
+                    else f"={columns['final']}{row}-{columns['initial']}{row}",
+                )
+            elif values.get("consumption") is not None:
+                # El consumo liquidado es una columna derivada de la hoja, no
+                # una entrada, así que no lo escribe el bucle de columnas.
+                _set_cell_value(sheet[f"{consumption}{row}"], values["consumption"])
+        if es_variable and variable_unit and consumption and sheet[f"{consumption}{row}"].value:
+            _set_cell_value(
+                sheet[f"{variable_unit}{row}"],
+                f"={columns['variable_fee']}{row}/{consumption}{row}",
+            )
+        if "fixed_fee" in values and fixed_unit:
+            _set_cell_value(
+                sheet[f"{fixed_unit}{row}"],
+                f"={columns['fixed_fee']}{row}/'DATOS'!$D$4",
+            )
 
 
 def _write_workbook(
@@ -697,8 +953,12 @@ def _write_workbook(
                 f"{_safe_date(case['fecha_inicio']):%d/%m/%Y} - "
                 f"{_safe_date(case['fecha_fin']):%d/%m/%Y}"
             ),
+            # Garajes y locales no entran en la regularización: el modelo
+            # divide cuotas fijas entre viviendas, así que contarlos desviaría
+            # todos los €/vivienda de la hoja de análisis.
             "owner_count": connection.execute(
-                "SELECT COUNT(*) FROM propietarios WHERE id_comunidad=? AND activo=1",
+                """SELECT COUNT(*) FROM propietarios
+                   WHERE id_comunidad=? AND activo=1 AND tipo_unidad='vivienda'""",
                 (case["id_comunidad"],),
             ).fetchone()[0],
         }
@@ -738,7 +998,12 @@ def _write_workbook(
         for key, binding in profile.workbook_layout["parameter_cells"].items():
             if key in parameters and parameters[key] is not None:
                 sheet_name, address = binding
-                _set_cell_value(workbook[sheet_name][address], float(parameters[key]))
+                celda = workbook[sheet_name][address]
+                # El modelo calcula estos importes con sus propias fórmulas.
+                # Escribir encima las borraría y congelaría el análisis.
+                if isinstance(celda.value, str) and celda.value.startswith("="):
+                    continue
+                _set_cell_value(celda, float(parameters[key]))
         for check, binding in profile.workbook_layout["total_checks"].items():
             if not check.startswith("parameter:"):
                 continue
@@ -769,28 +1034,96 @@ def _restore_missing_ooxml_parts(template: Path, generated: Path) -> None:
         "xl/charts/", "xl/drawings/", "xl/media/", "customXml/",
         "xl/theme/", "xl/printerSettings/",
     )
-    design_exact = {"xl/styles.xml", "[Content_Types].xml", "_rels/.rels"}
+    # styles.xml tampoco: las celdas apuntan a sus formatos por índice, así
+    # que traer la tabla de la plantilla desplazaba todos los formatos y los
+    # importes aparecían como fechas. LibreOffice ya conserva el formato.
+    design_exact = {"_rels/.rels"}
+    # Nunca se restauran las partes que llevan el contenido: las hojas, el
+    # libro y, sobre todo, la tabla de cadenas compartidas. Las celdas apuntan
+    # a ella por índice, así que traer la de la plantilla sobre un libro ya
+    # reescrito descoloca todos los textos y el fichero deja de poder leerse
+    # ("shared_strings: list index out of range").
+    content_prefixes = ("xl/worksheets/",)
+    content_exact = {
+        "xl/sharedStrings.xml", "xl/workbook.xml", "xl/calcChain.xml",
+        # El mapa de relaciones del libro empareja cada hoja con su XML. La
+        # plantilla numera rId1..rId7 y el libro recalculado rId3..rId9, así
+        # que traer el de la plantilla descolocaba todas las hojas: 'ANALISIS'
+        # apuntaba a una que no existía y aparecía vacía, sin sus fórmulas.
+        "xl/_rels/workbook.xml.rels",
+    }
     restore = {
         name: data
         for name, data in source_parts.items()
-        if name not in generated_parts
-        or name.startswith(design_prefixes)
-        or name in design_exact
-        or name.endswith(".rels")
+        if not name.startswith(content_prefixes)
+        and name not in content_exact
+        and (
+            name not in generated_parts
+            or name.startswith(design_prefixes)
+            or name in design_exact
+            or name.endswith(".rels")
+        )
     }
     if not restore:
         return
     rebuilt = generated.with_name(generated.stem + ".ooxml" + generated.suffix)
+    tipos = _merged_content_types(
+        source_parts.get("[Content_Types].xml"),
+        generated_parts.get("[Content_Types].xml"),
+    )
     with ZipFile(rebuilt, "w", ZIP_DEFLATED) as target:
         for name, data in generated_parts.items():
-            if name not in restore:
+            if name == "[Content_Types].xml" and tipos is not None:
+                target.writestr(name, tipos)
+            elif name not in restore:
                 target.writestr(name, data)
         for name, data in restore.items():
             target.writestr(name, data)
     os.replace(rebuilt, generated)
 
 
+def _merged_content_types(plantilla: bytes | None, generado: bytes | None) -> bytes | None:
+    """Declaraciones de la plantilla sin perder las del libro generado.
+
+    La plantilla guarda sus textos dentro de cada celda y no declara
+    'xl/sharedStrings.xml'; el libro que sale del recálculo sí lo usa. Copiar
+    tal cual el catálogo de la plantilla dejaba esa tabla sin declarar, con lo
+    que las celdas de texto apuntaban a una lista vacía y el fichero ya no se
+    podía abrir. Se parte del catálogo del generado y se le añade lo que sólo
+    traiga la plantilla.
+    """
+    if plantilla is None or generado is None:
+        return generado or plantilla
+    import xml.etree.ElementTree as ET
+
+    espacio = "http://schemas.openxmlformats.org/package/2006/content-types"
+    ET.register_namespace("", espacio)
+    raiz = ET.fromstring(generado)
+    presentes = {
+        (hijo.tag, hijo.get("PartName") or hijo.get("Extension"))
+        for hijo in raiz
+    }
+    for hijo in ET.fromstring(plantilla):
+        clave = (hijo.tag, hijo.get("PartName") or hijo.get("Extension"))
+        if clave not in presentes:
+            raiz.append(hijo)
+    return ET.tostring(raiz, encoding="UTF-8", xml_declaration=True)
+
+
 def _expected_totals(connection, case, profile) -> dict[str, int]:
+    calculados_por_el_libro = {
+        clave
+        for servicio, prefijo in (("ACS", "acs"), ("CALEFACCION", "heating"))
+        if servicio in profile.active_modules
+        and cuotas_servicio.resumen(
+            connection, community_id=case["id_comunidad"],
+            period_id=case["id_periodo"], servicio=servicio,
+        ).apuntes
+        for clave in (
+            f"{prefijo}_fixed_actual", f"{prefijo}_variable_actual",
+            f"{prefijo}_fixed_billed", f"{prefijo}_variable_billed",
+        )
+    }
     result: dict[str, int] = {}
     required_parameters = _required_parameter_keys(profile)
     for key in profile.workbook_layout["total_checks"]:
@@ -819,6 +1152,12 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
                 (case["id_comunidad"], case["id_periodo"], parameter_key),
             ).fetchone()
             if row is None or row[0] is None:
+                # Los importes que el libro calcula en su análisis no se
+                # concilian contra la base: no hay nada con lo que compararlos,
+                # son su resultado. Se comprueban las entradas que los
+                # alimentan (facturas, lecturas y cuotas cobradas).
+                if parameter_key in calculados_por_el_libro:
+                    continue
                 if parameter_key in required_parameters:
                     raise ExportBlockedError(
                         f"Falta el parámetro de conciliación {parameter_key}"
@@ -834,17 +1173,22 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
                 raise ExportBlockedError(
                     f"Tipo de lectura no soportado en la conciliación: {reading_type}"
                 )
+            # Las mismas fechas de lectura que usa la hoja, no las del
+            # ejercicio: si no, el total esperado no cuadraría con lo escrito.
+            fecha_inicial, fecha_final = _boundary_reading_dates(
+                connection, case, reading_type,
+            )
             rows = connection.execute(
                 """SELECT p.id_propietario,l.fecha_lectura,l.valor_acumulado
                    FROM propietarios p JOIN period_readings l
                      ON l.id_propietario=p.id_propietario
-                   WHERE p.id_comunidad=? AND p.activo=1
+                   WHERE p.id_comunidad=? AND p.activo=1 AND p.tipo_unidad='vivienda'
                      AND l.id_periodo=? AND l.tipo=?
                      AND l.fecha_lectura IN (?,?)
                    ORDER BY p.id_propietario,l.fecha_lectura""",
                 (
                     case["id_comunidad"], case["id_periodo"], reading_type,
-                    case["fecha_inicio"], case["fecha_fin"],
+                    fecha_inicial, fecha_final,
                 ),
             ).fetchall()
             values_by_owner: dict[int, dict[str, float]] = {}
@@ -853,8 +1197,9 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
                     row["fecha_lectura"]
                 ] = float(row["valor_acumulado"])
             value = sum(
-                readings[case["fecha_fin"]] - readings[case["fecha_inicio"]]
+                readings[fecha_final] - readings[fecha_inicial]
                 for readings in values_by_owner.values()
+                if fecha_inicial in readings and fecha_final in readings
             )
         else:
             raise ExportBlockedError(f"Comprobación de total no soportada: {key}")
@@ -889,6 +1234,50 @@ def _set_run(
         ),
     )
     connection.commit()
+
+
+def _store_computed_parameters(
+    connection: sqlite3.Connection,
+    case: sqlite3.Row,
+    profile: ExcelProfile,
+    workbook_path: Path,
+) -> dict[str, float]:
+    """Devuelve a la base los importes que el libro acaba de calcular.
+
+    El análisis del Excel es quien reparte el coste entre ACS y calefacción y
+    quien suma lo cobrado, siguiendo las fórmulas del despacho. El reparto por
+    propietario y las cartas necesitan esas mismas cifras, así que se leen del
+    libro ya recalculado y se guardan como parámetros del período. Así el Excel
+    sigue siendo el motor de cálculo y la base, su registro.
+    """
+    workbook = load_workbook(workbook_path, data_only=True)
+    try:
+        guardados: dict[str, float] = {}
+        for clave, (hoja, direccion) in profile.workbook_layout["parameter_cells"].items():
+            if hoja not in workbook.sheetnames:
+                continue
+            valor = workbook[hoja][direccion].value
+            if not isinstance(valor, (int, float)):
+                continue
+            connection.execute(
+                """INSERT INTO period_parameters
+                   (id_comunidad,id_periodo,parameter_key,numeric_value,unit,source_sheet,source_cell)
+                   VALUES (?,?,?,?,'EUR',?,?)
+                   ON CONFLICT(id_comunidad,id_periodo,parameter_key) DO UPDATE SET
+                       numeric_value=excluded.numeric_value,
+                       source_sheet=excluded.source_sheet,
+                       source_cell=excluded.source_cell""",
+                (
+                    case["id_comunidad"], case["id_periodo"], clave,
+                    float(valor), hoja, direccion,
+                ),
+            )
+            guardados[clave] = float(valor)
+        connection.commit()
+        return guardados
+    finally:
+        workbook.close()
+
 
 
 def generate_official_excel(
@@ -955,6 +1344,24 @@ def generate_official_excel(
             _expected_totals(connection, case, profile),
             expected_fingerprint=template_fingerprint,
         )
+
+        calculados = _store_computed_parameters(
+            connection, case, profile, temporary_path,
+        )
+        if calculados:
+            _emit(progress, "parameters", stored=len(calculados))
+            # Guardar lo que el propio libro acaba de calcular cambia la huella
+            # de entradas del expediente. Sin actualizarla, el reparto creería
+            # que los datos se tocaron después de validar el Excel y exigiría
+            # regenerarlo una y otra vez.
+            input_hash = calculate_case_input_hash(
+                connection, id_case=id_case, project_root=project_root, profile=profile,
+            )
+            connection.execute(
+                "UPDATE excel_export_runs SET input_sha256=? WHERE id_export_run=?",
+                (input_hash, run_id),
+            )
+            connection.commit()
 
         _emit(progress, "publish", output=str(output_path))
         official_directory.mkdir(parents=True, exist_ok=True)

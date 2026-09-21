@@ -522,5 +522,32 @@ class DocumentReviewTest(unittest.TestCase):
         self.assertEqual("generic_correction", expedient_ui.resolution_route_for_issue(generic))
 
 
+class CounterResetIntervalTest(unittest.TestCase):
+    """El reinicio se aprueba sobre las lecturas que la incidencia señala.
+
+    Caso real de la 658: PA2-2ºC baja de 117 a 77 entre noviembre y enero. Al
+    tomar el intervalo del expediente en vez del de la incidencia se miraban
+    otras lecturas, que no bajaban, y la estimación se rechazaba con "la
+    lectura ya no es un reinicio pendiente de aprobar".
+    """
+
+    def test_interval_comes_from_the_issue_field_name(self):
+        self.assertEqual(
+            ("2025-11-01", "2026-01-31"),
+            document_review._issue_reading_dates(
+                "reading.PA2-2ºC.ACS|2025-11-01/2026-01-31", "2025-09-01", "2026-08-31",
+            ),
+        )
+
+    def test_issue_without_interval_falls_back_to_the_case(self):
+        for field in ("reading.PA2-2ºC.ACS", "reading.X.ACS|sin-barra",
+                      "reading.X.ACS|2025-13-45/2026-01-31"):
+            self.assertEqual(
+                ("2025-09-01", "2026-08-31"),
+                document_review._issue_reading_dates(field, "2025-09-01", "2026-08-31"),
+                field,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

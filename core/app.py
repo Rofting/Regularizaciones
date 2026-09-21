@@ -247,6 +247,11 @@ class AppGestionFincas(ctk.CTk):
         ctk.CTkButton(nav, text="Confirmar fuentes", command=self._accion_confirmar_fuentes,
                       height=31, corner_radius=8, font=UIM.fuente(10),
                       **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
+        # Lo cobrado a los vecinos no está en ninguna factura ni en ningún
+        # contador: sin este paso el análisis no tiene con qué comparar el coste.
+        ctk.CTkButton(nav, text="Cuotas cobradas", command=self._accion_cuotas_cobradas,
+                      height=31, corner_radius=8, font=UIM.fuente(10),
+                      **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
         ctk.CTkButton(nav, text="Abrir salidas", command=self._abrir_salidas, height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs()).pack(fill="x", padx=12)
 
         work = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=14, border_width=1, border_color=C["borde"])
@@ -258,6 +263,17 @@ class AppGestionFincas(ctk.CTk):
         self.workspace_primary = ctk.CTkButton(work, text="Crear expediente", command=self._accion_crear_expediente, height=44, corner_radius=10, font=UIM.fuente(13, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"])
         self.workspace_primary.pack(anchor="w", padx=24, pady=(18, 16))
         self.botones["Crear expediente · principal"] = self.workspace_primary
+        self.workspace_repeat_actions = ctk.CTkFrame(work, fg_color="transparent")
+        for text, command in (
+            ("Regenerar Excel", self._accion_generar_excel_expediente),
+            ("Recalcular reparto", self._accion_calcular_reparto_expediente),
+            ("Repetir cartas", self._accion_generar_cartas_expediente),
+        ):
+            ctk.CTkButton(
+                self.workspace_repeat_actions, text=text, command=command,
+                height=34, corner_radius=8, font=UIM.fuente(10, "bold"),
+                **UIM.secondary_button_kwargs(),
+            ).pack(side="left", padx=(0, 7))
         panel = ctk.CTkFrame(work, fg_color=C["panel_2"], corner_radius=11)
         panel.pack(fill="both", expand=True, padx=24, pady=(0, 20))
         self.lbl_incidencias_bandeja = ctk.CTkLabel(panel, text="Validación del expediente", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"])
@@ -984,6 +1000,13 @@ class AppGestionFincas(ctk.CTk):
             self.log(f"📛 Error inesperado: {type(e).__name__} — {e}", "error")
             self.log("   👉 Si se repite, copia el detalle técnico de abajo y pide ayuda.", "aviso")
             self.log(traceback.format_exc().strip(), "detalle")
+            detail = f"{e}\n\nNo se ha modificado ningún archivo oficial."
+            self.after(
+                0,
+                lambda detail=detail: messagebox.showerror(
+                    "No se pudo completar", detail, parent=self,
+                ),
+            )
         finally:
             self._procesando = False
             self.after(0, self._habilitar_botones)
@@ -1166,6 +1189,13 @@ class AppGestionFincas(ctk.CTk):
         self._estado("Reanalizando fuentes", procesando=True)
         self._en_hilo(work)
 
+
+    def _accion_cuotas_cobradas(self):
+        ui = MOD.get("expedient_ui")
+        if not ui:
+            self.log("No está disponible la gestión de cuotas.", "error")
+            return
+        ui.open_service_fees_dialog(self, "ACS")
     def _accion_resolver_copias_archivadas(self):
         if self._procesando or not self._validar_expediente_activo():
             return
@@ -1241,6 +1271,20 @@ class AppGestionFincas(ctk.CTk):
             open_count = review_summary.actionable_count
             technical_issue_count = review_summary.technical_count
             workflow = MOD.get("case_workflow_actions")
+            template_row = connection.execute(
+                """SELECT template_relative_path FROM excel_template_profiles
+                   WHERE id_comunidad=? AND status='active'
+                   ORDER BY id_template_profile DESC LIMIT 1""",
+                (self.id_comunidad,),
+            ).fetchone()
+            has_registered_template = False
+            if template_row is not None:
+                try:
+                    template_path = (BASE_DIR / template_row["template_relative_path"]).resolve()
+                    template_path.relative_to(BASE_DIR.resolve())
+                    has_registered_template = template_path.is_file()
+                except (TypeError, ValueError):
+                    has_registered_template = False
             if workflow:
                 try:
                     profile = workflow.resolve_case_profile(
@@ -1287,6 +1331,7 @@ class AppGestionFincas(ctk.CTk):
         workspace = MOD.get("expedient_ui").guided_workspace_state(
             has_case=True, document_count=document_count,
             open_issue_count=open_count, case_status=case.status,
+            has_registered_template=has_registered_template,
         )
         self.after(0, lambda: self._actualizar_workspace(workspace))
 
@@ -1347,6 +1392,7 @@ class AppGestionFincas(ctk.CTk):
         action_map = {
             "crear_expediente": ("Crear expediente", self._accion_crear_expediente),
             "anadir_fuentes": ("Añadir fuentes", self._accion_anadir_fuentes),
+            "importar_modelo": ("Importar modelo inicial", self._accion_importar_modelo_inicial),
             "resolver_incidencias": ("Resolver incidencias", self._accion_resolver_incidencias),
             "confirmar_fuentes": ("Confirmar fuentes", self._accion_confirmar_fuentes),
             "generar_excel": ("Generar Excel oficial", self._accion_generar_excel_expediente),
@@ -1360,6 +1406,13 @@ class AppGestionFincas(ctk.CTk):
         self.workspace_headline.configure(text=workspace.headline)
         self.workspace_detail.configure(text=workspace.detail)
         self.workspace_primary.configure(text=label, command=command)
+        if workspace.next_action == "abrir_salidas":
+            if not self.workspace_repeat_actions.winfo_manager():
+                self.workspace_repeat_actions.pack(
+                    anchor="w", padx=24, pady=(0, 14), after=self.workspace_primary,
+                )
+        else:
+            self.workspace_repeat_actions.pack_forget()
         for step in workspace.steps:
             row = self.workflow_step_rows.get(step.key)
             if row is not None:
@@ -1438,7 +1491,9 @@ class AppGestionFincas(ctk.CTk):
                 issue = grouped["representative"]
                 reset_count = int(grouped["count"])
                 is_reset_group = issue.code == "COUNTER_RESET" and reset_count > 1
-                is_zero_group = issue.code == "READING_ZERO_REVIEW" and reset_count > 1
+                # Un único cero necesita el mismo diálogo que un grupo: el
+                # genérico no escribe la lectura y parecía no guardar nada.
+                is_zero_group = issue.code == "READING_ZERO_REVIEW"
                 row = ctk.CTkFrame(
                     tray,
                     fg_color=C["panel"],
@@ -1524,6 +1579,23 @@ class AppGestionFincas(ctk.CTk):
                     hover_color=C["primario_hover"],
                     command=resolve_command,
                 ).pack()
+                # Salida para las fuentes que no deben entrar en el expediente:
+                # sin ella, una sola incidencia irresoluble lo bloquea entero.
+                ctk.CTkButton(
+                    actions,
+                    text="Omitir",
+                    width=86,
+                    height=28,
+                    corner_radius=7,
+                    fg_color="transparent",
+                    border_width=1,
+                    border_color=C["borde"],
+                    text_color=C["texto_sec"],
+                    hover_color=C["acento_suave"],
+                    command=lambda current=issue: expedient_ui.open_skip_source_dialog(
+                        self, current
+                    ),
+                ).pack(pady=(4, 0))
 
         self.after(0, update_tray)
 

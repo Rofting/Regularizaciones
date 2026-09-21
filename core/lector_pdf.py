@@ -552,16 +552,68 @@ def _tesseract_executable() -> str | None:
     return next((candidate for candidate in candidates if candidate and os.path.exists(candidate)), None)
 
 
-def _poppler_path() -> str | None:
-    """Devuelve la carpeta de Poppler si Winget la instaló fuera del PATH."""
+# Sitios donde suele acabar Poppler en Windows. WinGet no lo añade al PATH y
+# cada versión cambia el nombre de su carpeta, así que se buscan todos los
+# repartos habituales (WinGet, Chocolatey, Scoop e instalaciones a mano) en vez
+# de una sola ruta. POPPLER_PATH manda sobre todos ellos.
+_PATRONES_POPPLER = (
+    r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\*Poppler*\**\bin",
+    r"%LOCALAPPDATA%\Microsoft\WinGet\Links",
+    r"%ProgramData%\chocolatey\lib\poppler\tools\**\bin",
+    r"%USERPROFILE%\scoop\apps\poppler\current\bin",
+    r"%USERPROFILE%\scoop\apps\poppler\current\Library\bin",
+    r"%ProgramFiles%\poppler*\**\bin",
+    r"%ProgramFiles(x86)%\poppler*\**\bin",
+    r"C:\poppler*\**\bin",
+)
+
+
+def poppler_candidatos() -> list[str]:
+    """Carpetas donde se ha buscado Poppler, en orden de preferencia."""
     if sys.platform != "win32":
-        return None
+        return []
     import glob
 
-    candidates = glob.glob(os.path.expandvars(
-        r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\oschwartz10612.Poppler_*\poppler-*\Library\bin"
-    ))
-    return candidates[0] if candidates else None
+    encontrados = []
+    for patron in _PATRONES_POPPLER:
+        ruta = os.path.expandvars(patron)
+        if "%" in ruta:      # una variable de entorno que no existe en este equipo
+            continue
+        for candidato in sorted(glob.glob(ruta, recursive=True), reverse=True):
+            if candidato not in encontrados and os.path.isdir(candidato):
+                encontrados.append(candidato)
+    return encontrados
+
+
+def _poppler_path() -> str | None:
+    """Carpeta de Poppler, o None si ya está accesible desde el PATH."""
+    manual = os.environ.get("POPPLER_PATH")
+    if manual and os.path.isdir(manual):
+        return manual
+    if shutil.which("pdftoppm"):
+        return None          # el PATH ya lo resuelve
+    for candidato in poppler_candidatos():
+        if os.path.isfile(os.path.join(candidato, "pdftoppm.exe")):
+            return candidato
+    return None
+
+
+def diagnostico_poppler() -> str:
+    """Texto para el usuario cuando no se encuentra Poppler."""
+    if shutil.which("pdftoppm"):
+        return "Poppler está en el PATH."
+    candidatos = poppler_candidatos()
+    if not candidatos:
+        return (
+            "No se ha encontrado Poppler. Instálalo con «winget install "
+            "oschwartz10612.Poppler» y reinicia la aplicación, o indica su "
+            "carpeta bin en la variable de entorno POPPLER_PATH."
+        )
+    return (
+        "Se han encontrado estas carpetas pero ninguna contiene pdftoppm.exe: "
+        + "; ".join(candidatos[:3])
+        + ". Indica la carpeta bin correcta en la variable POPPLER_PATH."
+    )
 
 
 @lru_cache(maxsize=1)
@@ -578,6 +630,20 @@ def _rapidocr_text(ruta_archivo: str, source: object | None = None) -> str:
         return "\n".join(str(line).strip() for line in lines if str(line).strip())
     except Exception:
         return ""
+
+
+def _detalle_render(error: object) -> str:
+    """Traduce el fallo de pdf2image a algo accionable.
+
+    "Unable to get page count. Is poppler installed and in PATH?" no le dice
+    al gestor qué tiene que hacer, y es el fallo más común: Poppler instalado
+    pero en una carpeta que la aplicación no mira.
+    """
+    texto = str(error)
+    if "poppler" in texto.lower():
+        return f"{texto} {diagnostico_poppler()}"
+    return texto
+
 
 
 def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
@@ -643,7 +709,7 @@ def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
     if cover_render_error is not None:
         return OCRResult(
             text="", status="render_or_ocr_failed",
-            detail=f"No se pudo leer la portada escaneada: {cover_render_error}", language=language,
+            detail=f"No se pudo leer la portada escaneada: {_detalle_render(cover_render_error)}", language=language,
         )
 
     try:
@@ -666,7 +732,7 @@ def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
     except Exception as exc:
         return OCRResult(
             text="", status="render_or_ocr_failed",
-            detail=f"No se pudo leer la portada escaneada: {exc}", language=language,
+            detail=f"No se pudo leer la portada escaneada: {_detalle_render(exc)}", language=language,
         )
 
     text = _normalizar_decimales_ocr("\n".join(partes))

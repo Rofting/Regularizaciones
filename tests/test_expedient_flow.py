@@ -197,6 +197,43 @@ class ExpedientFlowTest(unittest.TestCase):
             document_review.validate_case_ready(self.connection, self.case.id_case).status,
         )
 
+    def test_owner_import_keeps_saved_coefficients_and_creates_one_grouped_conflict(self):
+        self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario,coeficiente)
+               VALUES (?,'A','Vecino A',0.676)""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        owners_file = Path(self.directory.name) / "propietarios-conflicto.csv"
+        owners_file.write_text("vivienda;propietario;coeficiente\nA;Vecino A;0,752\n", encoding="utf-8")
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case, source_path=owners_file,
+            archive_root=self.archive_root, document_kind="owners",
+            candidates={"propietarios": json.dumps([{
+                "codigo_vivienda": "A", "nombre_propietario": "Vecino A",
+                "coeficiente": 0.752,
+            }])}, required_fields=(),
+        ).document
+
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+
+        self.assertEqual(0.676, self.connection.execute(
+            "SELECT coeficiente FROM propietarios WHERE id_comunidad=? AND codigo_vivienda='A'",
+            (self.community_id,),
+        ).fetchone()[0])
+        issues = self.connection.execute(
+            """SELECT code,field_name,status FROM review_issues
+               WHERE id_document=? ORDER BY id_issue""",
+            (document.id_document,),
+        ).fetchall()
+        self.assertEqual(
+            [("OWNER_COEFFICIENT_CONFLICT", "coeficientes", "open")],
+            [tuple(row) for row in issues],
+        )
+
     def test_manual_date_correction_rejects_non_date_digits(self):
         result = case_ingestion.add_document_to_case(
             self.connection, self.case.id_case, source_path=self.source_path,
@@ -380,26 +417,17 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM archivos_procesados").fetchone()[0])
         self.assertNotEqual("validated", self.document_status(document))
 
-    def test_counter_reset_creates_review_without_approving_negative_use(self):
+    def test_counter_decrease_is_carried_forward_without_negative_use(self):
         document = self.add_confirmed_reading(final=5)
         case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
         final = self.connection.execute(
-            "SELECT valor_acumulado,estado FROM lecturas_vecino ORDER BY fecha_lectura DESC"
+            "SELECT valor_acumulado,estado,metodo_estimacion FROM lecturas_vecino ORDER BY fecha_lectura DESC"
         ).fetchone()
-        self.assertEqual((5.0, "contador_averiado"), tuple(final))
-        self.assertEqual("COUNTER_RESET", self.open_issue_code())
-        self.assertEqual("under_review", self.document_status(document))
-        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
-        document_review.approve_counter_reset_estimate(
-            self.connection, issue.id_issue, consumption="15", reason="Estimación aprobada", approved_by="Jose",
-        )
-        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
-        self.assertEqual(115.0, self.connection.execute(
-            "SELECT valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura DESC"
-        ).fetchone()[0])
+        self.assertEqual((100.0, "estimado", "carry_forward_decrease"), tuple(final))
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
         self.assertEqual("validated", self.document_status(document))
 
-    def test_normalized_owner_code_allows_counter_reset_approval(self):
+    def test_normalized_owner_code_allows_automatic_decrease_carry_forward(self):
         document = self.add_confirmed_reading(final=5)
         self.connection.execute(
             "UPDATE propietarios SET codigo_vivienda='A.' WHERE id_comunidad=?",
@@ -410,18 +438,11 @@ class ExpedientFlowTest(unittest.TestCase):
         case_ingestion.apply_confirmed_source(
             self.connection, self.case.id_case, document.id_document,
         )
-        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
-        document_review.approve_counter_reset_estimate(
-            self.connection, issue.id_issue, consumption="15",
-            reason="Estimación aprobada", approved_by="Jose",
-        )
-        case_ingestion.apply_confirmed_source(
-            self.connection, self.case.id_case, document.id_document,
-        )
 
-        self.assertEqual(115.0, self.connection.execute(
+        self.assertEqual(100.0, self.connection.execute(
             "SELECT valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura DESC"
         ).fetchone()[0])
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
         self.assertEqual("validated", self.document_status(document))
 
     def test_unmatched_owner_reading_retries_after_owner_resolution(self):

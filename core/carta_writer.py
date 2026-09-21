@@ -530,16 +530,23 @@ def _caja_resultado(doc: Document, diferencia_total: float) -> None:
 
 
 def _bloque_info(doc: Document, fecha_str: str, vivienda: str,
-                 propietario: str, coeficiente, periodo: str,
+                 propietario: str, participacion_registral,
+                 coeficiente_aplicado, periodo: str,
                  fecha_ini: str, fecha_fin: str, n_vecinos: int) -> None:
     """Ficha del propietario en dos columnas de etiqueta|valor."""
-    coef_txt = (f"{coeficiente:.4f}".rstrip("0").rstrip(".").replace(".", ",") + " %"
-                if isinstance(coeficiente, (int, float)) and coeficiente else "—")
+    registral_txt = (
+        f"{participacion_registral:.4f}".rstrip("0").rstrip(".").replace(".", ",") + " %"
+        if isinstance(participacion_registral, (int, float)) else "—"
+    )
+    aplicado_txt = (
+        f"{coeficiente_aplicado * 100:.4f}".rstrip("0").rstrip(".").replace(".", ",") + " %"
+        if isinstance(coeficiente_aplicado, (int, float)) else "—"
+    )
     pares = [
         ("Propietario/a", propietario,             "Fecha",   fecha_str),
         ("Vivienda",      vivienda,                "Periodo", periodo),
-        ("Coeficiente",   coef_txt,                "Desde",   _fmt_fecha_es(fecha_ini)),
-        ("Vecinos en el reparto", str(n_vecinos or "—"), "Hasta", _fmt_fecha_es(fecha_fin)),
+        ("Participación registral", registral_txt, "Coeficiente aplicado", aplicado_txt),
+        ("Desde", _fmt_fecha_es(fecha_ini), "Hasta", _fmt_fecha_es(fecha_fin)),
     ]
 
     tabla = doc.add_table(rows=len(pares), cols=4)
@@ -1065,7 +1072,8 @@ def generar_carta(datos: dict, ruta_plantilla: str, ruta_salida: str) -> str:
                  fecha_str   = fecha_str,
                  vivienda    = vecino["vivienda"],
                  propietario = vecino["nombre"],
-                 coeficiente = vecino.get("coeficiente"),
+                 participacion_registral = vecino.get("participacion_registral", vecino.get("coeficiente")),
+                 coeficiente_aplicado = vecino.get("coeficiente_aplicado"),
                  periodo     = nombre_periodo,
                  fecha_ini   = periodo.get("fecha_inicio") or "",
                  fecha_fin   = periodo.get("fecha_fin") or "",

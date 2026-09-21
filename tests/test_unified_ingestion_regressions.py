@@ -565,17 +565,14 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             "SELECT id_periodo FROM lecturas_vecino WHERE fecha_lectura='2026-01-31'",
         ).fetchone()[0])
 
-    def test_counter_reset_approval_targets_source_interval_inside_case(self):
+    def test_counter_decrease_uses_source_interval_inside_case(self):
         self.connection.execute("UPDATE regularization_cases SET fecha_fin='2026-02-28' WHERE id_case=?", (self.case.id_case,))
         document = self.add_confirmed_reading(final=5)
         case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
-        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
         self.connection.execute("INSERT INTO lecturas_vecino (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado) SELECT id_propietario,id_periodo,tipo,'2026-02-28',150 FROM lecturas_vecino LIMIT 1")
-        document_review.approve_counter_reset_estimate(self.connection, issue.id_issue,
-            consumption="15", reason="Informe de sustitución", approved_by="Jose")
         rows = self.connection.execute("SELECT fecha_lectura,valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura").fetchall()
-        self.assertEqual([("2026-01-01", 100), ("2026-01-31", 115), ("2026-02-28", 150)], [tuple(r) for r in rows])
-        self.assertEqual("5", self.connection.execute("SELECT original_value FROM manual_corrections").fetchone()[0])
+        self.assertEqual([("2026-01-01", 100), ("2026-01-31", 100), ("2026-02-28", 150)], [tuple(r) for r in rows])
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
 
     def test_zero_final_reading_keeps_raw_observation_and_carries_previous_value(self):
         document = self.add_confirmed_reading(final=0)
@@ -757,6 +754,89 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             )],
         )
 
+    def test_zero_sequence_keeps_last_reliable_value_until_counter_recovers(self):
+        """A received zero is evidence, not a new accumulated meter value."""
+        self.connection.execute(
+            "UPDATE regularization_cases SET fecha_inicio='2025-07-01',fecha_fin='2026-07-31' WHERE id_case=?",
+            (self.case.id_case,),
+        )
+        self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'A','Vecino A')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        owner_id = self.connection.execute(
+            "SELECT id_propietario FROM propietarios WHERE id_comunidad=?",
+            (self.community_id,),
+        ).fetchone()[0]
+
+        def add_interval(name, start, initial, end, final):
+            path = self.database_path.parent / name
+            path.write_text(name, encoding="utf-8")
+            document = case_ingestion.add_document_to_case(
+                self.connection,
+                self.case.id_case,
+                source_path=path,
+                archive_root=self.archive_root,
+                document_kind="reading",
+                candidates={"vecinos": json.dumps([{
+                    "vivienda": "A", "tipo": "ACS", "fecha_ant": start,
+                    "val_ant": initial, "fecha_act": end, "val_act": final,
+                }])},
+                required_fields=(),
+            ).document
+            case_ingestion.apply_confirmed_source(
+                self.connection, self.case.id_case, document.id_document,
+            )
+
+        add_interval("r1.txt", "2025-07-01", 144, "2025-09-30", 0)
+        add_interval("r2.txt", "2025-09-30", 0, "2026-01-31", 0)
+        add_interval("r3.txt", "2026-01-31", 0, "2026-07-31", 160)
+
+        readings = self.connection.execute(
+            """SELECT fecha_lectura,valor_acumulado,estado,metodo_estimacion
+                 FROM lecturas_vecino WHERE id_propietario=? ORDER BY fecha_lectura""",
+            (owner_id,),
+        ).fetchall()
+        self.assertEqual(
+            [
+                ("2025-07-01", 144, "real", None),
+                ("2025-09-30", 144, "estimado", "carry_forward_zero"),
+                ("2026-01-31", 144, "estimado", "carry_forward_zero"),
+                ("2026-07-31", 160, "real", None),
+            ],
+            [tuple(row) for row in readings],
+        )
+        zeros = self.connection.execute(
+            """SELECT observed_value,status FROM reading_observations
+                 WHERE id_propietario=? AND observed_value=0 ORDER BY fecha_lectura,id_observation""",
+            (owner_id,),
+        ).fetchall()
+        self.assertTrue(zeros)
+        self.assertEqual({(0, "carried_forward")}, {tuple(row) for row in zeros})
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+
+    def test_positive_decrease_uses_last_reliable_value_without_manual_issue(self):
+        document = self.add_confirmed_reading(final=16)
+
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+
+        effective = self.connection.execute(
+            """SELECT valor_acumulado,estado,metodo_estimacion
+                 FROM lecturas_vecino WHERE fecha_lectura='2026-01-31'"""
+        ).fetchone()
+        observation = self.connection.execute(
+            """SELECT observed_value,status FROM reading_observations
+                 WHERE fecha_lectura='2026-01-31'"""
+        ).fetchone()
+        self.assertEqual((100, "estimado", "carry_forward_decrease"), tuple(effective))
+        self.assertEqual((16, "carried_forward"), tuple(observation))
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+
     def test_resolving_reading_conflict_updates_source_and_canonical_reading(self):
         self.connection.execute(
             """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
@@ -808,7 +888,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         ).fetchone()[0])
         self.assertEqual(123.0, rows[0]["val_act"])
 
-    def test_two_resets_in_one_source_have_independent_approval_targets(self):
+    def test_two_decreases_in_one_source_are_each_carried_forward(self):
         self.connection.execute("UPDATE regularization_cases SET fecha_fin='2026-02-28' WHERE id_case=?", (self.case.id_case,))
         self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))
         rows = [
@@ -820,25 +900,18 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         document = self.ingest(SourceAnalysis.reading({"vecinos": json.dumps(rows)}))
         self.confirm(document)
         issues = document_review.list_open_issues(self.connection, self.case.id_case)
-        self.assertEqual(2, len(issues))
-        for issue in issues:
-            document_review.approve_counter_reset_estimate(self.connection, issue.id_issue,
-                consumption="15", reason="Cambio de contador", approved_by="Jose")
-        self.assertEqual([100, 115, 200, 215], [row[0] for row in self.connection.execute(
+        self.assertEqual(0, len(issues))
+        self.assertEqual([100, 100, 200, 200], [row[0] for row in self.connection.execute(
             "SELECT valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura")])
-        self.assertEqual(2, self.connection.execute("SELECT COUNT(*) FROM manual_corrections").fetchone()[0])
+        self.assertEqual([5, 8], [row[0] for row in self.connection.execute(
+            "SELECT observed_value FROM reading_observations WHERE status='carried_forward' ORDER BY fecha_lectura")])
         self.assertFalse(document_review.case_has_unapplied_sources(self.connection, self.case.id_case))
 
-    def test_invalid_reset_target_cannot_fall_back_to_unrelated_case_boundaries(self):
+    def test_automatic_decrease_does_not_create_counter_reset_targets(self):
         document = self.add_confirmed_reading(final=5)
         case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
-        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
-        owner = self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'B','Otro vecino')", (self.community_id,)).lastrowid
-        other = self.connection.execute("INSERT INTO lecturas_vecino (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado) SELECT ?,id_periodo,'ACS','2026-01-31',8 FROM lecturas_vecino LIMIT 1", (owner,)).lastrowid
-        self.connection.execute("UPDATE counter_reset_targets SET final_reading_id=? WHERE id_issue=?", (other, issue.id_issue))
-        with self.assertRaises(LookupError):
-            document_review.approve_counter_reset_estimate(self.connection, issue.id_issue,
-                consumption="15", reason="Informe", approved_by="Jose")
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM counter_reset_targets").fetchone()[0])
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM manual_corrections").fetchone()[0])
 
     def test_reading_correction_cannot_silently_keep_the_old_canonical_values(self):

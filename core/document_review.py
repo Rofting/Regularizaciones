@@ -14,6 +14,7 @@ from expedient_service import get_case, link_case_to_period, set_case_status
 _savepoint_counter = count()
 _MISSING_FIELD_CODE = "MISSING_REQUIRED_FIELD"
 _COUNTER_RESET_CODE = "COUNTER_RESET"
+_READING_ZERO_CODE = "READING_ZERO_REVIEW"
 _INVOICE_OUTSIDE_PERIOD_CODE = "INVOICE_OUTSIDE_PERIOD"
 _CLASSIFICATION_REQUIRED_CODE = "DOCUMENT_CLASSIFICATION_REQUIRED"
 _ARCHIVED_SOURCE_DUPLICATE_CODE = "ARCHIVED_SOURCE_DUPLICATE"
@@ -112,6 +113,29 @@ def _decimal_text(value: Decimal | float | int) -> str:
     return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
+def _issue_reading_dates(
+    field_name: str, case_start: str, case_end: str,
+) -> tuple[str, str]:
+    """Intervalo de lecturas que una incidencia declara en su propio nombre.
+
+    El formato es 'reading.<vivienda>.<servicio>|<inicio>/<fin>'. Sin sufijo se
+    usa el intervalo del expediente, que es como se creaban antes.
+    """
+    _, separador, intervalo = field_name.partition("|")
+    if not separador:
+        return case_start, case_end
+    inicio, barra, fin = intervalo.partition("/")
+    if not barra:
+        return case_start, case_end
+    for fecha in (inicio, fin):
+        try:
+            datetime.strptime(fecha, "%Y-%m-%d")
+        except ValueError:
+            return case_start, case_end
+    return inicio, fin
+
+
+
 def _counter_reset_target(
     connection: sqlite3.Connection, issue: sqlite3.Row
 ) -> tuple[sqlite3.Row, sqlite3.Row, sqlite3.Row, sqlite3.Row]:
@@ -150,8 +174,16 @@ def _counter_reset_target(
         "SELECT 1 FROM counter_reset_targets WHERE id_issue=?", (issue['id_issue'],)
     ).fetchone():
         raise LookupError("La pareja de lecturas de la incidencia no pertenece al propietario y servicio")
-    initial_date = target['initial_date'] if target else case['fecha_inicio']
-    final_date = target['final_date'] if target else case['fecha_fin']
+    if target:
+        initial_date, final_date = target["initial_date"], target["final_date"]
+    else:
+        # La incidencia lleva su propio intervalo en el nombre del campo
+        # ('reading.PA2-2ºC.ACS|2025-11-01/2026-01-31'). Usar en su lugar las
+        # fechas del expediente apuntaba a otras lecturas, que no bajaban, y
+        # la estimación se rechazaba como "ya no es un reinicio pendiente".
+        initial_date, final_date = _issue_reading_dates(
+            str(issue["field_name"]), case["fecha_inicio"], case["fecha_fin"],
+        )
     readings = connection.execute(
         """SELECT id_lectura,fecha_lectura,valor_acumulado,estado,metodo_estimacion,
                   fuente,notas,approved_by,approved_at
@@ -169,8 +201,17 @@ def _counter_reset_target(
     final = by_date.get(final_date)
     if initial is None or final is None:
         raise LookupError("No se encuentran las lecturas inicial y final del período")
-    if final["estado"] != "contador_averiado" or final["valor_acumulado"] >= initial["valor_acumulado"]:
-        raise LookupError("La lectura ya no es un reinicio pendiente de aprobar")
+    # Lo que define un reinicio pendiente es que la lectura final siga siendo
+    # menor que la inicial y que nadie haya aprobado aún una estimación. Exigir
+    # además el estado 'contador_averiado' bloqueaba los casos en los que el
+    # gestor ya había resuelto a mano un conflicto sobre esa misma lectura, que
+    # la dejaba en 'real' sin dejar de ser un reinicio.
+    if final["valor_acumulado"] >= initial["valor_acumulado"]:
+        raise LookupError(
+            "La lectura final ya no es menor que la inicial: no hay reinicio que aprobar"
+        )
+    if final["metodo_estimacion"] == "counter_reset_manual":
+        raise LookupError("Este reinicio ya tiene una estimación aprobada")
     return case, owner, initial, final
 
 
@@ -779,6 +820,14 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
             raise ValueError(
                 "Un reinicio de contador sólo se puede cerrar con una estimación aprobada"
             )
+        if issue["code"] == _READING_ZERO_CODE:
+            # Esta corrección sólo guardaba un candidato de extracción, sin
+            # tocar la lectura: el diálogo decía "guardado" y la incidencia
+            # reaparecía al reaplicar la fuente. Se cierra por su propio camino.
+            raise ValueError(
+                "Una lectura a cero se confirma desde «Revisar ceros», que sí "
+                "escribe la lectura canónica"
+            )
         candidate = connection.execute(
             """SELECT value FROM extraction_candidates
                WHERE id_document = ? AND field_name = ?""",
@@ -903,6 +952,14 @@ def approve_counter_reset_estimate(
         connection.execute(
             f"UPDATE propietarios SET {owner_state}='ok' WHERE id_propietario=?",
             (owner["id_propietario"],),
+        )
+        # El mismo reinicio lo reportan todos los ficheros de lecturas que
+        # cubren ese intervalo, y el índice de unicidad es por documento: sin
+        # esto quedaban incidencias gemelas que ya no se podían aprobar.
+        connection.execute(
+            """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
+               WHERE status='open' AND code=? AND field_name=? AND id_case=?""",
+            (_COUNTER_RESET_CODE, issue["field_name"], issue["id_case"]),
         )
         connection.execute(
             """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
@@ -1063,11 +1120,20 @@ def confirm_initial_zero_readings_for_source(
                 and str(current["approved_by"] or "").strip()
                 and str(current["approved_at"] or "").strip()
             )
+            # Un cero que el propio sistema ya resolvió arrastrando la lectura
+            # anterior no es un valor ajeno con el que chocar: es la respuesta a
+            # este mismo cero. Rechazarlo dejaba la incidencia sin ninguna vía
+            # de cierre, porque la estimación nunca llega a estado 'real'.
+            carried_forward_zero = current is not None and (
+                current["estado"] == "estimado"
+                and current["metodo_estimacion"] == "carry_forward_zero"
+            )
             if (
                 current is not None
                 and float(current["valor_acumulado"]) != 0
                 and current["estado"] != "real"
                 and not approved_counter_reset
+                and not carried_forward_zero
             ):
                 raise ValueError("Ya existe una lectura canónica distinta de cero para esta fecha")
             if current is None:
@@ -1159,6 +1225,87 @@ def dismiss_invoice_outside_period(
     return review_issue_from_row(dismissed)
 
 
+def ignore_source_document(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    reason: str,
+    dismissed_by: str,
+) -> int:
+    """Deja una fuente fuera del expediente, con su motivo y sin borrarla.
+
+    Un listado que el gestor no quiere incorporar, un PDF ilegible o un Excel
+    que sólo sirve de consulta bloqueaban el expediente entero: sus incidencias
+    eran obligatorias y no había forma de saltarlas. Omitir cierra todas sus
+    incidencias abiertas y marca el documento como ignorado, de modo que deja
+    de contar como fuente pendiente de aplicar. El archivo y sus extracciones
+    se conservan, así que la decisión es reversible reanalizando la fuente.
+
+    Devuelve cuántas incidencias se han cerrado.
+    """
+    normalized_reason = reason.strip()
+    normalized_actor = dismissed_by.strip()
+    if not normalized_reason:
+        raise ValueError("El motivo para omitir la fuente es obligatorio")
+    if not normalized_actor:
+        raise ValueError("La persona responsable de omitir la fuente es obligatoria")
+
+    with _transaction(connection):
+        document = connection.execute(
+            "SELECT id_case FROM source_documents WHERE id_document=?", (document_id,)
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+
+        issues = connection.execute(
+            "SELECT id_issue,detected_value FROM review_issues WHERE id_document=? AND status='open'",
+            (document_id,),
+        ).fetchall()
+        for issue in issues:
+            connection.execute(
+                """INSERT INTO manual_corrections
+                   (id_issue,original_value,corrected_value,reason,resolved_by)
+                   VALUES (?,?,?,?,?)""",
+                (
+                    issue["id_issue"], issue["detected_value"], "fuente_omitida",
+                    normalized_reason, normalized_actor,
+                ),
+            )
+        connection.execute(
+            """UPDATE review_issues SET status='dismissed',resolved_at=datetime('now')
+               WHERE id_document=? AND status='open'""",
+            (document_id,),
+        )
+        connection.execute(
+            "UPDATE source_documents SET status='not_applicable' WHERE id_document=?",
+            (document_id,),
+        )
+    return len(issues)
+
+
+def restore_ignored_source(
+    connection: sqlite3.Connection, case_id: int, document_id: int,
+) -> None:
+    """Devuelve al circuito una fuente omitida, para volver a analizarla."""
+    with _transaction(connection):
+        connection.execute(
+            """UPDATE source_documents SET status='registered'
+               WHERE id_document=? AND id_case=? AND status='not_applicable'""",
+            (document_id, case_id),
+        )
+
+
+def list_ignored_sources(connection: sqlite3.Connection, case_id: int):
+    """Fuentes que el gestor dejó fuera, para poder revisarlas o recuperarlas."""
+    return connection.execute(
+        """SELECT id_document,original_name FROM source_documents
+           WHERE id_case=? AND status='not_applicable' ORDER BY original_name""",
+        (case_id,),
+    ).fetchall()
+
+
+
 def assert_case_final_readings_approved(
     connection: sqlite3.Connection, case_id: int
 ) -> None:
@@ -1177,15 +1324,23 @@ def assert_case_final_readings_approved(
         raise LookupError("Expediente no encontrado")
     if case["id_periodo"] is None:
         return
+    # Sólo se exige aprobación a lo que de verdad pide una decisión humana: un
+    # contador averiado o una estimación manual. Los carry-forward de cero o
+    # disminución son criterios automáticos —conservan la última lectura
+    # fiable— y no llevan aprobador. Garajes y locales quedan fuera.
     unresolved = connection.execute(
         """SELECT COUNT(*) FROM period_readings AS reading
            JOIN propietarios AS owner ON owner.id_propietario=reading.id_propietario
            WHERE owner.id_comunidad=? AND reading.id_periodo=?
              AND reading.fecha_lectura=?
+             AND owner.tipo_unidad='vivienda'
              AND (
                  reading.estado='contador_averiado'
                  OR (
                      reading.estado='estimado'
+                     AND COALESCE(reading.metodo_estimacion,'') NOT IN (
+                         'carry_forward_zero','carry_forward_decrease'
+                     )
                      AND (
                          trim(COALESCE(reading.approved_by,''))=''
                          OR trim(COALESCE(reading.approved_at,''))=''
@@ -1235,7 +1390,7 @@ def case_has_unapplied_sources(connection: sqlite3.Connection, case_id: int) -> 
     """Analysed sources may only pass readiness after canonical application."""
     return connection.execute("""SELECT 1 FROM source_documents d
         WHERE d.id_case=? AND d.classification_confidence IS NOT NULL
-          AND d.document_kind<>'other' AND (
+          AND d.document_kind<>'other' AND d.status<>'not_applicable' AND (
             d.status<>'validated' OR d.document_kind='unknown'
             OR NOT EXISTS (SELECT 1 FROM archivos_procesados a
                            WHERE a.nombre_archivo='source_document:' || d.id_document)

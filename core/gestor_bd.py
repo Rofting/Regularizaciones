@@ -68,7 +68,8 @@ TABLAS = [
     CREATE TABLE IF NOT EXISTS propietarios (
         id_propietario      INTEGER PRIMARY KEY AUTOINCREMENT,
         id_comunidad        INTEGER NOT NULL REFERENCES comunidades(id_comunidad),
-        codigo_vivienda     TEXT    NOT NULL,   -- ej: 'SS22 BAJO IZDA'
+        codigo_vivienda     TEXT    NOT NULL,   -- ej: 'SS22 BAJO IZDA' (siempre sin espacios sobrantes)
+        tipo_unidad         TEXT    NOT NULL DEFAULT 'vivienda',  -- 'vivienda' | 'garaje' | 'local'
         nombre_propietario  TEXT    NOT NULL,
         coeficiente         REAL    NOT NULL DEFAULT 0.0,   -- enteros de participación
         activo              INTEGER DEFAULT 1,
@@ -499,3 +500,33 @@ if __name__ == "__main__":
     crear_bd(ruta_bd)
     resumen_bd(ruta_bd)
     print("Listo. Las demás funciones de este módulo se importan desde otros scripts.")
+
+
+# ---------------------------------------------------------------------------
+# Normalización de unidades (viviendas, garajes y locales)
+# ---------------------------------------------------------------------------
+# Los listados de propietarios llegan de fuentes distintas (CSV, XLS, PDF) y el
+# mismo piso aparecía como 'MP-1ºA' y 'MP-1ºA        ', creando dos filas y
+# duplicando los coeficientes. El código se guarda siempre normalizado.
+# Garajes y locales no entran en la regularización de ACS ni de calefacción,
+# así que se clasifican al darlos de alta.
+
+_MARCAS_GARAJE = ("GAR", "PK", "PARKING", "APARCAMIENTO", "TRASTERO")
+_MARCAS_LOCAL = ("LOC", "LOCAL", "COMERCIAL")
+
+
+def normalizar_codigo_vivienda(valor) -> str:
+    """Código sin espacios sobrantes ni dobles, para que cada unidad sea una."""
+    return " ".join(str(valor or "").split())
+
+
+def clasificar_tipo_unidad(codigo) -> str:
+    """Deduce si la unidad es vivienda, garaje o local a partir de su código."""
+    texto = normalizar_codigo_vivienda(codigo).upper()
+    for marca in _MARCAS_GARAJE:
+        if marca in texto:
+            return "garaje"
+    for marca in _MARCAS_LOCAL:
+        if marca in texto:
+            return "local"
+    return "vivienda"

@@ -1,8 +1,8 @@
 {
-  "key": "658_acs_v1",
+  "key": "{clave}",
   "version": "1",
-  "community_code": "658",
-  "template_relative_path": "plantillas/comunidades/658/658_acs_v1.xlsx",
+  "community_code": "{codigo}",
+  "template_relative_path": "plantillas/comunidades/{codigo}/{clave}.xlsx",
   "active_modules": [
     "GAS",
     "ELECTRICIDAD",
@@ -255,5 +255,6 @@
       "billed_source": null,
       "required": false
     }
-  ]
+  ],
+  "_descripcion": "Perfil base del modelo canónico de estudio (DATOS, GAS, ELECTRICIDAD, AGUA, OTROS GASTOS, LECTURAS ACS M3 y ANALISIS). Al dar de alta una comunidad sin modelo propio se copia este perfil sustituyendo {codigo} y {clave}, junto con plantillas/modelo/modelo_acs_v1.xlsx. No es un perfil de ninguna comunidad: vive fuera de config/excel_profiles para que nadie lo cargue como tal."
 }

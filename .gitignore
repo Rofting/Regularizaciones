@@ -12,6 +12,8 @@ __pycache__/
 # Artefactos temporales de verificación
 scratchpad/rendered/
 salidas/validacion_658/
+.excel_exports/
+*.bak
 
 # Metadata de PyCharm (específica de cada máquina)
 .idea/
@@ -27,6 +29,10 @@ Excels_Maestros_backup*/
 
 # Plantillas privadas instaladas desde los maestros de cada comunidad
 plantillas/comunidades/
+plantillas/CARTA_PLANTILLA_DATOS_VARIABLES.docx
+
+# Borrador local ajeno a la aplicación
+Nuevo Documento de texto.txt
 
 # Perfiles runtime locales; los perfiles públicos permanecen en el directorio padre
 config/excel_profiles/runtime/

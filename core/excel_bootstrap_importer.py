@@ -27,6 +27,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import column_index_from_string
 
 from document_review import create_review_issue
+from gestor_bd import clasificar_tipo_unidad, normalizar_codigo_vivienda
 from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
 from expedient_service import (
     get_case,
@@ -1376,9 +1377,14 @@ def _import_owner_source(
                 email = _clean(field(email_column)) or None
                 cursor = connection.execute(
                     """INSERT OR IGNORE INTO propietarios
-                       (id_comunidad,codigo_vivienda,nombre_propietario,coeficiente,email)
-                       VALUES (?,?,?,?,?)""",
-                    (case.community_id, property_code, name, coefficient, email),
+                       (id_comunidad,codigo_vivienda,tipo_unidad,nombre_propietario,coeficiente,email)
+                       VALUES (?,?,?,?,?,?)""",
+                    (
+                        case.community_id,
+                        normalizar_codigo_vivienda(property_code),
+                        clasificar_tipo_unidad(property_code),
+                        name, coefficient, email,
+                    ),
                 )
                 inserted += int(bool(cursor.rowcount))
                 sources = []

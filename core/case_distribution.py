@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import document_review
+from concept_pricing import DerivedPricingError, derive_source_cents
 from excel_profiles import ConceptRule, ExcelProfile, calculate_profile_sha256, load_profile
 from excel_export_service import calculate_case_input_hash
 from reconciliation import reconcile_declared_totals
@@ -25,6 +26,7 @@ class DistributionResult:
     id_periodo: int
     concept_totals_cents: dict[str, int]
     owner_result_count: int
+    id_distribution_run: int | None = None
 
 
 ProgressCallback = Callable[[str, dict[str, Any]], None]
@@ -190,9 +192,12 @@ def _case_and_profile(
 
 
 def _owners(connection: sqlite3.Connection, community_id: int) -> list[sqlite3.Row]:
+    # Garajes, locales y trasteros no participan en la regularización de ACS
+    # ni de calefacción: ni consumen ni se les gira cuota por ello.
     owners = connection.execute(
         """SELECT id_propietario,coeficiente FROM propietarios
-           WHERE id_comunidad=? AND activo=1 ORDER BY id_propietario""",
+           WHERE id_comunidad=? AND activo=1 AND tipo_unidad='vivienda'
+           ORDER BY id_propietario""",
         (community_id,),
     ).fetchall()
     if not owners:
@@ -207,6 +212,11 @@ def _parameter_cents(
 ) -> int | None:
     if source is None:
         return 0
+    if source.startswith("derived_invoices."):
+        try:
+            return derive_source_cents(connection, case, source)
+        except DerivedPricingError as error:
+            raise DistributionBlockedError(str(error)) from error
     prefix = "period_parameters."
     if not source.startswith(prefix):
         raise DistributionBlockedError(f"Fuente de concepto no soportada: {source}")
@@ -290,6 +300,39 @@ def _reading_type(concept: ConceptRule) -> str:
     )
 
 
+def _boundary_reading_dates(
+    connection: sqlite3.Connection, case: sqlite3.Row, reading_type: str,
+) -> tuple[str, str]:
+    """Lecturas que abren y cierran el período, no el día exacto del ejercicio.
+
+    Los contadores se leen cuando toca, no el 1 de agosto: la lectura inicial
+    es la última anterior al arranque y la final, la última que cabe dentro.
+    Es el mismo criterio que usa la hoja del estudio, así que el reparto y el
+    Excel hablan siempre de las mismas dos lecturas.
+    """
+    fila = connection.execute(
+        """SELECT
+             (SELECT MAX(fecha_lectura) FROM period_readings r
+               JOIN propietarios p ON p.id_propietario=r.id_propietario
+               WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda' AND r.tipo=?
+                 AND r.fecha_lectura<=?) AS inicial,
+             (SELECT MAX(fecha_lectura) FROM period_readings r
+               JOIN propietarios p ON p.id_propietario=r.id_propietario
+               WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda' AND r.tipo=?
+                 AND r.fecha_lectura<=?) AS final""",
+        (
+            case["id_comunidad"], reading_type, case["fecha_inicio"],
+            case["id_comunidad"], reading_type, case["fecha_fin"],
+        ),
+    ).fetchone()
+    if fila["inicial"] is None or fila["final"] is None or fila["inicial"] >= fila["final"]:
+        raise DistributionBlockedError(
+            f"Faltan lecturas {reading_type} que abran y cierren el período"
+        )
+    return fila["inicial"], fila["final"]
+
+
+
 def _consumption_weights(
     connection: sqlite3.Connection,
     case: sqlite3.Row,
@@ -297,28 +340,38 @@ def _consumption_weights(
     owner_ids: list[int],
 ) -> dict[int, Decimal]:
     reading_type = _reading_type(concept)
+    fecha_inicial, fecha_final = _boundary_reading_dates(connection, case, reading_type)
     result: dict[int, Decimal] = {}
     for owner_id in owner_ids:
         rows = connection.execute(
-            """SELECT fecha_lectura,valor_acumulado,estado,approved_by,approved_at
+            """SELECT fecha_lectura,valor_acumulado,estado,metodo_estimacion,approved_by,approved_at
                FROM period_readings
                WHERE id_propietario=? AND id_periodo=? AND tipo=?
                  AND fecha_lectura IN (?,?)
                ORDER BY fecha_lectura""",
-            (owner_id, case["id_periodo"], reading_type, case["fecha_inicio"], case["fecha_fin"]),
+            (owner_id, case["id_periodo"], reading_type, fecha_inicial, fecha_final),
         ).fetchall()
         by_date = {row["fecha_lectura"]: row for row in rows}
-        if case["fecha_inicio"] not in by_date or case["fecha_fin"] not in by_date:
+        if fecha_inicial not in by_date or fecha_final not in by_date:
             raise DistributionBlockedError("Falta una lectura de contador necesaria")
-        initial = by_date[case["fecha_inicio"]]
-        final = by_date[case["fecha_fin"]]
+        initial = by_date[fecha_inicial]
+        final = by_date[fecha_final]
         for reading in (initial, final):
             status = reading["estado"] or "real"
             if status == "contador_averiado":
                 raise DistributionBlockedError("Hay un contador averiado pendiente de estimación aprobada")
             if status == "sin_lectura":
                 raise DistributionBlockedError("Hay una lectura de contador incompleta")
-            if status == "estimado" and (not reading["approved_by"] or not reading["approved_at"]):
+            # Los dos carry-forward conservan la última lectura fiable ante
+            # un cero o una bajada. Son criterios automáticos auditados, no
+            # estimaciones manuales que necesiten aprobador.
+            if (
+                status == "estimado"
+                and (reading["metodo_estimacion"] or "") not in {
+                    "carry_forward_zero", "carry_forward_decrease",
+                }
+                and (not reading["approved_by"] or not reading["approved_at"])
+            ):
                 raise DistributionBlockedError("Hay una estimación de contador sin aprobación explícita")
             if status not in ("real", "estimado"):
                 raise DistributionBlockedError("Hay un estado de lectura no revisable")
@@ -372,6 +425,9 @@ def _write_results(
     allocations_actual: Mapping[int, int],
     consumption: Mapping[int, float | None],
     source_batch_id: int | None,
+    distribution_run_id: int,
+    coefficient_by_owner: Mapping[int, Decimal],
+    coefficient_eligible_total: Decimal,
 ) -> int:
     connection.execute(
         """INSERT INTO regularization_concepts
@@ -401,6 +457,34 @@ def _write_results(
                     "kWh" if concept.key.startswith("heating_") else "m³"
                 ) if consumption_value is not None else None,
                 billed, actual, actual - billed, source_batch_id,
+            ),
+        )
+        raw_coefficient = coefficient_by_owner.get(owner_id)
+        applied_coefficient = (
+            raw_coefficient / coefficient_eligible_total
+            if (
+                concept.allocation_method == "coefficient"
+                and raw_coefficient is not None
+                and coefficient_eligible_total > 0
+            )
+            else None
+        )
+        consumption_unit = (
+            "kWh" if concept.key.startswith("heating_") else "m³"
+        ) if consumption_value is not None else None
+        connection.execute(
+            """INSERT INTO owner_distribution_snapshots
+               (id_distribution_run,id_propietario,concept_key,
+                coefficient_raw,coefficient_eligible_total,coefficient_applied,
+                consumption,consumption_unit,billed_cents,actual_cents,difference_cents)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                distribution_run_id, owner_id, concept.key,
+                float(raw_coefficient) if raw_coefficient is not None else None,
+                float(coefficient_eligible_total) if coefficient_eligible_total > 0 else None,
+                float(applied_coefficient) if applied_coefficient is not None else None,
+                consumption_value, consumption_unit,
+                billed, actual, actual - billed,
             ),
         )
     return len(allocations_actual)
@@ -466,6 +550,19 @@ def calculate_case_distribution(
         owners = _owners(connection, int(case["id_comunidad"]))
         owner_ids = [int(owner["id_propietario"]) for owner in owners]
         source_batch_id = _source_batch_id(connection, case)
+        coefficient_by_owner = {
+            int(owner["id_propietario"]): Decimal(str(owner["coeficiente"]))
+            for owner in owners if owner["coeficiente"] is not None
+        }
+        coefficient_eligible_total = sum(coefficient_by_owner.values(), Decimal(0))
+        input_sha256 = calculate_case_input_hash(
+            connection, id_case=id_case, project_root=root, profile=profile,
+        )
+        distribution_run_id = int(connection.execute(
+            """INSERT INTO distribution_runs
+               (id_case,id_periodo,input_sha256,status) VALUES (?,?,?,'running')""",
+            (id_case, case["id_periodo"], input_sha256),
+        ).lastrowid)
 
         # Toda fila de un concepto que el perfil conoce se sustituye; así un
         # concepto opcional que deja de estar presente no sobrevive del cálculo
@@ -532,6 +629,9 @@ def calculate_case_distribution(
                 connection, period_id=int(case["id_periodo"]), concept=concept,
                 allocations_billed=billed_allocations, allocations_actual=actual_allocations,
                 consumption=consumption, source_batch_id=source_batch_id,
+                distribution_run_id=distribution_run_id,
+                coefficient_by_owner=coefficient_by_owner,
+                coefficient_eligible_total=coefficient_eligible_total,
             )
             references[concept.key] = (billed_total, actual_total)
             total_actuals[concept.key] = actual_total
@@ -555,8 +655,15 @@ def calculate_case_distribution(
         if reconciliation.status != "cuadrado":
             raise DistributionBlockedError("El reparto no cuadra al céntimo")
         _write_legacy_projection(connection, case, tuple(active_concepts))
+        connection.execute(
+            """UPDATE distribution_runs
+               SET status='completed',completed_at=datetime('now')
+               WHERE id_distribution_run=?""",
+            (distribution_run_id,),
+        )
     _emit(progress, "complete", id_case=id_case, results=written)
     return DistributionResult(
         id_case=int(case["id_case"]), id_periodo=int(case["id_periodo"]),
         concept_totals_cents=total_actuals, owner_result_count=written,
+        id_distribution_run=distribution_run_id,
     )

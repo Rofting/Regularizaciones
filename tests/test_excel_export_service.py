@@ -25,7 +25,7 @@ import excel_generator
 import gestor_bd
 from excel_export_service import (
     ExportBlockedError, _case_context, _input_hash, _profile_for_community,
-    generate_official_excel,
+    _is_winter, _season_boundary, generate_official_excel,
 )
 from excel_validation import WorkbookValidationError, validate_workbook, workbook_fingerprint
 from office_recalculation import (
@@ -348,7 +348,7 @@ class ExcelExportServiceTest(unittest.TestCase):
         self.assertEqual(
             ["validate_case", "prepare_template", "write_gas",
              "write_electricidad", "write_agua", "write_otros_gastos",
-             "write_acs", "recalculate", "reconcile", "publish"],
+             "write_acs", "recalculate", "reconcile", "parameters", "publish"],
             stages,
         )
         workbook = load_workbook(result.output_path, data_only=False)
@@ -680,6 +680,51 @@ class ExcelExportServiceTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(str(self.official_output), result["archivo"])
         self.assertEqual([], result["errores"])
+
+
+class HeatingSeasonTest(unittest.TestCase):
+    """La temporada decide si un consumo es de ACS o de calefacción.
+
+    Las fechas son las del estudio real de la 658: cada factura cayó de un lado
+    y el reparto de la fila de sumas depende de ello, así que la regla se fija
+    aquí con esas mismas fechas.
+    """
+
+    GAS_INICIO, GAS_FIN = (12, 1), (5, 31)
+    LUZ_INICIO, LUZ_FIN = (11, 1), (4, 30)
+
+    def test_gas_invoices_follow_december_to_may_season(self):
+        verano = [date(2025, 8, 27), date(2025, 9, 22), date(2025, 10, 1),
+                  date(2025, 10, 27), date(2025, 11, 28), date(2026, 6, 24),
+                  date(2026, 7, 23)]
+        invierno = [date(2025, 12, 30), date(2026, 1, 22), date(2026, 2, 25),
+                    date(2026, 3, 18), date(2026, 3, 30), date(2026, 4, 23),
+                    date(2026, 4, 25), date(2026, 5, 29)]
+        for dia in verano:
+            self.assertFalse(_is_winter(dia, self.GAS_INICIO, self.GAS_FIN), dia)
+        for dia in invierno:
+            self.assertTrue(_is_winter(dia, self.GAS_INICIO, self.GAS_FIN), dia)
+
+    def test_electricity_uses_its_own_november_to_april_season(self):
+        # El mismo noviembre es verano para el gas e invierno para la luz.
+        noviembre = date(2025, 11, 30)
+        self.assertTrue(_is_winter(noviembre, self.LUZ_INICIO, self.LUZ_FIN))
+        self.assertFalse(_is_winter(noviembre, self.GAS_INICIO, self.GAS_FIN))
+        mayo = date(2026, 5, 31)
+        self.assertFalse(_is_winter(mayo, self.LUZ_INICIO, self.LUZ_FIN))
+        self.assertTrue(_is_winter(mayo, self.GAS_INICIO, self.GAS_FIN))
+
+    def test_season_without_end_of_year_wrap_and_missing_date(self):
+        self.assertTrue(_is_winter(date(2026, 3, 15), (1, 1), (6, 30)))
+        self.assertFalse(_is_winter(date(2026, 8, 15), (1, 1), (6, 30)))
+        self.assertFalse(_is_winter(None, self.GAS_INICIO, self.GAS_FIN))
+
+    def test_boundaries_are_read_and_validated(self):
+        self.assertEqual((12, 1), _season_boundary("12-01", "05-31"))
+        self.assertEqual((5, 31), _season_boundary(None, "05-31"))
+        for invalido in ("13-01", "12-45", "diciembre"):
+            with self.assertRaises(Exception):
+                _season_boundary(invalido, "05-31")
 
 
 if __name__ == "__main__":
