@@ -32,8 +32,40 @@ class ProviderRegistryTest(unittest.TestCase):
     def test_current_legacy_catalog_loads_through_schema_two_adapter(self):
         registry = load_provider_registry(PROJECT_ROOT / "config" / "proveedores.json")
 
-        self.assertGreaterEqual(len(registry), 16)
+        self.assertGreaterEqual(len(registry), 38)
         self.assertIn("ENDESA_LUZ_GENERAL", registry)
+
+    def test_recurrent_global_profiles_require_compatible_invoice_structure(self):
+        registry = load_provider_registry(PROJECT_ROOT / "config" / "proveedores.json")
+        keys = (
+            "TIERSAN", "ECHEMAN", "FENIE_ENERGIA", "CERRAJERA_MONCASI",
+            "LIMPIEZAS_COTE", "SCHINDLER", "JPG_REPARACIONES_ELECTRICAS",
+            "LIMPIEZAS_UTEBO", "ORONA", "MOEVE", "TRITERMIA", "TELESER",
+            "ISS", "LABOIL", "ISTA", "ASCENSORS_SALES",
+            "GAS_INSTALACIONES_MANTENIMIENTOS", "VILAHEXDOSS",
+            "MARTINEZ_OTERO", "LIMPIEZAS_MOREDA", "JARDINERIA_JESUS_GRACIA",
+            "LIMPIEZAS_MARCEN",
+        )
+        for key in keys:
+            profile = registry[key]
+            alias = profile.aliases[0]
+            with self.subTest(provider_key=key):
+                match = resolve_provider(
+                    registry,
+                    f"{alias} FACTURA F-1 Base imponible 10,00 IVA 2,10 Total 12,10 EUR",
+                    "factura.pdf",
+                    "invoice",
+                )
+                self.assertIsNotNone(match)
+                self.assertEqual(key, match.provider_key)
+                self.assertIsNone(
+                    resolve_provider(
+                        registry,
+                        f"{alias} PRESUPUESTO P-1 Total 12,10 EUR",
+                        "presupuesto.pdf",
+                        "quote",
+                    )
+                )
 
     def test_tax_id_beats_customer_and_bank_names(self):
         registry = provider_registry_from_payload({"proveedores": {
