@@ -772,6 +772,57 @@ def _migration_13(connection: sqlite3.Connection) -> None:
         ON owner_distribution_snapshots(id_propietario, id_distribution_run)""")
 
 
+def _migration_14(connection: sqlite3.Connection) -> None:
+    """Persiste texto reutilizable y la trazabilidad del detector documental."""
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(source_documents)")
+    }
+    additions = {
+        "provider_key": "TEXT",
+        "analysis_version": "TEXT",
+        "eligibility_status": (
+            "TEXT NOT NULL DEFAULT 'pending' "
+            "CHECK(eligibility_status IN "
+            "('pending','eligible','not_applicable','review_required'))"
+        ),
+        "eligibility_reason": "TEXT",
+    }
+    for name, declaration in additions.items():
+        if name not in columns:
+            connection.execute(
+                f"ALTER TABLE source_documents ADD COLUMN {name} {declaration}"
+            )
+
+    connection.execute("""CREATE TABLE IF NOT EXISTS document_text_cache (
+        sha256 TEXT NOT NULL,
+        extractor_version TEXT NOT NULL,
+        text_content TEXT NOT NULL,
+        method TEXT NOT NULL,
+        pages_json TEXT NOT NULL,
+        diagnostics_json TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (sha256, extractor_version)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS source_field_evidence (
+        id_evidence INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_document INTEGER NOT NULL
+            REFERENCES source_documents(id_document) ON DELETE CASCADE,
+        field_name TEXT NOT NULL,
+        value TEXT,
+        confidence TEXT NOT NULL
+            CHECK(confidence IN ('high','medium','low')),
+        source TEXT NOT NULL,
+        locator_json TEXT NOT NULL DEFAULT '{}',
+        rule_id TEXT NOT NULL,
+        extractor_version TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(id_document, field_name, rule_id, extractor_version)
+    )""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS idx_field_evidence_document
+        ON source_field_evidence(id_document, field_name)""")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -786,6 +837,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _migration_11,
     12: _migration_12,
     13: _migration_13,
+    14: _migration_14,
 }
 
 
