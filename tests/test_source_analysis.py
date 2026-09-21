@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 import json
+import sqlite3
 from pathlib import Path
 from unittest import mock
 
@@ -14,10 +15,125 @@ if str(CORE_DIR) not in sys.path:
 import source_analysis
 import lector_pdf
 import community_discovery
+from document_text_service import TextExtraction
 from invoice_extractors import FieldEvidence
+from provider_registry import provider_registry_from_payload
 
 
 class SourceAnalysisTest(unittest.TestCase):
+    def test_connected_pdf_analysis_uses_global_pipeline_and_field_evidence(self):
+        registry = provider_registry_from_payload({"proveedores": {
+            "ACME": {
+                "tax_ids": ["B12345678"],
+                "aliases": ["ACME ENERGIA"],
+                "document_types": ["invoice"],
+                "service_family": "ELECTRICIDAD",
+                "extractor_family": "electricity",
+                "required_signatures": [r"\bFACTURA\b"],
+                "excluded_signatures": [r"\bPRESUPUESTO\b"],
+            },
+        }})
+        text = (
+            "ACME ENERGIA B12345678 FACTURA F-12 Fecha factura: 03/03/2026 "
+            "Periodo de facturacion 01/02/2026 al 28/02/2026 "
+            "Base imponible 100,00 EUR IVA 21,00 EUR Total factura 121,00 EUR "
+            "Consumo total 450 kWh"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "factura.pdf"
+            path.write_bytes(b"synthetic-pdf")
+            connection = sqlite3.connect(":memory:")
+            connection.execute(
+                """CREATE TABLE document_text_cache (
+                    sha256 TEXT NOT NULL, extractor_version TEXT NOT NULL,
+                    text_content TEXT NOT NULL, method TEXT NOT NULL,
+                    pages_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (sha256, extractor_version)
+                )"""
+            )
+            try:
+                result = source_analysis.analyse_source(
+                    path,
+                    community_code="658",
+                    connection=connection,
+                    provider_registry=registry,
+                    text_extractor=lambda *_: TextExtraction(
+                        text, "pdf_text", (1,), {}, 2, False,
+                    ),
+                )
+            finally:
+                connection.close()
+
+        self.assertEqual("invoice", result.kind)
+        self.assertEqual("ACME", result.provider_key)
+        self.assertEqual("121.00", result.candidates["importe_total"])
+        self.assertEqual("450", result.candidates["consumo_kwh"])
+        self.assertEqual("high", result.field_evidence["importe_total"].confidence)
+        self.assertIn("ACME ENERGIA", result.locator.fragment)
+        self.assertNotIn(r"\bFACTURA\b", result.locator.fragment)
+
+    def test_connected_pdf_analysis_excludes_quote_before_provider_resolution(self):
+        registry = provider_registry_from_payload({"proveedores": {
+            "ACME": {
+                "tax_ids": [], "aliases": ["ACME"],
+                "document_types": ["invoice"],
+                "service_family": "MANTENIMIENTO",
+                "extractor_family": "periodic_maintenance",
+                "required_signatures": [r"\bFACTURA\b"],
+                "excluded_signatures": [r"\bPRESUPUESTO\b"],
+            },
+        }})
+        text = "ACME PRESUPUESTO P-8 Fecha 03/03/2026 Total 121,00 EUR"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "presupuesto.pdf"
+            path.write_bytes(b"synthetic-pdf")
+            connection = sqlite3.connect(":memory:")
+            try:
+                result = source_analysis.analyse_source(
+                    path,
+                    community_code="658",
+                    connection=connection,
+                    provider_registry=registry,
+                    text_extractor=lambda *_: TextExtraction(
+                        text, "pdf_text", (1,), {}, 2, False,
+                    ),
+                )
+            finally:
+                connection.close()
+
+        self.assertEqual("other", result.kind)
+        self.assertEqual("non_operational", result.disposition)
+        self.assertIn("presupuesto", result.review_message.lower())
+
+    def test_connected_pipeline_keeps_mature_legacy_extraction_automatic(self):
+        text = (
+            "INSTALACIONES ZARAGOZA S.L. B99091316 FACTURA Número F2523682 "
+            "Fecha: 04/07/2025 Base imponible 100,00 EUR "
+            "IVA 21,00 EUR TOTAL A PAGAR: 121,00 EUR"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mantenimiento.pdf"
+            path.write_bytes(b"synthetic-pdf")
+            connection = sqlite3.connect(":memory:")
+            try:
+                result = source_analysis.analyse_source(
+                    path,
+                    community_code="644",
+                    connection=connection,
+                    text_extractor=lambda *_: TextExtraction(
+                        text, "pdf_text", (1,), {}, 2, False,
+                    ),
+                )
+            finally:
+                connection.close()
+
+        self.assertEqual("MANTENIMIENTOS_ZARAGOZA", result.provider_key)
+        self.assertEqual("high", result.confidence)
+        self.assertEqual("2025-07-04", result.candidates["fecha_inicio"])
+        self.assertEqual("2025-07-04", result.candidates["fecha_fin"])
+        self.assertEqual("121.00", result.candidates["importe_total"])
+
     def test_field_evidence_remains_available_through_legacy_candidates(self):
         evidence = FieldEvidence(
             value="121.00",

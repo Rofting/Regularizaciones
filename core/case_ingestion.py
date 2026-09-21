@@ -1054,7 +1054,9 @@ def _case_analyser(
     ).fetchone()
     if row is None:
         raise LookupError("El expediente no existe")
-    return lambda path: analyse_source(path, community_code=row["codigo"])
+    return lambda path: analyse_source(
+        path, community_code=row["codigo"], connection=connection,
+    )
 
 
 def reanalyze_case_documents(

@@ -60,7 +60,9 @@ def analyse_batch(
             connection.execute("PRAGMA busy_timeout=5000")
             for phase in ("text", "classification", "provider", "fields"):
                 emit(BatchProgress(0, total, path.name, phase))
-            analysis = analyser(path, community_code=community_code)
+            analysis = analyser(
+                path, community_code=community_code, connection=connection,
+            )
             return BatchItem(path, analysis, None)
         except Exception as error:
             return BatchItem(path, None, f"{type(error).__name__}: {error}")

@@ -6,15 +6,25 @@ import csv
 import json
 import math
 import re
+import sqlite3
 import unicodedata
 import calendar
 from datetime import date, datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 
+from document_classifier import DocumentClassification, classify_document
+from document_text_service import TextExtraction, get_document_text
 from invoice_extractors import FieldEvidence
+from invoice_extractors import extract_invoice_fields
+from provider_registry import (
+    ProviderProfile,
+    load_provider_registry,
+    provider_registry_from_payload,
+    resolve_provider,
+)
 
 
 INVOICE_FIELDS = ("fecha_inicio", "fecha_fin", "importe_total")
@@ -226,6 +236,164 @@ def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = 
             locator=locator,
         )
     return SourceAnalysis.unknown(locator=locator)
+
+
+def _classification_locator(
+    extraction: TextExtraction,
+) -> SourceLocator:
+    return SourceLocator(
+        page=extraction.pages[0] if extraction.pages else None,
+        fragment=" ".join(extraction.text.split())[:500] or None,
+    )
+
+
+def _informational_classification(
+    classification: DocumentClassification,
+    locator: SourceLocator,
+) -> SourceAnalysis | None:
+    messages = {
+        "quote": "Presupuesto reconocido; se archiva como soporte y no entra en el reparto.",
+        "delivery_note": "Albarán reconocido; se archiva como soporte y no entra en el reparto.",
+        "bank_receipt": "Justificante bancario reconocido; se conserva como soporte y no se incorpora como factura.",
+        "report": "Informe reconocido; se conserva como soporte y no se incorpora como factura.",
+        "other": "Documento auxiliar reconocido; se conserva como soporte y no entra en el reparto.",
+    }
+    message = messages.get(classification.kind)
+    return SourceAnalysis.informational(message, locator=locator) if message else None
+
+
+def _generic_invoice_profile() -> ProviderProfile:
+    return ProviderProfile(
+        key="UNKNOWN",
+        display_name="Proveedor pendiente",
+        tax_ids=(),
+        aliases=(),
+        document_types=("invoice", "credit_note"),
+        service_family="",
+        extractor_family="standard_spanish_invoice",
+        required_signatures=(),
+        excluded_signatures=(),
+        legacy={},
+    )
+
+
+def _legacy_invoice_candidates(
+    profile: ProviderProfile,
+    text: str,
+    locator: SourceLocator,
+) -> tuple[dict[str, str | None], dict[str, FieldEvidence]]:
+    """Reuse mature provider regexes without reopening or OCRing the PDF."""
+    if not isinstance(profile.legacy.get("regex"), Mapping):
+        return {}, {}
+    from lector_pdf import extraer_datos_factura
+
+    extracted = extraer_datos_factura(text, dict(profile.legacy))
+    candidates: dict[str, str | None] = {}
+    evidence: dict[str, FieldEvidence] = {}
+    for name, value in extracted.items():
+        if value is None or isinstance(value, (dict, list, tuple)):
+            continue
+        string_value = _string_value(value)
+        candidates[str(name)] = string_value
+        evidence[str(name)] = FieldEvidence(
+            value=string_value or "",
+            confidence="medium",
+            source="provider_regex",
+            locator={"page": locator.page, "fragment": locator.fragment},
+            rule_id=f"legacy-provider:{profile.key}:{name}:v1",
+        )
+    return candidates, evidence
+
+
+def analyse_pdf_pipeline(
+    path: Path,
+    *,
+    connection: sqlite3.Connection | None,
+    community_code: str | None,
+    providers: Mapping[str, object] | None = None,
+    provider_registry: Mapping[str, ProviderProfile] | None = None,
+    text_extractor: Callable[[Path, int], TextExtraction] | None = None,
+) -> SourceAnalysis:
+    """Run the cached global pipeline used by folder and bulk ingestion."""
+    extraction = get_document_text(connection, path, extractor=text_extractor)
+    classification = classify_document(extraction.text, path.name)
+    locator = _classification_locator(extraction)
+
+    if not extraction.text.strip():
+        detail = str(extraction.diagnostics.get("detail") or "No se obtuvo texto legible.")
+        return SourceAnalysis.unknown(detail, locator=locator)
+
+    informational = _informational_classification(classification, locator)
+    if informational is not None:
+        return informational
+
+    if classification.kind == "owners":
+        return SourceAnalysis.owners(locator=locator)
+
+    if classification.kind == "reading":
+        def process_preloaded(_path, selected_community):
+            from lector_pdf import procesar_archivo
+            provider_config = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+            arguments = {
+                "ruta_proveedores": str(provider_config),
+                "extracted_text": extraction.text,
+            }
+            if providers is not None:
+                arguments["proveedores"] = providers
+            return procesar_archivo(str(path), selected_community, **arguments)
+
+        return analyse_pdf(
+            path,
+            pdf_processor=process_preloaded,
+            community_code=community_code,
+            providers=providers,
+        )
+
+    if classification.kind not in {"invoice", "credit_note"}:
+        return SourceAnalysis.unknown(locator=locator)
+
+    if provider_registry is None:
+        if providers is not None:
+            provider_registry = provider_registry_from_payload(providers)
+        else:
+            provider_registry = load_provider_registry(
+                Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+            )
+    match = resolve_provider(
+        provider_registry,
+        extraction.text,
+        path.name,
+        classification.kind,
+    )
+    if match is None:
+        bundle = extract_invoice_fields(_generic_invoice_profile(), extraction.text)
+        return SourceAnalysis.invoice(
+            confidence="medium",
+            locator=locator,
+            field_evidence=bundle.fields,
+        )
+
+    profile = provider_registry[match.provider_key]
+    bundle = extract_invoice_fields(profile, extraction.text)
+    candidates = {name: item.value for name, item in bundle.fields.items()}
+    evidence = dict(bundle.fields)
+    legacy_candidates, legacy_evidence = _legacy_invoice_candidates(
+        profile, extraction.text, locator,
+    )
+    for name, value in legacy_candidates.items():
+        candidates.setdefault(name, value)
+    for name, item in legacy_evidence.items():
+        evidence.setdefault(name, item)
+    return SourceAnalysis.invoice(
+        candidates,
+        locator=locator,
+        # Provider resolution only returns a unique winner.  Combined with a
+        # structurally strong invoice classification this is safe to apply
+        # automatically even when the legacy profile has no extra signature.
+        confidence="high" if classification.confidence == "high" else "medium",
+        provider_key=match.provider_key,
+        field_evidence=evidence,
+    )
 
 
 def classify_headers(
@@ -609,11 +777,23 @@ def _tabular_rows(path):
 
 
 def analyse_source(path: Path, *, community_code: str, pdf_processor=None,
-                   providers: Mapping[str, object] | None = None) -> SourceAnalysis:
+                   providers: Mapping[str, object] | None = None,
+                   connection: sqlite3.Connection | None = None,
+                   provider_registry: Mapping[str, ProviderProfile] | None = None,
+                   text_extractor: Callable[[Path, int], TextExtraction] | None = None) -> SourceAnalysis:
     """Dispatch a supported source file to the appropriate analyser."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
+        if connection is not None or provider_registry is not None or text_extractor is not None:
+            return analyse_pdf_pipeline(
+                path,
+                connection=connection,
+                community_code=community_code,
+                providers=providers,
+                provider_registry=provider_registry,
+                text_extractor=text_extractor,
+            )
         return analyse_pdf(
             path, pdf_processor=pdf_processor, community_code=community_code,
             providers=providers,
