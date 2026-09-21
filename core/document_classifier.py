@@ -142,6 +142,12 @@ def classify_document(text: str, filename: str) -> DocumentClassification:
     if is_invoice:
         return _classification("invoice", "high", "invoice", invoice_evidence)
 
+    probable_invoice = _contains(normalized, r"\bFACTURA\b", r"\bTOTAL\b")
+    if len(probable_invoice) == 2:
+        return _classification(
+            "invoice", "medium", "invoice-probable", probable_invoice
+        )
+
     other_evidence = _contains(
         normalized,
         r"\bPARTE DE TRABAJO\b",
