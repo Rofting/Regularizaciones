@@ -81,6 +81,25 @@ class SourceBatchTest(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual((first, second), tuple(item.path for item in results))
 
+    def test_default_pipeline_receives_the_worker_database_connection(self):
+        path = self._file("invoice.pdf")
+
+        def analyser(source_path, *, community_code, connection):
+            self.assertEqual(path, source_path)
+            self.assertEqual("658", community_code)
+            self.assertEqual(1, connection.execute("SELECT 1").fetchone()[0])
+            return SourceAnalysis.invoice({"importe_total": "10.00"})
+
+        results = analyse_batch(
+            (path,),
+            community_code="658",
+            database_path=self.database_path,
+            analyser=analyser,
+        )
+
+        self.assertIsNone(results[0].error)
+        self.assertEqual("invoice", results[0].analysis.kind)
+
 
 if __name__ == "__main__":
     unittest.main()
