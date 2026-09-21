@@ -175,6 +175,135 @@ def _restore_failed_rerun(
     connection.commit()
 
 
+_EXPORT_INVOICE_FIELD_LABELS = {
+    "fecha_factura": "fecha de factura",
+    "fecha_inicio": "inicio del período facturado",
+    "fecha_fin": "fin del período facturado",
+    "importe_total": "importe total",
+}
+
+
+def _invoice_source_document_id(
+    connection: sqlite3.Connection, *, id_case: int, invoice: sqlite3.Row,
+) -> int | None:
+    row = connection.execute(
+        """SELECT documents.id_document
+             FROM archivos_procesados processed
+             JOIN source_documents documents
+               ON processed.nombre_archivo='source_document:' || documents.id_document
+            WHERE processed.id_factura=? AND documents.id_case=?
+            ORDER BY documents.id_document DESC LIMIT 1""",
+        (invoice["id_factura"], id_case),
+    ).fetchone()
+    if row is None and invoice["archivo_origen"]:
+        row = connection.execute(
+            """SELECT id_document FROM source_documents
+               WHERE id_case=? AND archived_path=?
+               ORDER BY id_document DESC LIMIT 1""",
+            (id_case, str(invoice["archivo_origen"])),
+        ).fetchone()
+    return int(row[0]) if row is not None else None
+
+
+def _ensure_actionable_invoice_inputs(
+    connection: sqlite3.Connection, *, id_case: int, profile: ExcelProfile,
+) -> None:
+    """Convierte bloqueos tardíos del Excel en incidencias corregibles.
+
+    La revisión y el exportador deben exigir los mismos datos. Si una factura
+    antigua ya quedó validada sin alguno de ellos, se devuelve el expediente a
+    revisión y se señala el PDF exacto en vez de repetir indefinidamente el
+    paso «Generar Excel oficial».
+    """
+    case = connection.execute(
+        """SELECT id_comunidad,id_periodo,estado FROM regularization_cases
+           WHERE id_case=?""",
+        (id_case,),
+    ).fetchone()
+    if case is None:
+        raise WorkflowBlockedError("El expediente no existe")
+    if case["id_periodo"] is None:
+        return
+    modules = tuple(
+        module for module in ("GAS", "ELECTRICIDAD", "AGUA")
+        if module in profile.active_modules
+    )
+    if not modules:
+        return
+    placeholders = ",".join("?" for _ in modules)
+    invoices = connection.execute(
+        f"""SELECT id_factura,archivo_origen,fecha_factura,fecha_inicio,fecha_fin,
+                   importe_total
+              FROM facturas
+             WHERE id_comunidad=? AND id_periodo=?
+               AND tipo_suministro IN ({placeholders})
+             ORDER BY id_factura""",
+        (case["id_comunidad"], case["id_periodo"], *modules),
+    ).fetchall()
+    missing_labels: set[str] = set()
+    affected_invoices = 0
+    unlinked_invoices: list[int] = []
+    for invoice in invoices:
+        missing = [
+            field for field in _EXPORT_INVOICE_FIELD_LABELS
+            if invoice[field] is None or str(invoice[field]).strip() == ""
+        ]
+        total_component = connection.execute(
+            """SELECT 1 FROM invoice_components
+               WHERE id_factura=? AND component_key='total'""",
+            (invoice["id_factura"],),
+        ).fetchone()
+        if total_component is None and "importe_total" not in missing:
+            missing.append("importe_total")
+        if not missing:
+            continue
+        affected_invoices += 1
+        document_id = _invoice_source_document_id(
+            connection, id_case=id_case, invoice=invoice,
+        )
+        if document_id is None:
+            unlinked_invoices.append(int(invoice["id_factura"]))
+            missing_labels.update(_EXPORT_INVOICE_FIELD_LABELS[field] for field in missing)
+            continue
+        for field in missing:
+            missing_labels.add(_EXPORT_INVOICE_FIELD_LABELS[field])
+            candidate = connection.execute(
+                """SELECT value FROM extraction_candidates
+                   WHERE id_document=? AND field_name=?""",
+                (document_id, field),
+            ).fetchone()
+            if candidate is None or candidate[0] is None or not str(candidate[0]).strip():
+                document_review.create_missing_field_issues(
+                    connection, id_case, document_id, (field,),
+                )
+            else:
+                document_review.create_invalid_field_issue(
+                    connection, id_case, document_id,
+                    field_name=field,
+                    detected_value=str(candidate[0]),
+                    message=(
+                        f"La {_EXPORT_INVOICE_FIELD_LABELS[field]} extraída no llegó "
+                        "a la factura normalizada; confírmala para volver a aplicarla."
+                    ),
+                )
+    if not affected_invoices:
+        return
+    if unlinked_invoices:
+        ids = ", ".join(str(item) for item in unlinked_invoices)
+        raise WorkflowBlockedError(
+            "Hay facturas sin una fuente documental vinculada "
+            f"(identificadores {ids}). Vuelve a Fuentes y reanalízalas."
+        )
+    current = expedient_service.get_case(connection, id_case)
+    if current.status != "under_review":
+        expedient_service.set_case_status(connection, id_case, "under_review")
+    labels = ", ".join(sorted(missing_labels))
+    raise WorkflowBlockedError(
+        f"Falta la {labels} en {affected_invoices} factura(s). "
+        "Se han creado incidencias sobre los archivos exactos para corregirlas."
+    )
+
+
 def run_bootstrap_import(
     database_path: str | Path,
     *,
@@ -230,14 +359,18 @@ def run_generate_excel(
     progress: ProgressCallback | None = None,
 ):
     _emit(progress, "validate_case", id_case=id_case)
-    connection, _profile = _with_case_profile(
+    connection, profile = _with_case_profile(
         database_path, id_case=id_case, active_community_id=active_community_id,
         project_root=project_root,
     )
-    original_status = _prepare_explicit_rerun(
-        connection, id_case, "ready_for_calculation"
-    )
+    original_status = None
     try:
+        _ensure_actionable_invoice_inputs(
+            connection, id_case=id_case, profile=profile,
+        )
+        original_status = _prepare_explicit_rerun(
+            connection, id_case, "ready_for_calculation"
+        )
         # El modelo de estudio es el mismo para todas las comunidades, así que
         # no hay motivo para exigir que alguien elija un Excel maestro antes de
         # empezar: si la comunidad no tiene plantilla, se crea desde el modelo

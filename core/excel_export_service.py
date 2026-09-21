@@ -242,13 +242,15 @@ def _validate_normalized_inputs(
             """SELECT COUNT(*) FROM facturas f
                WHERE f.id_comunidad=? AND f.id_periodo=? AND f.tipo_suministro=?
                  AND (f.fecha_factura IS NULL OR f.fecha_inicio IS NULL OR f.fecha_fin IS NULL
-                      OR (SELECT COUNT(*) FROM invoice_components c
-                          WHERE c.id_factura=f.id_factura
-                            AND c.component_key IN ('fixed','variable','total')) < 3)""",
+                      OR f.importe_total IS NULL
+                      OR NOT EXISTS (
+                          SELECT 1 FROM invoice_components c
+                          WHERE c.id_factura=f.id_factura AND c.component_key='total'
+                      ))""",
             (case["id_comunidad"], period_id, module),
         ).fetchone()[0]
         if incomplete:
-            raise ExportBlockedError(f"Hay facturas de {module} con componentes incompletos")
+            raise ExportBlockedError(f"Hay facturas de {module} con datos obligatorios incompletos")
         invoices = connection.execute(
             """SELECT f.id_factura,f.termino_fijo,f.termino_variable,f.importe_total,
                       MAX(CASE WHEN c.component_key='fixed' THEN c.amount END) AS fixed_component,

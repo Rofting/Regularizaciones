@@ -2119,14 +2119,21 @@ class AppGestionFincas(ctk.CTk):
         workflow = MOD["case_workflow_actions"]
         self._estado("Generando Excel oficial…", procesando=True)
         self.log("━━━ GENERAR EXCEL OFICIAL ━━━", "titulo")
-        result = workflow.run_generate_excel(
-            self.ruta_bd_expedientes,
-            id_case=self.id_expediente,
-            active_community_id=self.id_comunidad,
-            project_root=BASE_DIR,
-            output_root=BASE_DIR,
-            progress=self._progreso_expediente,
-        )
+        try:
+            result = workflow.run_generate_excel(
+                self.ruta_bd_expedientes,
+                id_case=self.id_expediente,
+                active_community_id=self.id_comunidad,
+                project_root=BASE_DIR,
+                output_root=BASE_DIR,
+                progress=self._progreso_expediente,
+            )
+        except Exception:
+            # El preflight puede devolver el expediente a revisión y crear
+            # incidencias concretas. Refrescar aquí evita que la pantalla siga
+            # mostrando «Generar Excel» después de ese cambio de estado.
+            self._refrescar_despues_de_accion(self.id_expediente)
+            raise
         self.log(f"  ✅ Excel validado: {result.output_path.name}", "ok")
         if result.backup_path:
             self.log(f"  💾 Copia anterior: {result.backup_path.name}", "neutro")

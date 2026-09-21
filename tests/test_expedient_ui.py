@@ -6,6 +6,7 @@ from contextlib import closing
 from datetime import date
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 
@@ -453,6 +454,16 @@ class SourceActionsTest(unittest.TestCase):
         self.assertIn("Falta importar el modelo inicial", detail)
         self.assertIn("No se ha modificado", detail)
 
+    def test_failed_excel_generation_refreshes_the_actionable_case_state(self):
+        workflow = Mock()
+        workflow.run_generate_excel.side_effect = ValueError("Falta la fecha de factura")
+
+        with patch.dict(self.app_module.MOD, {"case_workflow_actions": workflow}):
+            with self.assertRaisesRegex(ValueError, "fecha de factura"):
+                self.app_module.AppGestionFincas._generar_excel_expediente_impl(self.app)
+
+        self.app._refrescar_despues_de_accion.assert_called_once_with(self.case.id_case)
+
     def test_reset_cancellation_failure_and_success_preserve_or_clear_ui_at_the_right_time(self):
         from database_reset import DatabaseResetError, ResetResult
         self.assertTrue(hasattr(self.app_module.AppGestionFincas, "_accion_nueva_base_segura"))
@@ -674,6 +685,14 @@ class WorkflowVisualStyleTest(unittest.TestCase):
         for status in ("pending", "active", "blocked", "ready", "done"):
             with self.subTest(status=status):
                 self.assertIn(status, ui_moderna.WORKFLOW_STEP_STYLES)
+
+    def test_completed_workflow_step_can_be_opened_again(self):
+        invoked = []
+        row = SimpleNamespace(_command=lambda: invoked.append("opened"), _status="done")
+
+        ui_moderna.WorkflowStepRow._invoke(row)
+
+        self.assertEqual(["opened"], invoked)
 
 
 class CommunityOnboardingDialogTest(unittest.TestCase):

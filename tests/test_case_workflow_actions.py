@@ -247,6 +247,64 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         self.assertEqual("excel", result)
         self.assertEqual("calculated", status)
 
+    def test_missing_invoice_date_returns_case_to_actionable_review(self):
+        from case_workflow_actions import WorkflowBlockedError, run_generate_excel
+
+        document_id = self.connection.execute(
+            """INSERT INTO source_documents
+               (id_case,original_name,archived_path,sha256,document_kind,status,
+                classification_confidence,eligibility_status)
+               VALUES (?, 'factura.pdf', 'archivo/factura.pdf', ?, 'invoice',
+                       'validated', 'high', 'eligible')""",
+            (self.case_id, "a" * 64),
+        ).lastrowid
+        invoice_id = self.connection.execute(
+            """INSERT INTO facturas
+               (id_comunidad,id_periodo,tipo_suministro,proveedor,fecha_factura,
+                fecha_inicio,fecha_fin,importe_total,archivo_origen)
+               VALUES (?, ?, 'GAS', 'Proveedor', NULL,
+                       '2025-09-01', '2025-09-30', 100, 'archivo/factura.pdf')""",
+            (self.community_id, self.period_id),
+        ).lastrowid
+        self.connection.execute(
+            """INSERT INTO invoice_components
+               (id_factura,component_key,amount,unit)
+               VALUES (?, 'total', 100, 'EUR')""",
+            (invoice_id,),
+        )
+        self.connection.execute(
+            """INSERT INTO archivos_procesados
+               (nombre_archivo,id_factura,resultado)
+               VALUES (?, ?, 'ok')""",
+            (f"source_document:{document_id}", invoice_id),
+        )
+        self.connection.commit()
+
+        with patch("case_workflow_actions.plantilla_comunidad.asegurar_plantilla", return_value=None), patch(
+            "case_workflow_actions.generate_official_excel"
+        ) as export:
+            with self.assertRaisesRegex(WorkflowBlockedError, "fecha de factura"):
+                run_generate_excel(
+                    self.database_path,
+                    id_case=self.case_id,
+                    active_community_id=self.community_id,
+                    project_root=PROJECT_ROOT,
+                    output_root=PROJECT_ROOT / "salidas-prueba",
+                )
+
+        export.assert_not_called()
+        issue = self.connection.execute(
+            """SELECT field_name,status FROM review_issues
+               WHERE id_case=? AND id_document=?""",
+            (self.case_id, document_id),
+        ).fetchone()
+        self.assertEqual(("fecha_factura", "open"), tuple(issue))
+        status = self.connection.execute(
+            "SELECT estado FROM regularization_cases WHERE id_case=?",
+            (self.case_id,),
+        ).fetchone()[0]
+        self.assertEqual("under_review", status)
+
     def test_excel_distribution_and_letters_forward_consistent_progress_events(self):
         from case_workflow_actions import (
             run_calculate_distribution,
