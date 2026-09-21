@@ -7,6 +7,9 @@ from pathlib import Path
 from collections.abc import Iterable, Sequence
 
 
+FIVE_BAND_LABELS = ("Muy bajo", "Bajo", "Medio", "Alto", "Muy alto")
+
+
 def consumption_band(consumption: float, *, step: int = 10, maximum: float | None = None) -> tuple[tuple[float, float], int]:
     """Devuelve la franja [n·step, (n+1)·step) que contiene el consumo."""
     if step <= 0:
@@ -20,11 +23,13 @@ def consumption_band(consumption: float, *, step: int = 10, maximum: float | Non
 
 
 def consumption_bands(consumptions: Iterable[float], *, step: int = 10) -> tuple[tuple[float, float], ...]:
-    """Construye franjas consecutivas hasta cubrir el mayor consumo."""
-    values = [max(float(value or 0), 0.0) for value in consumptions]
-    limit = max(values + [0.0])
-    count = max(1, int(math.ceil(limit / step)))
-    return tuple((float(i * step), float((i + 1) * step)) for i in range(count))
+    """Devuelve las cinco franjas estables usadas en todas las cartas."""
+    if step <= 0:
+        raise ValueError("step debe ser positivo")
+    return tuple(
+        (float(index * step), float((index + 1) * step))
+        for index in range(4)
+    ) + ((float(4 * step), float("inf")),)
 
 
 def render_consumption_charts(
@@ -43,13 +48,17 @@ def render_consumption_charts(
         import matplotlib.pyplot as plt
     except ImportError:
         return None
-    all_values = list(neighbor_consumptions) + [owner_consumption]
-    bands = consumption_bands(all_values, step=step)
-    band_labels = [f"{int(low)}–{int(high)}" for low, high in bands]
-    counts = [sum(low <= float(value or 0) < high for value in neighbor_consumptions) for low, high in bands]
-    _, owner_index = consumption_band(owner_consumption, step=step)
-    if owner_index >= len(bands):
-        owner_index = len(bands) - 1
+    valid_neighbors = [
+        float(value) for value in neighbor_consumptions
+        if value is not None and math.isfinite(float(value)) and float(value) >= 0
+    ]
+    bands = consumption_bands(valid_neighbors, step=step)
+    band_labels = [
+        f"{label} · {int(low)}–{'+' if math.isinf(high) else int(high)}"
+        for label, (low, high) in zip(FIVE_BAND_LABELS, bands)
+    ]
+    counts = [sum(low <= value < high for value in valid_neighbors) for low, high in bands]
+    owner_index = min(max(int(max(float(owner_consumption or 0), 0) // step), 0), 4)
 
     fig, axes = plt.subplots(1, 2, figsize=(7.2, 2.15), dpi=180, gridspec_kw={"width_ratios": (1.12, 1)})
     fig.patch.set_facecolor("#FFFFFF")
@@ -57,8 +66,8 @@ def render_consumption_charts(
     colors = ["#DDE8F3"] * len(bands)
     colors[owner_index] = "#2E6F95"
     bars = ax.barh(range(len(bands)), counts, color=colors, edgecolor="none", height=0.72)
-    ax.set_yticks(range(len(bands)), band_labels, fontsize=7)
-    ax.set_xlabel(f"Vecinos · consumo ({unit})", fontsize=7, color="#52606D")
+    ax.set_yticks(range(len(bands)), band_labels, fontsize=6.5)
+    ax.set_xlabel(f"Viviendas · consumo ({unit})", fontsize=7, color="#52606D")
     ax.set_title("Comparación con vecinos", fontsize=8.5, loc="left", color="#183B56", pad=7, fontweight="bold")
     ax.invert_yaxis()
     ax.grid(axis="x", color="#EEF2F5", linewidth=0.7)
@@ -67,6 +76,9 @@ def render_consumption_charts(
     ax.tick_params(axis="x", labelsize=6, colors="#7B8794")
     ax.text(0.98, 0.03, f"Tu consumo: {owner_consumption:.1f} {unit}", transform=ax.transAxes,
             ha="right", va="bottom", fontsize=6.5, color="#2E6F95", fontweight="bold")
+    if not valid_neighbors:
+        ax.text(0.5, 0.5, "Comparativa no disponible", ha="center", va="center",
+                transform=ax.transAxes, fontsize=7.5, color="#7B8794")
     for bar in bars:
         if bar.get_width() > 0:
             ax.text(bar.get_width() + 0.15, bar.get_y() + bar.get_height() / 2, f"{int(bar.get_width())}",

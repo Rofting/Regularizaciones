@@ -20,13 +20,25 @@
     "ANALISIS"
   ],
   "required_formula_cells": [
-    ["ANALISIS", "H23"]
+    [
+      "ANALISIS",
+      "H23"
+    ]
   ],
   "workbook_layout": {
     "metadata_cells": {
-      "community_name": ["DATOS", "A1"],
-      "period_label": ["DATOS", "A3"],
-      "owner_count": ["DATOS", "D4"]
+      "community_name": [
+        "DATOS",
+        "A1"
+      ],
+      "period_label": [
+        "DATOS",
+        "A3"
+      ],
+      "owner_count": [
+        "DATOS",
+        "D4"
+      ]
     },
     "tables": {
       "GAS": {
@@ -34,75 +46,177 @@
         "start_row": 10,
         "end_row": 30,
         "input_columns": {
-          "invoice_date": "B", "end_date": "D", "start_date": "G", "consumption": "J",
-          "fixed": "K", "variable": "L", "provider": "O"
+          "invoice_date": "B",
+          "end_date": "D",
+          "start_date": "G",
+          "consumption": "J",
+          "fixed": "K",
+          "variable": "L",
+          "provider": "O"
         },
-        "derived_columns": {"total": "M"}
+        "derived_columns": {
+          "total": "M",
+          "season_winter": "U",
+          "season_summer": "V"
+        },
+        "season_columns": {
+          "winter": "U",
+          "summer": "V",
+          "winter_start": "12-01",
+          "winter_end": "05-31"
+        }
       },
       "ELECTRICIDAD": {
         "sheet": "ELECTRICIDAD",
         "start_row": 10,
-        "end_row": 21,
+        "end_row": 45,
         "input_columns": {
-          "invoice_date": "B", "start_date": "C", "end_date": "D",
-          "consumption": "E", "fixed": "F", "variable": "G",
+          "invoice_date": "B",
+          "start_date": "C",
+          "end_date": "D",
+          "consumption": "E",
+          "fixed": "F",
+          "variable": "G",
           "provider": "J"
         },
-        "derived_columns": {"total": "H"}
+        "derived_columns": {
+          "total": "H",
+          "season_winter": "N",
+          "season_summer": "O"
+        },
+        "season_columns": {
+          "winter": "N",
+          "summer": "O",
+          "winter_start": "11-01",
+          "winter_end": "04-30"
+        }
       },
       "AGUA": {
         "sheet": "AGUA",
         "start_row": 10,
         "end_row": 20,
         "input_columns": {
-          "invoice_date": "B", "end_date": "D", "start_date": "F", "consumption": "I",
-          "variable": "T", "fixed": "U"
+          "invoice_date": "B",
+          "end_date": "D",
+          "start_date": "F",
+          "consumption": "I",
+          "variable": "T",
+          "fixed": "U"
         },
-        "derived_columns": {"total": "R"}
+        "derived_columns": {
+          "total": "R"
+        }
       },
       "OTROS_GASTOS": {
         "sheet": "OTROS GASTOS",
-        "start_row": 13,
-        "end_row": 80,
-        "columns": {"date": "D", "description": "E", "amount": "F"}
+        "start_row": 12,
+        "end_row": 26,
+        "columns": {
+          "date": "D",
+          "description": "E",
+          "amount": "F"
+        }
       },
       "ACS": {
         "sheet": "LECTURAS ACS M3",
         "start_row": 8,
-        "end_row": 25,
+        "end_row": 26,
         "input_columns": {
-          "charge_date": "B", "final_date": "C", "final": "D",
-          "initial_date": "E", "initial": "F", "variable_fee": "H",
+          "charge_date": "B",
+          "final_date": "C",
+          "final": "D",
+          "initial_date": "E",
+          "initial": "F",
+          "variable_fee": "H",
           "fixed_fee": "I"
         },
         "derived_columns": {
-          "consumption": "G", "total": "J", "variable_unit": "L",
+          "consumption": "G",
+          "total": "J",
+          "variable_unit": "L",
           "fixed_unit": "M"
         }
       }
     },
     "parameter_cells": {
-      "acs_fixed_actual": ["ANALISIS", "H64"],
-      "acs_variable_actual": ["ANALISIS", "J64"],
-      "acs_fixed_billed": ["ANALISIS", "H66"],
-      "acs_variable_billed": ["ANALISIS", "J66"]
+      "acs_fixed_actual": [
+        "ANALISIS",
+        "H64"
+      ],
+      "acs_variable_actual": [
+        "ANALISIS",
+        "J64"
+      ],
+      "acs_fixed_billed": [
+        "ANALISIS",
+        "H66"
+      ],
+      "acs_variable_billed": [
+        "ANALISIS",
+        "J66"
+      ]
     },
     "total_checks": {
-      "invoice_total:GAS": ["GAS", "M10:M30"],
-      "invoice_component:GAS:fixed": ["GAS", "K10:K30"],
-      "invoice_component:GAS:variable": ["GAS", "L10:L30"],
-      "invoice_total:ELECTRICIDAD": ["ELECTRICIDAD", "H10:H21"],
-      "invoice_component:ELECTRICIDAD:fixed": ["ELECTRICIDAD", "F10:F21"],
-      "invoice_component:ELECTRICIDAD:variable": ["ELECTRICIDAD", "G10:G21"],
-      "invoice_total:AGUA": ["AGUA", "R10:R21"],
-      "invoice_component:AGUA:fixed": ["AGUA", "U10:U21"],
-      "invoice_component:AGUA:variable": ["AGUA", "T10:T21"],
-      "parameter:extraordinary_expense_actual": ["OTROS GASTOS", "F13:F80"],
-      "reading_total:ACS": ["LECTURAS ACS M3", "G8:G25"],
-      "parameter:acs_fixed_actual": ["ANALISIS", "H64"],
-      "parameter:acs_variable_actual": ["ANALISIS", "J64"],
-      "parameter:acs_fixed_billed": ["ANALISIS", "H66"],
-      "parameter:acs_variable_billed": ["ANALISIS", "J66"]
+      "invoice_total:GAS": [
+        "GAS",
+        "M10:M30"
+      ],
+      "invoice_component:GAS:fixed": [
+        "GAS",
+        "K10:K30"
+      ],
+      "invoice_component:GAS:variable": [
+        "GAS",
+        "L10:L30"
+      ],
+      "invoice_total:ELECTRICIDAD": [
+        "ELECTRICIDAD",
+        "H10:H45"
+      ],
+      "invoice_component:ELECTRICIDAD:fixed": [
+        "ELECTRICIDAD",
+        "F10:F45"
+      ],
+      "invoice_component:ELECTRICIDAD:variable": [
+        "ELECTRICIDAD",
+        "G10:G45"
+      ],
+      "invoice_total:AGUA": [
+        "AGUA",
+        "R10:R20"
+      ],
+      "invoice_component:AGUA:fixed": [
+        "AGUA",
+        "U10:U20"
+      ],
+      "invoice_component:AGUA:variable": [
+        "AGUA",
+        "T10:T20"
+      ],
+      "parameter:extraordinary_expense_actual": [
+        "OTROS GASTOS",
+        "F12:F26"
+      ],
+      "reading_total:ACS": [
+        "LECTURAS ACS M3",
+        "G8:G26"
+      ],
+      "parameter:acs_fixed_actual": [
+        "ANALISIS",
+        "H64"
+      ],
+      "parameter:acs_variable_actual": [
+        "ANALISIS",
+        "J64"
+      ],
+      "parameter:acs_fixed_billed": [
+        "ANALISIS",
+        "H66"
+      ],
+      "parameter:acs_variable_billed": [
+        "ANALISIS",
+        "J66"
+      ]
     }
   },
   "concepts": [

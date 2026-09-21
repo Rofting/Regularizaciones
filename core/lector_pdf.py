@@ -26,6 +26,11 @@ import json
 import zipfile
 import hashlib
 import calendar
+import shutil
+import sys
+import unicodedata
+from dataclasses import dataclass
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 
@@ -34,7 +39,8 @@ from pathlib import Path
 # CARGA DE CONFIGURACIÓN
 # ---------------------------------------------------------------------------
 
-def cargar_proveedores(ruta_json: str = None) -> dict:
+@lru_cache(maxsize=None)
+def cargar_proveedores(ruta_json: str | None = None) -> dict:
     """Carga proveedores.json desde la configuración del proyecto.
 
     Se conserva la antigua ubicación junto al lector como compatibilidad para
@@ -55,12 +61,19 @@ def cargar_proveedores(ruta_json: str = None) -> dict:
 # UTILIDADES
 # ---------------------------------------------------------------------------
 
-def _limpiar_numero(texto: str) -> float:
-    """Convierte '8.176,48' o '8176.48' a float."""
+def _limpiar_numero(texto: str, puntos_millares: bool = False) -> float:
+    """Convierte un importe o consumo textual a ``float``.
+
+    ``puntos_millares`` se activa sólo desde el perfil que confirma ese
+    formato. Así ``4.011`` puede leerse como 4011 kWh en una factura española
+    sin convertir los decimales con punto de otros proveedores.
+    """
     if not texto:
         return 0.0
     t = texto.strip().replace("€", "").replace(" ", "")
-    if "." in t and "," in t:
+    if puntos_millares and "," not in t and re.fullmatch(r"\d{1,3}(?:\.\d{3})+", t):
+        t = t.replace(".", "")
+    elif "." in t and "," in t:
         if t.index(".") < t.index(","):
             t = t.replace(".", "")
     t = t.replace(",", ".")
@@ -436,6 +449,37 @@ def _colapsar_espacios(texto: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", texto)
 
 
+def _normalizar_decimales_ocr(texto: str) -> str:
+    """Recupera céntimos cuando OCR sustituye la coma por un espacio.
+
+    Solo se toca una cifra seguida del símbolo de euro, por ejemplo
+    ``6.279 49€``. No se alteran espacios normales ni escalas de gráficas.
+    """
+    return re.sub(
+        r"(\d{1,3}(?:\.\d{3})*)\s+(\d{2}\s*(?:€|�))",
+        r"\1,\2",
+        texto,
+    )
+
+
+def _pdf_probablemente_escaneado(ruta: Path) -> bool:
+    """Detecta rápidamente PDFs de imagen sin capa tipográfica utilizable.
+
+    Pdfplumber puede tardar mucho intentando descomponer páginas escaneadas
+    complejas. Un PDF que contiene imágenes pero no fuentes ni mapa Unicode se
+    envía directamente a OCR; la comprobación es binaria y no interpreta el
+    documento completo.
+    """
+    if ruta.suffix.lower() != ".pdf" or zipfile.is_zipfile(ruta):
+        return False
+    try:
+        with ruta.open("rb") as archivo:
+            contenido = archivo.read(2 * 1024 * 1024)
+    except OSError:
+        return False
+    return b"/Image" in contenido and b"/Font" not in contenido and b"/ToUnicode" not in contenido
+
+
 def extraer_texto(ruta_archivo: str) -> str:
     """
     Extrae todo el texto de un archivo.
@@ -488,56 +532,302 @@ def extraer_texto(ruta_archivo: str) -> str:
 # IDENTIFICACIÓN DE PROVEEDOR
 # ---------------------------------------------------------------------------
 
-def extraer_texto_ocr(ruta_archivo: str) -> str:
+@dataclass(frozen=True)
+class OCRResult:
+    """Resultado legible por la interfaz del intento de OCR de una fuente."""
+
+    text: str
+    status: str
+    detail: str
+    language: str | None = None
+
+
+def _tesseract_executable() -> str | None:
+    """Localiza un motor existente sin exigir instalaciones al usuario."""
+    candidates = [
+        shutil.which("tesseract"),
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ]
+    return next((candidate for candidate in candidates if candidate and os.path.exists(candidate)), None)
+
+
+# Sitios donde suele acabar Poppler en Windows. WinGet no lo añade al PATH y
+# cada versión cambia el nombre de su carpeta, así que se buscan todos los
+# repartos habituales (WinGet, Chocolatey, Scoop e instalaciones a mano) en vez
+# de una sola ruta. POPPLER_PATH manda sobre todos ellos.
+_PATRONES_POPPLER = (
+    r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\*Poppler*\**\bin",
+    r"%LOCALAPPDATA%\Microsoft\WinGet\Links",
+    r"%ProgramData%\chocolatey\lib\poppler\tools\**\bin",
+    r"%USERPROFILE%\scoop\apps\poppler\current\bin",
+    r"%USERPROFILE%\scoop\apps\poppler\current\Library\bin",
+    r"%ProgramFiles%\poppler*\**\bin",
+    r"%ProgramFiles(x86)%\poppler*\**\bin",
+    r"C:\poppler*\**\bin",
+)
+
+
+def poppler_candidatos() -> list[str]:
+    """Carpetas donde se ha buscado Poppler, en orden de preferencia."""
+    if sys.platform != "win32":
+        return []
+    import glob
+
+    encontrados = []
+    for patron in _PATRONES_POPPLER:
+        ruta = os.path.expandvars(patron)
+        if "%" in ruta:      # una variable de entorno que no existe en este equipo
+            continue
+        for candidato in sorted(glob.glob(ruta, recursive=True), reverse=True):
+            if candidato not in encontrados and os.path.isdir(candidato):
+                encontrados.append(candidato)
+    return encontrados
+
+
+def _poppler_path() -> str | None:
+    """Carpeta de Poppler, o None si ya está accesible desde el PATH."""
+    manual = os.environ.get("POPPLER_PATH")
+    if manual and os.path.isdir(manual):
+        return manual
+    if shutil.which("pdftoppm"):
+        return None          # el PATH ya lo resuelve
+    for candidato in poppler_candidatos():
+        if os.path.isfile(os.path.join(candidato, "pdftoppm.exe")):
+            return candidato
+    return None
+
+
+def diagnostico_poppler() -> str:
+    """Texto para el usuario cuando no se encuentra Poppler."""
+    if shutil.which("pdftoppm"):
+        return "Poppler está en el PATH."
+    candidatos = poppler_candidatos()
+    if not candidatos:
+        return (
+            "No se ha encontrado Poppler. Instálalo con «winget install "
+            "oschwartz10612.Poppler» y reinicia la aplicación, o indica su "
+            "carpeta bin en la variable de entorno POPPLER_PATH."
+        )
+    return (
+        "Se han encontrado estas carpetas pero ninguna contiene pdftoppm.exe: "
+        + "; ".join(candidatos[:3])
+        + ". Indica la carpeta bin correcta en la variable POPPLER_PATH."
+    )
+
+
+@lru_cache(maxsize=1)
+def _rapidocr_engine():
+    from rapidocr import RapidOCR
+    return RapidOCR()
+
+
+def _rapidocr_text(ruta_archivo: str, source: object | None = None) -> str:
+    """Lee una imagen de portada con RapidOCR sin exponer su API a la UI."""
+    try:
+        result = _rapidocr_engine()(source if source is not None else ruta_archivo)
+        lines = getattr(result, "txts", ()) or ()
+        return "\n".join(str(line).strip() for line in lines if str(line).strip())
+    except Exception:
+        return ""
+
+
+def _detalle_render(error: object) -> str:
+    """Traduce el fallo de pdf2image a algo accionable.
+
+    "Unable to get page count. Is poppler installed and in PATH?" no le dice
+    al gestor qué tiene que hacer, y es el fallo más común: Poppler instalado
+    pero en una carpeta que la aplicación no mira.
     """
-    Extrae texto de un PDF escaneado usando OCR (pytesseract + pdf2image).
-    Requiere: pip install pytesseract pdf2image
-    En Windows: instalar Tesseract desde https://github.com/UB-Mannheim/tesseract/wiki
+    texto = str(error)
+    if "poppler" in texto.lower():
+        return f"{texto} {diagnostico_poppler()}"
+    return texto
+
+
+
+def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
+    """Intenta OCR de portada y conserva una causa concreta cuando no puede.
+
+    La aplicación no pide al gestor que instale nada: el diagnóstico se usa
+    para decidir si revisar el documento, corregir una imagen ilegible o
+    comunicar una incidencia técnica al soporte del despacho.
     """
+    # La imagen de la portada se comparte entre RapidOCR y Tesseract. Así el
+    # segundo sólo es un respaldo y no duplica el renderizado del PDF.
+    cover_images = None
+    cover_render_error = None
+    if Path(ruta_archivo).suffix.lower() == ".pdf":
+        try:
+            from pdf2image import convert_from_path
+            cover_images = convert_from_path(
+                ruta_archivo, dpi=200, poppler_path=_poppler_path(), first_page=1, last_page=1,
+            )
+        except Exception as exc:
+            cover_render_error = exc
+
+    rapidocr_text = "" if cover_render_error else _rapidocr_text(
+        ruta_archivo, cover_images[0] if cover_images else None,
+    )
+    if rapidocr_text.strip():
+        return OCRResult(
+            text=_normalizar_decimales_ocr(rapidocr_text), status="rapidocr",
+            detail="OCR integrado aplicado a la portada.",
+        )
+
     try:
         from pdf2image import convert_from_path
         import pytesseract
+    except ImportError:
+        return OCRResult(
+            text="", status="dependencies_unavailable",
+            detail="El componente de lectura de documentos escaneados no está disponible en esta instalación.",
+        )
 
-        # En Windows, Tesseract suele estar en esta ruta:
-        import sys
-        poppler_path = None
-        if sys.platform == "win32":
-            import os
-            import glob
-            rutas_tesseract = [
-                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-            ]
-            for ruta in rutas_tesseract:
-                if os.path.exists(ruta):
-                    pytesseract.pytesseract.tesseract_cmd = ruta
-                    break
+    engine = _tesseract_executable()
+    if not engine:
+        return OCRResult(
+            text="", status="engine_unavailable",
+            detail="No se encontró el motor OCR local para leer esta imagen escaneada.",
+        )
+    pytesseract.pytesseract.tesseract_cmd = engine
 
-            # pdf2image necesita los binarios de Poppler (pdftoppm/pdfinfo).
-            # Si no están en el PATH (ej. instalado con winget en la sesión
-            # actual, antes de reiniciar la terminal), se busca la ruta típica.
-            candidatos_poppler = glob.glob(
-                os.path.expandvars(
-                    r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\oschwartz10612.Poppler_*\poppler-*\Library\bin"
-                )
+    try:
+        languages = set(pytesseract.get_languages(config=""))
+    except Exception as exc:
+        return OCRResult(
+            text="", status="engine_unavailable",
+            detail=f"No se pudo iniciar el motor OCR local: {exc}",
+        )
+    language = "spa" if "spa" in languages else "eng" if "eng" in languages else None
+    if language is None:
+        return OCRResult(
+            text="", status="language_unavailable",
+            detail="El motor OCR no dispone de un idioma de lectura compatible para este documento.",
+        )
+
+    if cover_render_error is not None:
+        return OCRResult(
+            text="", status="render_or_ocr_failed",
+            detail=f"No se pudo leer la portada escaneada: {_detalle_render(cover_render_error)}", language=language,
+        )
+
+    try:
+        # Los datos decisivos de una factura están en portada. Limitar el OCR
+        # evita que un anexo de muchas páginas bloquee la interfaz durante
+        # minutos; si la portada no basta, el documento queda para revisión.
+        imagenes = cover_images
+        if imagenes is None:
+            imagenes = convert_from_path(
+                ruta_archivo, dpi=200, poppler_path=_poppler_path(), first_page=1, last_page=1,
             )
-            if candidatos_poppler:
-                poppler_path = candidatos_poppler[0]
-
-        imagenes = convert_from_path(ruta_archivo, dpi=200, poppler_path=poppler_path)
         partes = []
         for img in imagenes:
-            # Intentar con español primero, inglés como fallback
-            try:
-                texto = pytesseract.image_to_string(img, lang="spa")
-            except Exception:
-                texto = pytesseract.image_to_string(img)
+            # Los recibos municipales y de suministros suelen tener varias
+            # cajas de importes. PSM 6 conserva etiqueta y cifra en la misma
+            # línea, a diferencia del modo automático que separa columnas.
+            ocr_config = "--psm 6"
+            texto = pytesseract.image_to_string(img, lang=language, config=ocr_config)
             partes.append(texto)
-        return "\n".join(partes)
-    except ImportError:
+    except Exception as exc:
+        return OCRResult(
+            text="", status="render_or_ocr_failed",
+            detail=f"No se pudo leer la portada escaneada: {_detalle_render(exc)}", language=language,
+        )
+
+    text = _normalizar_decimales_ocr("\n".join(partes))
+    if not text.strip():
+        return OCRResult(
+            text="", status="no_text",
+            detail="El OCR no obtuvo texto legible de la primera página.", language=language,
+        )
+    return OCRResult(text=text, status="ok", detail="OCR aplicado a la portada.", language=language)
+
+
+def extraer_texto_ocr(ruta_archivo: str) -> str:
+    """Compatibilidad: devuelve sólo el texto del OCR de portada."""
+    return extraer_texto_ocr_con_diagnostico(ruta_archivo).text
+
+
+def _extraer_texto_contador_agua_ocr(ruta_archivo: str) -> str:
+    """Relee a mayor resolución la franja del contador de un recibo de agua.
+
+    La portada completa a 200 dpi basta para proveedor, factura e importe,
+    pero la tabla de lecturas usa una tipografía mucho menor. Este segundo
+    pase sólo se ejecuta para Agua Zaragoza cuando falta alguna de las dos
+    fechas obligatorias.
+    """
+    if Path(ruta_archivo).suffix.lower() != ".pdf":
         return ""
+    try:
+        from pdf2image import convert_from_path
+        from PIL import ImageOps
+
+        images = convert_from_path(
+            ruta_archivo,
+            dpi=350,
+            poppler_path=_poppler_path(),
+            first_page=1,
+            last_page=1,
+        )
+        if not images:
+            return ""
+        image = images[0]
+        counter_region = image.crop((
+            0,
+            int(image.height * 0.40),
+            image.width,
+            int(image.height * 0.90),
+        ))
+        counter_region = ImageOps.autocontrast(counter_region.convert("L"))
     except Exception:
         return ""
+
+    rapid_text = _rapidocr_text(ruta_archivo, counter_region)
+    if re.search(r"(?i)lectura\s+anterior", rapid_text) and re.search(
+        r"(?i)[uú�]?ltima\s+lectura", rapid_text,
+    ):
+        return _normalizar_decimales_ocr(rapid_text)
+
+    try:
+        import pytesseract
+
+        engine = _tesseract_executable()
+        if not engine:
+            return rapid_text
+        pytesseract.pytesseract.tesseract_cmd = engine
+        languages = set(pytesseract.get_languages(config=""))
+        language = "spa" if "spa" in languages else "eng" if "eng" in languages else None
+        if language is None:
+            return rapid_text
+        text = pytesseract.image_to_string(
+            counter_region, lang=language, config="--psm 6",
+        )
+        return _normalizar_decimales_ocr(text or rapid_text)
+    except Exception:
+        return rapid_text
+
+
+def _normalizar_firma_proveedor(value: str) -> str:
+    """Normaliza firmas para resistir tildes, huecos y la O leída como cero."""
+    decomposed = unicodedata.normalize("NFKD", value.upper())
+    ascii_text = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return re.sub(r"[^A-Z0-9]+", "", ascii_text.replace("0", "O"))
+
+
+def _firma_literal_normalizada(firma: str) -> str | None:
+    if re.search(r"[\\^$*+?{}\[\]|()]", firma):
+        return None
+    return _normalizar_firma_proveedor(firma)
+
+
+def _firma_coincide(firma: str, texto: str, nombre_archivo: str) -> bool:
+    if re.search(firma, texto, re.IGNORECASE):
+        return True
+    normalized_signature = _firma_literal_normalizada(firma)
+    if normalized_signature is None:
+        return False
+    return normalized_signature in _normalizar_firma_proveedor(texto + " " + nombre_archivo)
 
 
 def identificar_proveedor(texto: str, nombre_archivo: str, proveedores: dict) -> tuple[str, dict] | tuple[None, None]:
@@ -548,9 +838,10 @@ def identificar_proveedor(texto: str, nombre_archivo: str, proveedores: dict) ->
     - METRIGEST_ACS vs METRIGEST_CALEF: por tipo de lectura en el texto
     - ENDESA_LUZ_COMUNIDAD: acepta CUPS con sufijos RR0F o PS0F
     - ENERGIAXXI_BOMBA: solo CUPS con sufijo DY0F
-    - Resto: primera firma encontrada, respetando firma_exclusion si existe
+    - Resto: selecciona la coincidencia más específica; si hay empate, pide revisión
     """
     texto_up = texto.upper()
+    candidates: list[tuple[int, str, dict]] = []
 
     for clave, config in proveedores["proveedores"].items():
         # Firma de exclusión: si el texto contiene este patrón, saltar este proveedor
@@ -559,40 +850,48 @@ def identificar_proveedor(texto: str, nombre_archivo: str, proveedores: dict) ->
             continue
 
         firmas = config.get("firmas_identificacion", [])
-        for firma in firmas:
-            if not re.search(firma, texto, re.IGNORECASE):
+        matched = [firma for firma in firmas if _firma_coincide(firma, texto, nombre_archivo)]
+        if not matched:
+            continue
+        firmas_requeridas = config.get("firmas_requeridas", [])
+        if any(not _firma_coincide(requerida, texto, nombre_archivo)
+               for requerida in firmas_requeridas):
+            continue
+
+        # — Metrigest: ACS vs Calefacción —
+        if "METRIGEST" in clave:
+            primera_pagina = texto_up[:700]
+            if "CALEF" in clave and "CALEFACCION" not in primera_pagina:
+                continue
+            if "ACS" in clave and ("ACS" not in primera_pagina or "CALEFACCION" in primera_pagina):
                 continue
 
-            # — Metrigest: ACS vs Calefacción —
-            if "METRIGEST" in clave:
-                primera_pagina = texto_up[:700]
-                if "CALEF" in clave and "CALEFACCION" in primera_pagina:
-                    return clave, config
-                if "ACS" in clave and "ACS" in primera_pagina and "CALEFACCION" not in primera_pagina:
-                    return clave, config
+        # — Endesa luz (mercado libre): CUPS sufijo RR0F o PS0F —
+        if "ENDESA_LUZ" in clave and config.get("cups_sufijos_validos"):
+            m = re.search(r"CUPS[):\s]+(?P<cups>ES\w+)", texto, re.IGNORECASE)
+            if not m:
+                continue
+            cups = m.group("cups").upper()
+            sufijos = config.get("cups_sufijos_validos", ["RR0F", "PS0F"])
+            if not any(s in cups for s in sufijos):
                 continue
 
-            # — Endesa luz (mercado libre): CUPS sufijo RR0F o PS0F —
-            if "ENDESA_LUZ" in clave:
-                m = re.search(r"CUPS[):\s]+(?P<cups>ES\w+)", texto, re.IGNORECASE)
-                if m:
-                    cups = m.group("cups").upper()
-                    sufijos = config.get("cups_sufijos_validos", ["RR0F", "PS0F"])
-                    if any(s in cups for s in sufijos):
-                        return clave, config
+        # — Energía XXI (bomba incendios): CUPS sufijo DY0F —
+        if "ENERGIAXXI" in clave:
+            m = re.search(r"CUPS[):\s]+(?P<cups>ES\w+)", texto, re.IGNORECASE)
+            if not m or "DY0F" not in m.group("cups").upper():
                 continue
 
-            # — Energía XXI (bomba incendios): CUPS sufijo DY0F —
-            if "ENERGIAXXI" in clave:
-                m = re.search(r"CUPS[):\s]+(?P<cups>ES\w+)", texto, re.IGNORECASE)
-                if m and "DY0F" in m.group("cups").upper():
-                    return clave, config
-                continue
+        candidates.append((len(matched) + len(firmas_requeridas), clave, config))
 
-            # — Caso general —
-            return clave, config
-
-    return None, None
+    if not candidates:
+        return None, None
+    best_score = max(candidate[0] for candidate in candidates)
+    winners = [candidate for candidate in candidates if candidate[0] == best_score]
+    if len(winners) != 1:
+        return None, None
+    _score, clave, config = winners[0]
+    return clave, config
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +907,21 @@ def _extraer_campo(texto: str, patron: str) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _extraer_campo_preferido(texto: str, patron: str, alternativos: list[str]) -> str | None:
+    """Extrae primero los patrones más fiables configurados por proveedor.
+
+    Algunos PDF incluyen gráficas entre una etiqueta y el importe. Un patrón
+    específico que exige un valor monetario completo evita interpretar la
+    escala de esa gráfica como el total de la factura, sin alterar el rescate
+    genérico que usan los formatos simples.
+    """
+    for alternativo in alternativos:
+        valor = _extraer_campo(texto, alternativo)
+        if valor:
+            return valor
+    return _extraer_campo(texto, patron)
 
 
 _PAT_RANGO_FECHAS_CAPA_B = [
@@ -645,6 +959,36 @@ def _extraer_rango_fechas_capa_b(texto: str) -> tuple[str, str] | None:
     return None
 
 
+def _extraer_rango_mes_facturado(texto: str, patron: str) -> tuple[str, str] | None:
+    """Convierte un mes facturado explícito en el rango completo del mes.
+
+    El patrón pertenece al perfil del proveedor y debe aportar los grupos
+    ``anio`` y ``mes``. Así sólo se infiere un período cuando el documento
+    realmente declara el mes que se está facturando.
+    """
+    try:
+        match = re.search(patron, texto, re.IGNORECASE)
+    except re.error:
+        return None
+    if match is None:
+        return None
+    anio = match.group("anio")
+    mes = match.group("mes").lower()
+    mes_num = _MESES_NUM.get(mes)
+    if not mes_num:
+        return None
+    ultimo_dia = calendar.monthrange(int(anio), mes_num)[1]
+    return f"{anio}-{mes_num:02d}-01", f"{anio}-{mes_num:02d}-{ultimo_dia:02d}"
+
+
+def _fecha_iso_valida(valor: object) -> bool:
+    try:
+        datetime.strptime(str(valor), "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def extraer_datos_factura(texto: str, config: dict) -> dict:
     """
     Extrae los campos de una factura con estrategia en tres capas:
@@ -653,6 +997,8 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
       Capa C — LLM Gemini API (GEMINI_API_KEY en entorno)  → último recurso
     """
     regex = config.get("regex", {})
+    regex_preferidos = config.get("regex_preferidos", {})
+    campos_con_puntos_millares = set(config.get("campos_con_puntos_millares", []))
     tiene_decorativos = config.get("importe_tiene_puntos_decorativos", False)
     datos: dict = {}
 
@@ -660,7 +1006,9 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
     for campo, patron in regex.items():
         if campo.startswith("linea_"):
             continue  # campos especiales de Ríos, se tratan aparte
-        datos[campo] = _extraer_campo(texto, patron)
+        datos[campo] = _extraer_campo_preferido(
+            texto, patron, regex_preferidos.get(campo, [])
+        )
 
     # ── Capas B y C: solo para campos críticos que Capa A no encontró ────────
     # Si el proveedor usa puntos decorativos, importe_total se maneja
@@ -690,6 +1038,24 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
             if not datos.get("fecha_fin"):
                 datos["fecha_fin"] = rango[1]
 
+    # Algunos servicios de lectura sólo imprimen el mes facturado. El perfil
+    # declara su ancla para no confundirlo con cualquier mes citado en el PDF.
+    if not datos.get("fecha_inicio") or not datos.get("fecha_fin"):
+        patron_mes = config.get("regex_periodo_mes_facturado")
+        rango = _extraer_rango_mes_facturado(texto, patron_mes) if patron_mes else None
+        if rango:
+            datos["fecha_inicio"] = datos.get("fecha_inicio") or rango[0]
+            datos["fecha_fin"] = datos.get("fecha_fin") or rango[1]
+
+    # Los perfiles de gastos sin período de prestación se imputan por fecha de
+    # factura, pero sólo cuando la configuración lo declara explícitamente.
+    if (
+        config.get("periodo_por_fecha_factura")
+        and _fecha_iso_valida(datos.get("fecha_factura"))
+    ):
+        datos["fecha_inicio"] = datos.get("fecha_inicio") or datos["fecha_factura"]
+        datos["fecha_fin"] = datos.get("fecha_fin") or datos["fecha_factura"]
+
     # ── Normalizar números ────────────────────────────────────────────────────
     # Los proveedores con puntos decorativos (ENVAC) también los intercalan en
     # el IVA, no solo en importe_total — mismo tratamiento para ambos campos.
@@ -700,7 +1066,9 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
             patron_imp = config.get("regex", {}).get(campo_num, "")
             datos[campo_num] = _limpiar_importe_decorativo(texto, patron_imp) if patron_imp else 0.0
         elif datos.get(campo_num):
-            datos[campo_num] = _limpiar_numero(datos[campo_num])
+            datos[campo_num] = _limpiar_numero(
+                datos[campo_num], campo_num in campos_con_puntos_millares
+            )
         else:
             datos[campo_num] = 0.0
 
@@ -727,6 +1095,8 @@ def extraer_datos_factura(texto: str, config: dict) -> dict:
 _MESES_NUM = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
     "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
+    "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+    "jul": 7, "ago": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dic": 12,
 }
 
 
@@ -886,7 +1256,9 @@ def extraer_lecturas_metrigest(texto_paginas: list[str], config: dict) -> dict:
 
 
 def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
-                     con_bd=None, ruta_proveedores: str = None) -> dict:
+                     con_bd=None, ruta_proveedores: str = None,
+                     proveedores: dict | None = None,
+                     extracted_text: str | None = None) -> dict:
     """
     Procesa un archivo de factura o resumen Metrigest.
 
@@ -900,6 +1272,9 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
         codigo_comunidad:   Código conocido (ej: '644'). Si es None, se autodetecta por CIF.
         con_bd:             Conexión SQLite activa (opcional). Si se pasa, habilita autodetección por CIF.
         ruta_proveedores:   Ruta a proveedores.json (opcional)
+        extracted_text:     Texto ya obtenido por el servicio documental. Si se
+                            proporciona, el PDF no se vuelve a abrir ni a pasar
+                            por OCR aunque el texto esté vacío.
 
     Returns:
         dict con: ok, tipo, datos, proveedor_clave, hash_md5, nombre_archivo,
@@ -909,30 +1284,62 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
     hash_md5 = _md5_archivo(ruta_archivo)
     validacion = {"nivel_1_archivo": None, "nivel_2_cif": None, "nivel_3_cups": None}
 
-    # 1. Extraer texto (ZIP o PDF nativo con pdfplumber)
-    texto = extraer_texto(ruta_archivo)
+    # 1. Los PDFs de imagen se detectan sin recorrerlos con pdfplumber: así el
+    # OCR de portada evita bloqueos en facturas escaneadas de varias páginas.
+    ruta = Path(ruta_archivo)
+    texto = (
+        extracted_text
+        if extracted_text is not None
+        else ("" if _pdf_probablemente_escaneado(ruta) else extraer_texto(ruta_archivo))
+    )
 
     # Si no hay texto, intentar OCR automáticamente
-    if not texto.strip():
-        texto = extraer_texto_ocr(ruta_archivo)
+    ocr_result = None
+    if extracted_text is None and not texto.strip():
+        ocr_result = extraer_texto_ocr_con_diagnostico(ruta_archivo)
+        texto = ocr_result.text
 
     if not texto.strip():
+        diagnostic = ocr_result.detail if ocr_result is not None else "No se obtuvo texto legible."
         return {"ok": False, "motivo": "SIN_TEXTO",
-                "detalle": (f"No se pudo extraer texto de {nombre}. "
-                            "Si es una imagen escaneada, instala Tesseract OCR:\n"
-                            "  1. pip install pytesseract pdf2image\n"
-                            "  2. Windows: descarga Tesseract de https://github.com/UB-Mannheim/tesseract/wiki"),
+                "detalle": (f"No se pudo extraer texto de {nombre}. {diagnostic} "
+                            "Abre el archivo y revisa la clasificación o los datos necesarios."),
                 "nombre_archivo": nombre, "hash_md5": hash_md5,
                 "requiere_ocr": True}
 
     # 2. Cargar proveedores e identificar proveedor
-    proveedores = cargar_proveedores(ruta_proveedores)
+    proveedores = proveedores if proveedores is not None else cargar_proveedores(ruta_proveedores)
     clave_prov, config_prov = identificar_proveedor(texto, nombre, proveedores)
 
     if not clave_prov:
         return {"ok": False, "motivo": "PROVEEDOR_NO_IDENTIFICADO",
                 "detalle": f"Ningún proveedor reconocido en {nombre}",
+                "fragment": re.sub(r"\s+", " ", texto).strip()[:1000],
                 "nombre_archivo": nombre, "hash_md5": hash_md5}
+
+    # Algunos proveedores declaran de forma inequívoca el código interno de
+    # la comunidad. Es una regla del proveedor, no una suposición global sobre
+    # cualquier número de cliente que pueda aparecer en una factura.
+    patron_codigo = config_prov.get("regex_codigo_comunidad")
+    codigo_del_documento = (
+        _extraer_campo(texto, patron_codigo) if patron_codigo else None
+    )
+    if codigo_del_documento:
+        codigo_del_documento = codigo_del_documento.strip()
+        if codigo_comunidad and str(codigo_comunidad).strip() != codigo_del_documento:
+            return {
+                "ok": False,
+                "motivo": "COMUNIDAD_NO_COINCIDE",
+                "detalle": (
+                    f"La fuente pertenece a la comunidad {codigo_del_documento}, "
+                    f"no a la comunidad seleccionada {codigo_comunidad}."
+                ),
+                "codigo_comunidad_detectado": codigo_del_documento,
+                "nombre_archivo": nombre,
+                "hash_md5": hash_md5,
+                "fragment": re.sub(r"\s+", " ", texto).strip()[:1000],
+            }
+        codigo_comunidad = codigo_del_documento
 
     # ----------------------------------------------------------------
     # NIVEL 1 — Comunidad por nombre de archivo
@@ -986,46 +1393,10 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
         codigo_comunidad = codigo_por_cif
         validacion["nivel_2_cif"] = validacion.get("nivel_2_cif") or "ok"
 
-        # --- RENOMBRADO AUTOMÁTICO ---
-        # Si el archivo no empieza ya con "CODIGO_", lo renombramos para unificar.
-        if not nombre.startswith(f"{codigo_comunidad}_"):
-            nuevo_nombre = f"{codigo_comunidad}_{nombre}"
-            nueva_ruta = os.path.join(os.path.dirname(ruta_archivo), nuevo_nombre)
-            try:
-                os.rename(ruta_archivo, nueva_ruta)
-                print(f"       Rebautizado automático: {nombre} ➔ {nuevo_nombre}")
-                ruta_archivo = nueva_ruta
-                nombre = nuevo_nombre
-            except Exception as e:
-                print(f"    ⚠️ No se pudo renombrar el archivo: {e}")
-
     elif cif_pdf:
         validacion["nivel_2_cif"] = "cif_no_en_bd"
-        # CIF encontrado pero no registrado en BD — continuamos con el código del archivo
-        # Si el archivo no tiene prefijo de comunidad, añadirlo si tenemos código
-        if codigo_comunidad and not nombre.startswith(f"{codigo_comunidad}_"):
-            nuevo_nombre = f"{codigo_comunidad}_{nombre}"
-            nueva_ruta = os.path.join(os.path.dirname(ruta_archivo), nuevo_nombre)
-            try:
-                os.rename(ruta_archivo, nueva_ruta)
-                print(f"       Rebautizado automático: {nombre} ➔ {nuevo_nombre}")
-                ruta_archivo = nueva_ruta
-                nombre = nuevo_nombre
-            except Exception:
-                pass
     else:
         validacion["nivel_2_cif"] = "sin_cif_en_pdf"
-        # Sin CIF pero con código de comunidad pasado por argumento — renombrar si falta prefijo
-        if codigo_comunidad and not nombre.startswith(f"{codigo_comunidad}_"):
-            nuevo_nombre = f"{codigo_comunidad}_{nombre}"
-            nueva_ruta = os.path.join(os.path.dirname(ruta_archivo), nuevo_nombre)
-            try:
-                os.rename(ruta_archivo, nueva_ruta)
-                print(f"       Rebautizado automático: {nombre} ➔ {nuevo_nombre}")
-                ruta_archivo = nueva_ruta
-                nombre = nuevo_nombre
-            except Exception:
-                pass
 
     # Sin comunidad identificada por ningún medio → cuarentena
     if not codigo_comunidad:
@@ -1138,13 +1509,23 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
         datos = extraer_datos_rios(texto, config_prov)
     elif clave_prov == "AGUA_ZARAGOZA":
         datos = extraer_datos_agua_zaragoza(texto, config_prov)
+        if not datos.get("fecha_inicio") or not datos.get("fecha_fin"):
+            counter_text = _extraer_texto_contador_agua_ocr(ruta_archivo)
+            if counter_text:
+                recovered = extraer_datos_factura(counter_text, config_prov)
+                datos["fecha_inicio"] = (
+                    datos.get("fecha_inicio") or recovered.get("fecha_inicio")
+                )
+                datos["fecha_fin"] = datos.get("fecha_fin") or recovered.get("fecha_fin")
+                datos["lec_ini"] = datos.get("lec_ini") or recovered.get("lec_ini")
+                datos["lec_fin"] = datos.get("lec_fin") or recovered.get("lec_fin")
     else:
         datos = extraer_datos_factura(texto, config_prov)
 
     datos["cups_o_referencia"] = cups_esperado or datos.get("cups")
     datos["archivo_origen"] = nombre
 
-    if not datos.get("importe_total") or datos["importe_total"] <= 0:
+    if datos.get("importe_total") is None or datos["importe_total"] == 0:
         return {
             "ok": False, "motivo": "IMPORTE_CERO",
             "detalle": f"No se extrajo importe_total en {nombre}",

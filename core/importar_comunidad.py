@@ -29,7 +29,8 @@ from pathlib import Path
 import openpyxl
 
 sys.path.insert(0, str(Path(__file__).parent))
-from gestor_bd import conectar, crear_bd, obtener_o_crear_comunidad, obtener_o_crear_periodo
+from gestor_bd import (conectar, crear_bd, obtener_o_crear_comunidad, obtener_o_crear_periodo,
+                       normalizar_codigo_vivienda, clasificar_tipo_unidad)
 
 # ---------------------------------------------------------------------------
 # RUTAS POR DEFECTO
@@ -168,7 +169,7 @@ def importar_vecinos(con: sqlite3.Connection, ws, id_comunidad: int) -> dict[int
         if cod is None:
             continue
 
-        vivienda = str(row[1] or "").strip()  # col B
+        vivienda = normalizar_codigo_vivienda(row[1])  # col B
         nombre   = str(row[2] or "").strip()  # col C
         coef_raw = row[3]                      # col D: coeficiente en enteros
 
@@ -199,11 +200,11 @@ def importar_vecinos(con: sqlite3.Connection, ws, id_comunidad: int) -> dict[int
         else:
             cur = con.execute(
                 """INSERT INTO propietarios
-                   (id_comunidad, codigo_vivienda, nombre_propietario, coeficiente,
+                   (id_comunidad, codigo_vivienda, tipo_unidad, nombre_propietario, coeficiente,
                     estado_contador_acs, estado_contador_cal,
                     metodo_lectura_acs, metodo_lectura_cal)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (id_comunidad, vivienda, nombre, coef,
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (id_comunidad, vivienda, clasificar_tipo_unidad(vivienda), nombre, coef,
                  "ok", "ok", "real", "real")
             )
             mapa[fila_excel] = cur.lastrowid

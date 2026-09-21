@@ -172,6 +172,81 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                     active_community_id=self.community_id, project_root=root,
                 )
 
+    def test_generate_excel_provisions_a_missing_template_instead_of_blocking(self):
+        """Una comunidad sin plantilla no detiene el expediente: se le crea.
+
+        El modelo de estudio es común a todas las comunidades, así que exigir
+        que alguien eligiera antes un Excel maestro dejaba parados expedientes
+        con todas sus fuentes ya validadas.
+        """
+        from case_workflow_actions import run_generate_excel
+
+        self.connection.execute(
+            "DELETE FROM excel_template_profiles WHERE id_comunidad=?",
+            (self.community_id,),
+        )
+        self.connection.commit()
+
+        with patch("case_workflow_actions.plantilla_comunidad.asegurar_plantilla") as provision:
+            provision.return_value = None
+            with patch("case_workflow_actions.generate_official_excel", return_value="excel") as export:
+                result = run_generate_excel(
+                    self.database_path,
+                    id_case=self.case_id,
+                    active_community_id=self.community_id,
+                    project_root=PROJECT_ROOT,
+                    output_root=PROJECT_ROOT / "salidas-prueba",
+                )
+
+        self.assertEqual("excel", result)
+        export.assert_called_once()
+        provision.assert_called_once()
+        self.assertEqual(self.community_id, provision.call_args.kwargs["community_id"])
+
+    def test_generate_excel_blocks_when_the_canonical_model_is_missing(self):
+        """Sin modelo del que copiar sí hay que parar, y decir por qué."""
+        from case_workflow_actions import WorkflowBlockedError, run_generate_excel
+        from plantilla_comunidad import PlantillaNoDisponible
+
+        self.connection.execute(
+            "DELETE FROM excel_template_profiles WHERE id_comunidad=?",
+            (self.community_id,),
+        )
+        self.connection.commit()
+
+        with patch("case_workflow_actions.plantilla_comunidad.asegurar_plantilla") as provision:
+            provision.side_effect = PlantillaNoDisponible("Falta el modelo canónico")
+            with patch("case_workflow_actions.generate_official_excel") as export:
+                with self.assertRaisesRegex(WorkflowBlockedError, "modelo canónico"):
+                    run_generate_excel(
+                        self.database_path,
+                        id_case=self.case_id,
+                        active_community_id=self.community_id,
+                        project_root=PROJECT_ROOT,
+                        output_root=PROJECT_ROOT / "salidas-prueba",
+                    )
+
+        export.assert_not_called()
+
+    def test_successful_excel_generation_advances_the_case_to_calculated(self):
+        from case_workflow_actions import run_generate_excel
+
+        with patch("case_workflow_actions.generate_official_excel", return_value="excel"):
+            result = run_generate_excel(
+                self.database_path,
+                id_case=self.case_id,
+                active_community_id=self.community_id,
+                project_root=PROJECT_ROOT,
+                output_root=PROJECT_ROOT / "salidas-prueba",
+            )
+
+        status = self.connection.execute(
+            "SELECT estado FROM regularization_cases WHERE id_case=?",
+            (self.case_id,),
+        ).fetchone()[0]
+        self.assertEqual("excel", result)
+        self.assertEqual("calculated", status)
+
     def test_excel_distribution_and_letters_forward_consistent_progress_events(self):
         from case_workflow_actions import (
             run_calculate_distribution,
@@ -257,6 +332,55 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                 "SELECT estado FROM regularization_cases WHERE id_case=?", (self.case_id,)
             ).fetchone()[0],
         )
+
+    def test_completed_case_can_regenerate_excel_and_invalidates_later_stage(self):
+        from case_workflow_actions import run_generate_excel
+
+        self.connection.execute(
+            "UPDATE regularization_cases SET estado='deliveries_generated' WHERE id_case=?",
+            (self.case_id,),
+        )
+        self.connection.commit()
+        with patch("case_workflow_actions.generate_official_excel", return_value="nuevo excel"):
+            result = run_generate_excel(
+                self.database_path, id_case=self.case_id,
+                active_community_id=self.community_id, project_root=PROJECT_ROOT,
+                output_root=PROJECT_ROOT / "salidas-prueba",
+            )
+
+        self.assertEqual("nuevo excel", result)
+        self.assertEqual("calculated", self.connection.execute(
+            "SELECT estado FROM regularization_cases WHERE id_case=?", (self.case_id,),
+        ).fetchone()[0])
+
+    def test_completed_case_can_recalculate_and_then_repeat_letters(self):
+        from case_letter_service import LetterBatchResult
+        from case_workflow_actions import run_calculate_distribution, run_generate_letters
+
+        self.connection.execute(
+            "UPDATE regularization_cases SET estado='deliveries_generated' WHERE id_case=?",
+            (self.case_id,),
+        )
+        self.connection.commit()
+        with patch("case_workflow_actions.calculate_case_distribution", return_value="nuevo reparto"):
+            self.assertEqual("nuevo reparto", run_calculate_distribution(
+                self.database_path, id_case=self.case_id,
+                active_community_id=self.community_id, project_root=PROJECT_ROOT,
+            ))
+        self.assertEqual("reconciled", self.connection.execute(
+            "SELECT estado FROM regularization_cases WHERE id_case=?", (self.case_id,),
+        ).fetchone()[0])
+
+        batch = LetterBatchResult(9, PROJECT_ROOT / "salidas-prueba", 2, ())
+        with patch("case_workflow_actions.generate_case_letters", return_value=batch):
+            run_generate_letters(
+                self.database_path, id_case=self.case_id,
+                active_community_id=self.community_id, project_root=PROJECT_ROOT,
+                selected_concepts=("acs_fixed",),
+            )
+        self.assertEqual("deliveries_generated", self.connection.execute(
+            "SELECT estado FROM regularization_cases WHERE id_case=?", (self.case_id,),
+        ).fetchone()[0])
 
     def test_bootstrap_requires_both_optional_companion_sources_together(self):
         from case_workflow_actions import WorkflowBlockedError, run_bootstrap_import

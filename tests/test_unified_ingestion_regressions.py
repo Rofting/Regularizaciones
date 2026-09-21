@@ -51,11 +51,12 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             },
         })
 
-    def test_analysed_invoice_cannot_be_ready_before_confirmation_and_application(self):
+    def test_clean_analysed_invoice_is_applied_automatically(self):
         self.ingest(self.invoice_analysis())
-        with self.assertRaisesRegex(ValueError, "confirm|canónic"):
-            document_review.validate_case_ready(self.connection, self.case.id_case)
-        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        self.assertEqual("ready_for_calculation", document_review.validate_case_ready(
+            self.connection, self.case.id_case,
+        ).status)
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
 
     def test_confirmation_applies_invoice_and_export_input_changes_after_correction(self):
         document = self.ingest(self.invoice_analysis())
@@ -88,30 +89,349 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         with self.assertRaisesRegex(excel_export_service.ExportBlockedError, "confirm|valid|revis"):
             excel_export_service._case_context(self.connection, self.case.id_case)
 
+    def test_reanalysis_of_manual_reading_classification_recreates_required_issues(self):
+        document = self.ingest(SourceAnalysis.unknown())
+        classification_issue = document_review.list_open_issues(
+            self.connection, self.case.id_case,
+        )[0]
+        document_review.resolve_issue(
+            self.connection, classification_issue.id_issue,
+            value="reading", reason="Clasificación comprobada manualmente",
+        )
+        document_review.record_candidates(
+            self.connection, document.id_document, {"tipo": "ACS"},
+            source="manual", validation_status="validated",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection, self.case.id_case,
+            analyser=lambda _: SourceAnalysis.unknown(),
+        )
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(
+            {"fecha_inicio", "fecha_fin", "vecinos"},
+            {issue.field_name for issue in issues},
+        )
+        stored = self.connection.execute(
+            """SELECT value, source, validation_status FROM extraction_candidates
+               WHERE id_document=? AND field_name='tipo'""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual(("ACS", "manual", "validated"), tuple(stored))
+
+    def test_reanalysis_auto_corrects_unmistakable_invoice_misclassified_as_reading(self):
+        document = self.ingest(SourceAnalysis.unknown())
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        document_review.resolve_issue(
+            self.connection, issue.id_issue,
+            value="reading", reason="Clasificación inicial",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection, self.case.id_case,
+            analyser=lambda _: SourceAnalysis.invoice({
+                "proveedor": "OFICINA MUNICIPAL DEL AGUA",
+                "tipo_suministro": "AGUA", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "importe_total": "177.84",
+            }, confidence="high"),
+        )
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual((), issues)
+        stored_kind = self.connection.execute(
+            "SELECT document_kind FROM source_documents WHERE id_document=?",
+            (document.id_document,),
+        ).fetchone()[0]
+        self.assertEqual("invoice", stored_kind)
+        audit = self.connection.execute(
+            """SELECT corrected_value,resolved_by FROM manual_corrections AS correction
+               JOIN review_issues AS issue ON issue.id_issue=correction.id_issue
+               WHERE issue.id_document=? AND issue.field_name='document_kind'
+               ORDER BY correction.id_correction DESC LIMIT 1""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual(("invoice", "deteccion_automatica"), tuple(audit))
+
+    def test_unknown_reanalysis_does_not_erase_previous_candidates(self):
+        document = self.ingest(SourceAnalysis.invoice({
+            "proveedor": "Proveedor fiable",
+            "tipo_suministro": "GAS",
+            "fecha_inicio": "2026-01-01",
+            "fecha_fin": "2026-01-31",
+            "importe_total": "128.10",
+        }, confidence="medium"))
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection, self.case.id_case,
+            analyser=lambda _: SourceAnalysis.unknown(),
+        )
+
+        stored = {
+            row["field_name"]: row["value"]
+            for row in self.connection.execute(
+                "SELECT field_name,value FROM extraction_candidates WHERE id_document=?",
+                (document.id_document,),
+            ).fetchall()
+        }
+        self.assertEqual("Proveedor fiable", stored["proveedor"])
+        self.assertEqual("128.10", stored["importe_total"])
+        self.assertEqual("2026-01-01", stored["fecha_inicio"])
+        self.assertEqual("2026-01-31", stored["fecha_fin"])
+
+    def test_reanalysis_replaces_invalid_manual_type_with_high_confidence_extraction(self):
+        rows = [{
+            "vivienda": "A", "fecha_ant": "2026-01-01", "val_ant": 1,
+            "fecha_act": "2026-01-31", "val_act": 2,
+        }]
+        document = self.ingest(SourceAnalysis(
+            "reading", "medium", {
+                "tipo": "ACS", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "vecinos": json.dumps(rows),
+            }, (),
+        ))
+        document_review.record_candidates(
+            self.connection, document.id_document, {"tipo": "12123"},
+            source="manual", validation_status="validated",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection, self.case.id_case,
+            analyser=lambda _: SourceAnalysis.reading({
+                "tipo": "ACS", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "vecinos": json.dumps(rows),
+            }),
+        )
+
+        stored = self.connection.execute(
+            """SELECT value,source FROM extraction_candidates
+               WHERE id_document=? AND field_name='tipo'""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual("ACS", stored["value"])
+        self.assertIn(stored["source"], {"analysis", "analysis_recovery"})
+        audit = self.connection.execute(
+            """SELECT original_value,corrected_value,resolved_by
+               FROM manual_corrections AS correction
+               JOIN review_issues AS issue ON issue.id_issue=correction.id_issue
+               WHERE issue.id_document=? AND issue.field_name='tipo'
+               ORDER BY correction.id_correction DESC LIMIT 1""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual(("12123", "ACS", "deteccion_automatica"), tuple(audit))
+
+    def test_resolving_classification_updates_effective_document_kind_immediately(self):
+        document = self.ingest(SourceAnalysis.unknown())
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+
+        document_review.resolve_issue(
+            self.connection, issue.id_issue,
+            value="invoice", reason="Contenido de factura comprobado",
+        )
+
+        stored_kind = self.connection.execute(
+            "SELECT document_kind FROM source_documents WHERE id_document=?",
+            (document.id_document,),
+        ).fetchone()[0]
+        self.assertEqual("invoice", stored_kind)
+
+    def test_invoice_candidates_misclassified_as_reading_request_reclassification(self):
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.source_path, archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={
+                "tipo_suministro": "AGUA", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "importe_total": "177.84",
+            },
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE source_documents
+               SET classification_confidence='low', status='under_review'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        case_ingestion.ensure_pending_source_issues(self.connection, self.case.id_case)
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(1, len(issues))
+        self.assertEqual("DOCUMENT_CLASSIFICATION_REQUIRED", issues[0].code)
+        self.assertEqual("document_kind", issues[0].field_name)
+        document_review.resolve_issue(
+            self.connection, issues[0].id_issue,
+            value="invoice", reason="El contenido corresponde a una factura",
+        )
+        confirmed = case_ingestion.confirm_source_candidates(
+            self.connection, self.case.id_case, document.id_document,
+            confirmed_by="Jose",
+        )
+        self.assertEqual("validated", confirmed.status)
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+
+    def test_pending_reading_with_invalid_type_becomes_actionable(self):
+        rows = [{
+            "vivienda": "A", "fecha_ant": "2026-01-01", "val_ant": 0,
+            "fecha_act": "2026-01-31", "val_act": 0,
+        }]
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.reading_file, archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"tipo": "12123", "vecinos": json.dumps(rows)},
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE source_documents
+               SET classification_confidence='low', status='under_review'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        ensure = getattr(case_ingestion, "ensure_pending_source_issues", None)
+        self.assertTrue(callable(ensure), "Pending sources need an actionable review operation")
+        ensure(self.connection, self.case.id_case)
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(["tipo"], [issue.field_name for issue in issues])
+        with self.assertRaisesRegex(ValueError, "ACS|CALEFACCION"):
+            document_review.resolve_issue(
+                self.connection, issues[0].id_issue,
+                value="12123", reason="Valor copiado del documento",
+            )
+
+    def test_pending_source_with_invalid_structured_data_becomes_actionable(self):
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.reading_file, archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"vecinos": "{contenido dañado"},
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE source_documents
+               SET classification_confidence='medium', status='under_review'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        case_ingestion.ensure_pending_source_issues(self.connection, self.case.id_case)
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(["vecinos"], [issue.field_name for issue in issues])
+        self.assertIn("formato", issues[0].message.lower())
+
+    def test_pending_invoice_with_invalid_amount_becomes_actionable(self):
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.source_path, archive_root=self.archive_root,
+            document_kind="invoice",
+            candidates={
+                "tipo_suministro": "GAS", "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31", "importe_total": "no-numérico",
+            },
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE source_documents
+               SET classification_confidence='medium', status='under_review'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        case_ingestion.ensure_pending_source_issues(self.connection, self.case.id_case)
+
+        issues = document_review.list_open_issues(self.connection, self.case.id_case)
+        self.assertEqual(["importe_total"], [issue.field_name for issue in issues])
+
+    def test_direct_invoice_application_always_requires_both_period_dates(self):
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case,
+            source_path=self.source_path, archive_root=self.archive_root,
+            document_kind="invoice",
+            candidates={"tipo_suministro": "GAS", "importe_total": "128.10"},
+            required_fields=(),
+        ).document
+        self.connection.execute(
+            """UPDATE extraction_candidates SET validation_status='validated'
+               WHERE id_document=?""",
+            (document.id_document,),
+        )
+
+        with self.assertRaisesRegex(ValueError, "fecha_inicio.*fecha_fin"):
+            case_ingestion.apply_confirmed_source(
+                self.connection, self.case.id_case, document.id_document,
+            )
+        self.assertEqual(
+            0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0],
+        )
+
     def test_invoice_confirmation_does_not_apply_rejected_required_dates(self):
         document = self.ingest(self.invoice_analysis())
         self.connection.execute("UPDATE extraction_candidates SET validation_status='rejected' WHERE id_document=? AND field_name='fecha_inicio'", (document.id_document,))
         with self.assertRaisesRegex(ValueError, "fecha_inicio"):
             self.confirm(document)
-        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
+        # La factura limpia se publicó al analizarla; rechazar una fecha después
+        # impide confirmarla de nuevo, pero no borra el dato ya aplicado.
+        self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
 
-    def test_ui_confirmation_reaches_canonical_invoice(self):
+    def test_ui_source_review_reaches_canonical_invoice(self):
         self.ingest(self.invoice_analysis())
         self.assertTrue(callable(getattr(expedient_ui, "open_confirm_sources_dialog", None)),
                         "Complete extracted candidates need a reachable UI confirmation")
         app = SimpleNamespace(ruta_bd_expedientes=self.database_path,
             _refrescar_lista_expedientes=lambda **_: None, _refrescar_expediente=lambda: None,
-            log=lambda *_: None)
+            log=lambda *_: None, after=lambda *_: None)
         panel = FakeWidget()
         with patch.object(expedient_ui, "_dialog", return_value=panel), \
-             patch.multiple(expedient_ui.ctk, CTkFrame=FakeWidget, CTkScrollableFrame=FakeWidget,
-                            CTkLabel=FakeWidget, CTkButton=FakeWidget), \
+            patch.multiple(expedient_ui.ctk, CTkFrame=FakeWidget, CTkScrollableFrame=FakeWidget,
+                           CTkLabel=FakeWidget, CTkButton=FakeWidget), \
              patch.object(expedient_ui.messagebox, "showwarning"):
             expedient_ui.open_confirm_sources_dialog(app, self.case.id_case)
-            button = next(widget for widget in panel.descendants()
-                          if widget.options.get("text") == "Confirmar fuente")
-            button.options["command"]()
         self.assertEqual(128.1, self.connection.execute("SELECT importe_total FROM facturas").fetchone()[0])
+
+    def test_confirm_sources_dialog_can_confirm_a_complete_medium_confidence_source(self):
+        analysis = SourceAnalysis.invoice({
+            "tipo_suministro": "GAS", "fecha_inicio": "2026-01-01",
+            "fecha_fin": "2026-01-31", "importe_total": "128.10",
+        }, confidence="medium")
+        document = self.ingest(analysis)
+        self.assertTrue(document_review.case_has_unapplied_sources(
+            self.connection, self.case.id_case,
+        ))
+        app = SimpleNamespace(
+            ruta_bd_expedientes=self.database_path,
+            _refrescar_lista_expedientes=lambda **_: None,
+            _refrescar_expediente=lambda: None,
+            log=lambda *_: None,
+            after=lambda *_: None,
+        )
+        dialog = FakeWidget()
+        with patch.object(expedient_ui, "_dialog", return_value=dialog), \
+            patch.object(expedient_ui.UIM, "fuente", return_value=None), \
+            patch.multiple(
+                expedient_ui.ctk,
+                CTkFrame=FakeWidget, CTkScrollableFrame=FakeWidget,
+                CTkLabel=FakeWidget, CTkButton=FakeWidget,
+            ), \
+            patch.object(expedient_ui.messagebox, "showinfo"), \
+            patch.object(expedient_ui.messagebox, "showwarning"):
+            expedient_ui.open_confirm_sources_dialog(app, self.case.id_case)
+            button = next(
+                widget for widget in dialog.descendants()
+                if widget.options.get("text") == "Confirmar fuente"
+            )
+            button.options["command"]()
+
+        self.assertFalse(document_review.case_has_unapplied_sources(
+            self.connection, self.case.id_case,
+        ))
+        status = self.connection.execute(
+            "SELECT status FROM source_documents WHERE id_document=?",
+            (document.id_document,),
+        ).fetchone()[0]
+        self.assertEqual("validated", status)
 
     def test_pdf_structured_readings_survive_analysis_storage_and_application(self):
         self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))
@@ -245,19 +565,330 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             "SELECT id_periodo FROM lecturas_vecino WHERE fecha_lectura='2026-01-31'",
         ).fetchone()[0])
 
-    def test_counter_reset_approval_targets_source_interval_inside_case(self):
+    def test_counter_decrease_uses_source_interval_inside_case(self):
         self.connection.execute("UPDATE regularization_cases SET fecha_fin='2026-02-28' WHERE id_case=?", (self.case.id_case,))
         document = self.add_confirmed_reading(final=5)
         case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
-        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
         self.connection.execute("INSERT INTO lecturas_vecino (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado) SELECT id_propietario,id_periodo,tipo,'2026-02-28',150 FROM lecturas_vecino LIMIT 1")
-        document_review.approve_counter_reset_estimate(self.connection, issue.id_issue,
-            consumption="15", reason="Informe de sustitución", approved_by="Jose")
         rows = self.connection.execute("SELECT fecha_lectura,valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura").fetchall()
-        self.assertEqual([("2026-01-01", 100), ("2026-01-31", 115), ("2026-02-28", 150)], [tuple(r) for r in rows])
-        self.assertEqual("5", self.connection.execute("SELECT original_value FROM manual_corrections").fetchone()[0])
+        self.assertEqual([("2026-01-01", 100), ("2026-01-31", 100), ("2026-02-28", 150)], [tuple(r) for r in rows])
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
 
-    def test_two_resets_in_one_source_have_independent_approval_targets(self):
+    def test_zero_final_reading_keeps_raw_observation_and_carries_previous_value(self):
+        document = self.add_confirmed_reading(final=0)
+
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+
+        observations = self.connection.execute(
+            """SELECT fecha_lectura,observed_value,status
+                 FROM reading_observations ORDER BY fecha_lectura"""
+        ).fetchall()
+        effective = self.connection.execute(
+            """SELECT valor_acumulado,estado,metodo_estimacion
+                 FROM lecturas_vecino WHERE fecha_lectura='2026-01-31'"""
+        ).fetchone()
+        self.assertEqual(
+            [("2026-01-01", 100, "observed"), ("2026-01-31", 0, "carried_forward")],
+            [tuple(row) for row in observations],
+        )
+        self.assertEqual((100, "estimado", "carry_forward_zero"), tuple(effective))
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+
+    def test_zero_reading_without_prior_value_stays_open_for_review(self):
+        self.connection.execute(
+            """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'B','Vecino B')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        document = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.reading_file,
+            archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"vecinos": json.dumps([{
+                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2026-01-01",
+                "val_ant": 0, "fecha_act": "2026-01-31", "val_act": 0,
+            }])},
+            required_fields=(),
+        ).document
+
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+
+        self.assertEqual("review_required", self.connection.execute(
+            "SELECT status FROM reading_observations WHERE observed_value=0 ORDER BY id_observation LIMIT 1"
+        ).fetchone()[0])
+        self.assertTrue(document_review.list_open_issues(self.connection, self.case.id_case))
+
+    def test_confirming_initial_zeroes_for_one_source_applies_them_in_bulk(self):
+        self.connection.execute(
+            """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'B','Vecino B')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        document = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.reading_file,
+            archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"vecinos": json.dumps([{
+                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2026-01-01",
+                "val_ant": 0, "fecha_act": "2026-01-31", "val_act": 0,
+            }])},
+            required_fields=(),
+        ).document
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+
+        approve = getattr(document_review, "confirm_initial_zero_readings_for_source", None)
+        self.assertTrue(callable(approve), "La fuente debe poder confirmar sus ceros iniciales en bloque")
+        resolved = approve(
+            self.connection, case_id=self.case.id_case, document_id=document.id_document,
+            reason="Primer informe disponible", approved_by="Jose",
+        )
+
+        self.assertEqual(1, resolved)
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        readings = self.connection.execute(
+            """SELECT fecha_lectura,valor_acumulado,estado,metodo_estimacion
+                 FROM lecturas_vecino ORDER BY fecha_lectura"""
+        ).fetchall()
+        self.assertEqual(
+            [("2026-01-01", 0, "real", "confirmed_initial_zero"),
+             ("2026-01-31", 0, "estimado", "carry_forward_zero")],
+            [tuple(row) for row in readings],
+        )
+        self.assertEqual(
+            [("observed",), ("carried_forward",)],
+            [tuple(row) for row in self.connection.execute(
+                "SELECT status FROM reading_observations ORDER BY fecha_lectura"
+            )],
+        )
+
+    def test_confirming_zeroes_preserves_an_approved_counter_reset_reading(self):
+        self.connection.execute(
+            """UPDATE regularization_cases
+               SET fecha_inicio='2025-07-01',fecha_fin='2026-07-31' WHERE id_case=?""",
+            (self.case.id_case,),
+        )
+        self.connection.execute(
+            """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'B','Vecino B')""",
+            (self.community_id,),
+        )
+        owner_id = self.connection.execute(
+            "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda='B'",
+            (self.community_id,),
+        ).fetchone()[0]
+        period_id = expedient_service.link_case_to_period(self.connection, self.case.id_case)
+        self.connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente)
+               VALUES (?,?,'ACS','2025-07-01',9,'real','histórico')""",
+            (owner_id, period_id),
+        )
+        self.connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente)
+               VALUES (?,?,'ACS','2026-01-31',10,'real','lectura posterior')""",
+            (owner_id, period_id),
+        )
+        self.connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,
+                metodo_estimacion,fuente,approved_by,approved_at)
+               VALUES (?,?,'ACS','2026-07-31',9,'estimado','counter_reset_carry_forward',
+                       'informe anterior','Jose',datetime('now'))""",
+            (owner_id, period_id),
+        )
+        self.connection.commit()
+        document = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.reading_file,
+            archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"vecinos": json.dumps([{
+                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2025-07-01",
+                "val_ant": 9, "fecha_act": "2026-07-31", "val_act": 0,
+            }])},
+            required_fields=(),
+        ).document
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        document_review.create_review_issue(
+            self.connection, self.case.id_case, document.id_document,
+            code="READING_ZERO_REVIEW", field_name="reading.B.ACS",
+            message="Estado pendiente creado antes de aceptar reinicios aprobados",
+        )
+
+        resolved = document_review.confirm_initial_zero_readings_for_source(
+            self.connection, case_id=self.case.id_case, document_id=document.id_document,
+            reason="La fuente posterior contiene 0, pero ya existe una lectura aprobada", approved_by="Jose",
+        )
+
+        self.assertEqual(1, resolved)
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        self.assertEqual(
+            [
+                ("2025-07-01", 9, "real"),
+                ("2026-01-31", 10, "real"),
+                ("2026-07-31", 9, "estimado"),
+            ],
+            [tuple(row) for row in self.connection.execute(
+                "SELECT fecha_lectura,valor_acumulado,estado FROM lecturas_vecino ORDER BY fecha_lectura"
+            )],
+        )
+        self.assertEqual(
+            "counter_reset_carry_forward",
+            self.connection.execute(
+                "SELECT metodo_estimacion FROM lecturas_vecino WHERE fecha_lectura='2026-07-31'"
+            ).fetchone()[0],
+        )
+        self.assertEqual(
+            [("observed",), ("carried_forward",)],
+            [tuple(row) for row in self.connection.execute(
+                "SELECT status FROM reading_observations ORDER BY fecha_lectura"
+            )],
+        )
+
+    def test_zero_sequence_keeps_last_reliable_value_until_counter_recovers(self):
+        """A received zero is evidence, not a new accumulated meter value."""
+        self.connection.execute(
+            "UPDATE regularization_cases SET fecha_inicio='2025-07-01',fecha_fin='2026-07-31' WHERE id_case=?",
+            (self.case.id_case,),
+        )
+        self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'A','Vecino A')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        owner_id = self.connection.execute(
+            "SELECT id_propietario FROM propietarios WHERE id_comunidad=?",
+            (self.community_id,),
+        ).fetchone()[0]
+
+        def add_interval(name, start, initial, end, final):
+            path = self.database_path.parent / name
+            path.write_text(name, encoding="utf-8")
+            document = case_ingestion.add_document_to_case(
+                self.connection,
+                self.case.id_case,
+                source_path=path,
+                archive_root=self.archive_root,
+                document_kind="reading",
+                candidates={"vecinos": json.dumps([{
+                    "vivienda": "A", "tipo": "ACS", "fecha_ant": start,
+                    "val_ant": initial, "fecha_act": end, "val_act": final,
+                }])},
+                required_fields=(),
+            ).document
+            case_ingestion.apply_confirmed_source(
+                self.connection, self.case.id_case, document.id_document,
+            )
+
+        add_interval("r1.txt", "2025-07-01", 144, "2025-09-30", 0)
+        add_interval("r2.txt", "2025-09-30", 0, "2026-01-31", 0)
+        add_interval("r3.txt", "2026-01-31", 0, "2026-07-31", 160)
+
+        readings = self.connection.execute(
+            """SELECT fecha_lectura,valor_acumulado,estado,metodo_estimacion
+                 FROM lecturas_vecino WHERE id_propietario=? ORDER BY fecha_lectura""",
+            (owner_id,),
+        ).fetchall()
+        self.assertEqual(
+            [
+                ("2025-07-01", 144, "real", None),
+                ("2025-09-30", 144, "estimado", "carry_forward_zero"),
+                ("2026-01-31", 144, "estimado", "carry_forward_zero"),
+                ("2026-07-31", 160, "real", None),
+            ],
+            [tuple(row) for row in readings],
+        )
+        zeros = self.connection.execute(
+            """SELECT observed_value,status FROM reading_observations
+                 WHERE id_propietario=? AND observed_value=0 ORDER BY fecha_lectura,id_observation""",
+            (owner_id,),
+        ).fetchall()
+        self.assertTrue(zeros)
+        self.assertEqual({(0, "carried_forward")}, {tuple(row) for row in zeros})
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+
+    def test_positive_decrease_uses_last_reliable_value_without_manual_issue(self):
+        document = self.add_confirmed_reading(final=16)
+
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+
+        effective = self.connection.execute(
+            """SELECT valor_acumulado,estado,metodo_estimacion
+                 FROM lecturas_vecino WHERE fecha_lectura='2026-01-31'"""
+        ).fetchone()
+        observation = self.connection.execute(
+            """SELECT observed_value,status FROM reading_observations
+                 WHERE fecha_lectura='2026-01-31'"""
+        ).fetchone()
+        self.assertEqual((100, "estimado", "carry_forward_decrease"), tuple(effective))
+        self.assertEqual((16, "carried_forward"), tuple(observation))
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+
+    def test_resolving_reading_conflict_updates_source_and_canonical_reading(self):
+        self.connection.execute(
+            """INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'B','Vecino B')""",
+            (self.community_id,),
+        )
+        owner_id = self.connection.execute(
+            "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda='B'",
+            (self.community_id,),
+        ).fetchone()[0]
+        period_id = expedient_service.link_case_to_period(self.connection, self.case.id_case)
+        self.connection.executemany(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente)
+               VALUES (?,?,'ACS',? ,?,'real','histórico')""",
+            [
+                (owner_id, period_id, '2026-01-01', 100),
+                (owner_id, period_id, '2026-01-31', 110),
+            ],
+        )
+        self.connection.commit()
+        document = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case, source_path=self.reading_file,
+            archive_root=self.archive_root, document_kind="reading",
+            candidates={"vecinos": json.dumps([{
+                "vivienda": "B", "tipo": "ACS", "fecha_ant": "2026-01-01",
+                "val_ant": 100, "fecha_act": "2026-01-31", "val_act": 120,
+            }])}, required_fields=(),
+        ).document
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
+        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
+
+        document_review.resolve_issue(
+            self.connection, issue.id_issue, value="123", reason="Lectura comprobada en el informe",
+        )
+
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        self.assertEqual(
+            (123.0, "real"),
+            tuple(self.connection.execute(
+                """SELECT valor_acumulado,estado FROM lecturas_vecino
+                   WHERE id_propietario=? AND tipo='ACS' AND fecha_lectura='2026-01-31'""",
+                (owner_id,),
+            ).fetchone()),
+        )
+        rows = json.loads(self.connection.execute(
+            "SELECT value FROM extraction_candidates WHERE id_document=? AND field_name='vecinos'",
+            (document.id_document,),
+        ).fetchone()[0])
+        self.assertEqual(123.0, rows[0]["val_act"])
+
+    def test_two_decreases_in_one_source_are_each_carried_forward(self):
         self.connection.execute("UPDATE regularization_cases SET fecha_fin='2026-02-28' WHERE id_case=?", (self.case.id_case,))
         self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))
         rows = [
@@ -269,25 +900,18 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         document = self.ingest(SourceAnalysis.reading({"vecinos": json.dumps(rows)}))
         self.confirm(document)
         issues = document_review.list_open_issues(self.connection, self.case.id_case)
-        self.assertEqual(2, len(issues))
-        for issue in issues:
-            document_review.approve_counter_reset_estimate(self.connection, issue.id_issue,
-                consumption="15", reason="Cambio de contador", approved_by="Jose")
-        self.assertEqual([100, 115, 200, 215], [row[0] for row in self.connection.execute(
+        self.assertEqual(0, len(issues))
+        self.assertEqual([100, 100, 200, 200], [row[0] for row in self.connection.execute(
             "SELECT valor_acumulado FROM lecturas_vecino ORDER BY fecha_lectura")])
-        self.assertEqual(2, self.connection.execute("SELECT COUNT(*) FROM manual_corrections").fetchone()[0])
+        self.assertEqual([5, 8], [row[0] for row in self.connection.execute(
+            "SELECT observed_value FROM reading_observations WHERE status='carried_forward' ORDER BY fecha_lectura")])
         self.assertFalse(document_review.case_has_unapplied_sources(self.connection, self.case.id_case))
 
-    def test_invalid_reset_target_cannot_fall_back_to_unrelated_case_boundaries(self):
+    def test_automatic_decrease_does_not_create_counter_reset_targets(self):
         document = self.add_confirmed_reading(final=5)
         case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
-        issue = document_review.list_open_issues(self.connection, self.case.id_case)[0]
-        owner = self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'B','Otro vecino')", (self.community_id,)).lastrowid
-        other = self.connection.execute("INSERT INTO lecturas_vecino (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado) SELECT ?,id_periodo,'ACS','2026-01-31',8 FROM lecturas_vecino LIMIT 1", (owner,)).lastrowid
-        self.connection.execute("UPDATE counter_reset_targets SET final_reading_id=? WHERE id_issue=?", (other, issue.id_issue))
-        with self.assertRaises(LookupError):
-            document_review.approve_counter_reset_estimate(self.connection, issue.id_issue,
-                consumption="15", reason="Informe", approved_by="Jose")
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM counter_reset_targets").fetchone()[0])
         self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM manual_corrections").fetchone()[0])
 
     def test_reading_correction_cannot_silently_keep_the_old_canonical_values(self):
@@ -325,7 +949,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.confirm(self.ingest(analysis, path))
         self.assertEqual(2, self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0])
 
-    def test_legacy_xls_rows_are_extracted_and_request_missing_interval_and_service(self):
+    def test_legacy_xls_rows_are_extracted_and_request_only_missing_service(self):
         import xlwt
         self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))
         path = self.reading_file.with_suffix(".xls")
@@ -340,8 +964,10 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.assertIn("vecinos", analysis.candidates)
         document = self.ingest(analysis, path)
         issues = document_review.list_open_issues(self.connection, self.case.id_case)
-        self.assertEqual({"tipo", "fecha_inicio", "fecha_fin"}, {issue.field_name for issue in issues})
-        values = {"tipo": "ACS", "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31"}
+        self.assertEqual({"tipo"}, {issue.field_name for issue in issues})
+        self.assertEqual("2025-12-01", analysis.candidates["fecha_inicio"])
+        self.assertEqual("2026-01-31", analysis.candidates["fecha_fin"])
+        values = {"tipo": "ACS"}
         for issue in issues:
             document_review.resolve_issue(self.connection, issue.id_issue, value=values[issue.field_name], reason="Cabecera verificada")
         self.confirm(document)

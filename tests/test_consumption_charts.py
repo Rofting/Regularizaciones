@@ -8,14 +8,33 @@ CORE_DIR = PROJECT_ROOT / "core"
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
-from consumption_charts import consumption_band, consumption_bands, render_consumption_charts
+from consumption_charts import (
+    FIVE_BAND_LABELS,
+    consumption_band,
+    consumption_bands,
+    render_consumption_charts,
+)
 
 
 class ConsumptionChartsTest(unittest.TestCase):
     def test_assigns_ten_unit_neighbor_bands(self):
         self.assertEqual(((20.0, 30.0), 2), consumption_band(27.4))
         self.assertEqual(((0.0, 10.0), 0), consumption_band(0))
-        self.assertEqual(((0.0, 10.0), (10.0, 20.0), (20.0, 30.0)), consumption_bands([2, 11, 27]))
+        self.assertEqual(
+            ((0.0, 10.0), (10.0, 20.0), (20.0, 30.0),
+             (30.0, 40.0), (40.0, float("inf"))),
+            consumption_bands([2, 11, 27]),
+        )
+        self.assertEqual(("Muy bajo", "Bajo", "Medio", "Alto", "Muy alto"), FIVE_BAND_LABELS)
+
+    def test_renders_unavailable_comparison_when_there_are_no_valid_neighbors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "sin-vecinos.png"
+            result = render_consumption_charts(
+                target, owner_consumption=12, neighbor_consumptions=[], history=[]
+            )
+            self.assertEqual(target, result)
+            self.assertGreater(target.stat().st_size, 1000)
 
     def test_renders_two_panel_png(self):
         with tempfile.TemporaryDirectory() as directory:

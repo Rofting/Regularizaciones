@@ -79,6 +79,20 @@ class FakeWidget:
             yield from child.descendants()
 
 
+class IssuePageTest(unittest.TestCase):
+    def test_issue_page_limits_first_view_to_ten_of_fifty_five(self):
+        visible, page, pages = expedient_ui.issue_page(tuple(range(55)), page=1)
+
+        self.assertEqual(10, len(visible))
+        self.assertEqual((1, 6), (page, pages))
+
+    def test_issue_page_normalizes_out_of_range_page(self):
+        visible, page, pages = expedient_ui.issue_page(tuple(range(11)), page=9)
+
+        self.assertEqual((2, 2), (page, pages))
+        self.assertEqual(1, len(visible))
+
+
 class OnboardingSummaryDataTest(unittest.TestCase):
     def setUp(self):
         self.configuration = OnboardingConfiguration(
@@ -383,6 +397,62 @@ class SourceActionsTest(unittest.TestCase):
         self.assertEqual(3, self.connection.execute("SELECT count(*) FROM source_documents").fetchone()[0])
         self.assertIn("2 lecturas", self.messages.showinfo.call_args.args[1])
 
+    def test_resolve_incidents_action_opens_the_first_pending_issue(self):
+        self.ingest()
+        issue = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        review_ui = Mock()
+        with patch.dict(self.app_module.MOD, {"expedient_ui": review_ui}):
+            self.app_module.AppGestionFincas._accion_resolver_incidencias(self.app)
+
+        review_ui.open_issue_dialog.assert_called_once_with(self.app, issue)
+
+    def test_resolve_incidents_action_routes_counter_resets_to_the_grouped_view(self):
+        self.ingest()
+        document_id = self.connection.execute(
+            "SELECT id_document FROM source_documents WHERE id_case=? ORDER BY id_document LIMIT 1",
+            (self.case.id_case,),
+        ).fetchone()[0]
+        expedient_ui.document_review.create_review_issue(
+            self.connection, self.case.id_case, document_id,
+            code="COUNTER_RESET", field_name="reading.A.ACS",
+            message="El contador disminuye y requiere una estimación aprobada",
+        )
+        review_ui = Mock()
+        with patch.dict(self.app_module.MOD, {"expedient_ui": review_ui}):
+            self.app_module.AppGestionFincas._accion_resolver_incidencias(self.app)
+
+        review_ui.open_confirm_sources_dialog.assert_called_once_with(self.app, self.case.id_case)
+
+    def test_resolve_incidents_action_routes_initial_zeroes_to_the_grouped_view(self):
+        self.ingest()
+        document_id = self.connection.execute(
+            "SELECT id_document FROM source_documents WHERE id_case=? ORDER BY id_document LIMIT 1",
+            (self.case.id_case,),
+        ).fetchone()[0]
+        expedient_ui.document_review.create_review_issue(
+            self.connection, self.case.id_case, document_id,
+            code="READING_ZERO_REVIEW", field_name="reading.A.ACS",
+            message="La lectura cero no tiene una lectura anterior fiable para conservar",
+        )
+        review_ui = Mock()
+        with patch.dict(self.app_module.MOD, {"expedient_ui": review_ui}):
+            self.app_module.AppGestionFincas._accion_resolver_incidencias(self.app)
+
+        review_ui.open_confirm_sources_dialog.assert_called_once_with(self.app, self.case.id_case)
+
+    def test_background_workflow_error_is_shown_in_a_dialog(self):
+        def fail():
+            raise ValueError("Falta importar el modelo inicial")
+
+        self.app_module.AppGestionFincas._ejecutar_hilo(self.app, fail)
+        self.complete()
+
+        self.messages.showerror.assert_called_once()
+        title, detail = self.messages.showerror.call_args.args[:2]
+        self.assertEqual("No se pudo completar", title)
+        self.assertIn("Falta importar el modelo inicial", detail)
+        self.assertIn("No se ha modificado", detail)
+
     def test_reset_cancellation_failure_and_success_preserve_or_clear_ui_at_the_right_time(self):
         from database_reset import DatabaseResetError, ResetResult
         self.assertTrue(hasattr(self.app_module.AppGestionFincas, "_accion_nueva_base_segura"))
@@ -412,6 +482,62 @@ class SourceActionsTest(unittest.TestCase):
 
 
 class GuidedWorkspaceStateTest(unittest.TestCase):
+    def test_review_summary_treats_resets_from_one_source_as_one_action(self):
+        issues = tuple(
+            expedient_ui.ReviewIssue(
+                id_issue=index,
+                id_case=1,
+                id_document=9,
+                code="COUNTER_RESET",
+                field_name=f"reading.{index}.ACS",
+                detected_value=None,
+                message="El contador disminuye",
+                archived_path=Path("lecturas_anuales.xls"),
+                status="open",
+            )
+            for index in range(1, 51)
+        )
+
+        summary = expedient_ui.review_summary(issues)
+
+        self.assertEqual(50, summary.technical_count)
+        self.assertEqual(1, summary.actionable_count)
+        self.assertEqual(50, summary.groups[0]["count"])
+
+    def test_review_summary_treats_initial_zeroes_from_one_source_as_one_action(self):
+        issues = tuple(
+            expedient_ui.ReviewIssue(
+                id_issue=index,
+                id_case=1,
+                id_document=9,
+                code="READING_ZERO_REVIEW",
+                field_name=f"reading.{index}.ACS",
+                detected_value="0",
+                message="La lectura cero no tiene una lectura anterior fiable para conservar",
+                archived_path=Path("lecturas_iniciales.xls"),
+                status="open",
+            )
+            for index in range(1, 13)
+        )
+
+        summary = expedient_ui.review_summary(issues)
+
+        self.assertEqual(12, summary.technical_count)
+        self.assertEqual(1, summary.actionable_count)
+        self.assertEqual(12, summary.groups[0]["count"])
+
+    def test_under_review_without_issues_routes_to_source_confirmation(self):
+        """Guards against a silent attempt to generate Excel before applying sources."""
+        state = expedient_ui.guided_workspace_state(
+            has_case=True,
+            document_count=3,
+            open_issue_count=0,
+            case_status="under_review",
+        )
+
+        self.assertEqual("confirmar_fuentes", state.next_action)
+        self.assertEqual("Confirmar fuentes", state.headline)
+
     def test_no_case_prompts_case_creation(self):
         state = expedient_ui.guided_workspace_state(
             has_case=False, document_count=0, open_issue_count=0, case_status=""
@@ -433,6 +559,7 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
             ("validar", "resolver_incidencias"),
             (state.active_step, state.next_action),
         )
+        self.assertEqual("Hay 2 decisión(es) pendiente(s) antes de continuar.", state.detail)
 
     def test_ready_case_routes_to_excel_generation(self):
         state = expedient_ui.guided_workspace_state(
@@ -445,6 +572,27 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
             (state.active_step, state.next_action),
         )
 
+    def test_ready_case_without_registered_template_still_generates(self):
+        """Sin plantilla propia se genera igual: la crea el modelo canónico.
+
+        Exigir antes un Excel maestro elegido a mano dejaba parado un
+        expediente que ya tenía todas sus fuentes validadas.
+        """
+        state = expedient_ui.guided_workspace_state(
+            has_case=True,
+            document_count=4,
+            open_issue_count=0,
+            case_status="ready_for_calculation",
+            has_registered_template=False,
+        )
+
+        self.assertEqual(
+            ("reparto", "generar_excel"),
+            (state.active_step, state.next_action),
+        )
+        self.assertEqual("Genera el Excel oficial", state.headline)
+        self.assertIn("modelo del despacho", state.detail)
+
     def test_reconciled_case_routes_to_letters(self):
         state = expedient_ui.guided_workspace_state(
             has_case=True, document_count=4, open_issue_count=0,
@@ -454,6 +602,63 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
         self.assertEqual(
             ("cartas", "generar_cartas"),
             (state.active_step, state.next_action),
+        )
+
+
+class PackedModalLayoutTest(unittest.TestCase):
+    def _app_and_widgets(self):
+        grid_calls = []
+
+        class TrackingWidget(FakeWidget):
+            def grid(self, **kwargs):
+                grid_calls.append(kwargs)
+
+            def insert(self, *_args):
+                pass
+
+        dialog = TrackingWidget()
+        app = type("DialogApp", (), {
+            "_procesando": False,
+            "_preparar_dialogo": lambda _self, *_args: dialog,
+        })()
+        return app, dialog, grid_calls, TrackingWidget
+
+    def test_counter_reset_dialog_keeps_reason_and_action_in_the_packed_panel(self):
+        app, dialog, grid_calls, TrackingWidget = self._app_and_widgets()
+        with patch.object(expedient_ui.UIM, "fuente", return_value=None), patch.multiple(
+            expedient_ui.ctk,
+            CTkFrame=TrackingWidget,
+            CTkLabel=TrackingWidget,
+            CTkEntry=TrackingWidget,
+            CTkButton=TrackingWidget,
+        ):
+            expedient_ui.open_counter_reset_carry_forward_dialog(
+                app, case_id=1, document_id=2, count=50, source_name="lecturas.xls",
+            )
+
+        self.assertFalse(grid_calls)
+        self.assertIn(
+            "Aplicar a los 50 contadores",
+            [widget.options.get("text") for widget in dialog.descendants()],
+        )
+
+    def test_initial_zero_dialog_keeps_reason_and_action_in_the_packed_panel(self):
+        app, dialog, grid_calls, TrackingWidget = self._app_and_widgets()
+        with patch.object(expedient_ui.UIM, "fuente", return_value=None), patch.multiple(
+            expedient_ui.ctk,
+            CTkFrame=TrackingWidget,
+            CTkLabel=TrackingWidget,
+            CTkEntry=TrackingWidget,
+            CTkButton=TrackingWidget,
+        ):
+            expedient_ui.open_initial_zero_confirmation_dialog(
+                app, case_id=1, document_id=2, count=12, source_name="lecturas.xls",
+            )
+
+        self.assertFalse(grid_calls)
+        self.assertIn(
+            "Aplicar a los 12 ceros",
+            [widget.options.get("text") for widget in dialog.descendants()],
         )
 
 

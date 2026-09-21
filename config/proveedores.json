@@ -1,5 +1,6 @@
 {
-  "_descripcion": "Firmas de identificación de facturas por proveedor. Editable sin tocar código.",
+  "_descripcion": "Catálogo global de proveedores para todas las comunidades. Las firmas y formatos se editan aquí una sola vez; CUPS, referencias y otros datos particulares pueden seguir asociados a cada comunidad.",
+  "_schema_version": "2",
   "_version": "1.0",
   "_instrucciones": [
     "Cada proveedor tiene: 'tipo_suministro', 'firma_identificacion' (texto único en el PDF),",
@@ -78,6 +79,34 @@
         ]
       }
     },
+    "ENDESA_LUZ_GENERAL": {
+      "nombre_display": "Endesa Energía — Electricidad (formato general)",
+      "tipo_suministro": "ELECTRICIDAD",
+      "unidad_consumo": "kWh",
+      "_notas": "Factura de Endesa Energía identificada por empresa, CIF e indicios de factura. No depende de un CUPS concreto para poder reutilizarse en otras comunidades.",
+      "firmas_identificacion": [
+        "Endesa\\s*Energ[ií�]a"
+      ],
+      "firmas_requeridas": [
+        "CIF\\s*A81948077",
+        "(?:DATOS\\s*DE\\s*LA\\s*FACTURA|RESUMEN\\s*DE\\s*LA\\s*FACTURA)",
+        "N[º°o�]?\\s*factura\\s*:"
+      ],
+      "regex": {
+        "num_factura": "N[º°o�]?\\s*factura[:\\s]*(?P<valor>[A-Z0-9]+)",
+        "fecha_factura": "Fecha\\s*emisi[oó�]n\\s*factura[:\\s]*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "fecha_inicio": "Periodo\\s*de\\s*facturaci[oó�]n:\\s*del\\s*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "fecha_fin": "Periodo\\s*de\\s*facturaci[oó�]n:\\s*del\\s*\\d{2}/\\d{2}/\\d{4}\\s*a\\s*(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "dias_facturados": "\\((?P<valor>\\d+)\\s*d[íi�]as\\)",
+        "consumo_kwh": "Consumo\\s*Total\\s+(?P<valor>[\\d.,]+)\\s*kWh",
+        "termino_fijo": "Potencia\\s+(?P<valor>[\\d.,]+)\\s*(?:€|�)",
+        "termino_variable": "Energ[ií�]a\\s+(?P<valor>[\\d.,]+)\\s*(?:€|�)",
+        "impuestos": "Impuestos\\s+(?P<valor>[\\d.,]+)\\s*(?:€|�)",
+        "importe_total": "Total\\s+(?P<valor>[\\d.,]+)\\s*(?:€|�)",
+        "cups": "CUPS[):\\s]+(?P<valor>ES\\w+)"
+      },
+      "cups_comunidades": {}
+    },
     "ENERGIAXXI_BOMBA": {
       "nombre_display": "Energía XXI — Bomba de incendios (mercado regulado)",
       "tipo_suministro": "ELECTRICIDAD",
@@ -131,6 +160,35 @@
         "644": null
       }
     },
+    "GOMEZ_GROUP_METERING": {
+      "nombre_display": "Gómez Group Metering — Servicio de contadores",
+      "tipo_suministro": "MANTENIMIENTO",
+      "unidad_consumo": null,
+      "_notas": "Factura por lectura, facturación y mantenimiento de contadores. Es un gasto de servicio, no una lectura individual de vivienda.",
+      "firma_exclusion": "(?:AVISO|RECORDATORIO)\\s+DE\\s+PAGO|FACTURA\\s+PENDIENTE",
+      "firmas_identificacion": [
+        "GOMEZ\\s+GROUP\\s+METERING"
+      ],
+      "firmas_requeridas": [
+        "F\\.?\\s*FACTURA\\s+F\\.?\\s*VCTO\\.?",
+        "N[º°�]\\s*FACTURA(?:\\s+RAZ[ÓO�]N\\s+SOCIAL)?\\s+[A-Z]{1,3}\\d+",
+        "SERVICIO\\s+DE\\s+LECTURA,\\s*FACTURACI[ÓO�]N\\s+Y\\s+MANTENIMIENTO",
+        "TOTAL\\s+FACTURA"
+      ],
+      "regex_preferidos": {
+        "importe_total": [
+          "(?P<valor>[\\d.,]+)\\s*(?:€|�)\\s*TOTAL\\s+FACTURA",
+          "Cargo\\s+IBAN:[\\s\\S]{0,96}?(?P<valor>[\\d.,]+)\\s*(?:€|�)\\s*FORMA\\s+DE\\s+PAGO:\\s*TOTAL\\s+FACTURA"
+        ]
+      },
+      "regex_periodo_mes_facturado": "LECTURAS\\s+FACTURADAS\\s*:\\s*(?P<anio>20\\d{2})\\s+(?P<mes>ENE|FEB|MAR|ABR|MAY|JUN|JUL|AGO|SEP|OCT|NOV|DIC)",
+      "regex": {
+        "num_factura": "N[º°�]\\s*FACTURA(?:\\s+RAZ[ÓO�]N\\s+SOCIAL)?\\s+(?P<valor>[A-Z]{1,3}\\d+)",
+        "fecha_factura": "F\\.?\\s*FACTURA[\\s\\S]{0,120}?[A-Z]{1,3}\\d+\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "importe_total": "TOTAL\\s+FACTURA\\s*(?:\\.{2,}\\s*)?(?P<valor>[\\d.,]+)\\s*(?:€|�)"
+      },
+      "cups_comunidades": {}
+    },
     "METRIGEST_ACS": {
       "nombre_display": "Metrigest — Resumen lecturas ACS",
       "tipo_suministro": "LECTURA_ACS",
@@ -139,8 +197,7 @@
       "firmas_identificacion": [
         "METRIGEST",
         "metrigest.net",
-        "B99375867",
-        "ACS"
+        "B99375867"
       ],
       "regex_cabecera": {
         "comunidad": "C\\.P\\.\\s+(?P<valor>[^\\n]+)",
@@ -159,8 +216,7 @@
       "firmas_identificacion": [
         "METRIGEST",
         "metrigest.net",
-        "B99375867",
-        "CALEFACCION"
+        "B99375867"
       ],
       "regex_cabecera": {
         "comunidad": "C\\.P\\.\\s+(?P<valor>[^\\n]+)",
@@ -187,8 +243,8 @@
       "regex": {
         "num_factura": "FACTURA\\s+N[eº°o]\\s+(?P<valor>\\S+)",
         "fecha_factura": "en su cuenta el\\s+(?P<valor>\\d{2}-\\d{2}-\\d{4})",
-        "fecha_inicio": "del\\s+(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})\\s+al",
-        "fecha_fin": "al\\s+(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
+        "fecha_inicio": "(?:del\\s+|Lectura\\s+anterior[\\s\\S]{0,100}?)(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
+        "fecha_fin": "(?:al\\s+|[UÚu�]ltima\\s+lectura[\\s\\S]{0,100}?)(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
         "dias_facturados": "Dias\\s+de\\s+facturacion\\s+(?P<valor>\\d+)",
         "consumo_m3": "Saneamiento\\s+\\(m[3°o]\\)\\s+(?P<valor>\\d+)",
         "termino_fijo": "Cuota fija.*?Importe.*?\\n.*?(?P<valor>[\\d\\.,]+)\\s*$",
@@ -297,6 +353,234 @@
       "cups_comunidades": {
         "644": "50297001701027952"
       }
+    },
+    "MANTENIMIENTOS_ZARAGOZA": {
+      "nombre_display": "Instalaciones Zaragoza S.L. — Mantenimiento y reparaciones",
+      "tipo_suministro": "MANTENIMIENTO",
+      "unidad_consumo": null,
+      "_notas": "Factura de mantenimiento preventivo o reparación. La fecha de prestación no siempre figura y debe revisarse si no se extrae.",
+      "periodo_por_fecha_factura": true,
+      "firmas_identificacion": [
+        "INSTALACIONES\\s+ZARAGOZA\\s+S\\.L\\.",
+        "MANTENIMIENTOS\\s+ZARAGOZA\\s+S\\.L\\.",
+        "B99091316",
+        "MANTENIMIENTO DE SALAS DE CALDERAS",
+        "presupuestos@mantenimientoszaragoza.com"
+      ],
+      "regex_codigo_comunidad": "C[oó�]digo\\s+interno\\s+de\\s+cliente:\\s*(?P<valor>\\d{3,6})",
+      "regex": {
+        "num_factura": "(?:Factura\\s+N[úu]mero\\s*#?\\s*|FACTURA\\s+N[^:\\n]{0,3}:\\s*)(?P<valor>[A-Z]?\\d[\\w/-]*)",
+        "fecha_factura": "Fecha(?:\\s+de\\s+emisi.n)?[:\\s]+(?P<valor>(?:\\d{1,2}[./-]\\d{1,2}[./-]\\d{2,4})|(?:\\d{1,2}\\s+de\\s+\\w+\\s+de\\s+\\d{4}))",
+        "importe_total": "(?:[A-Z]\\d+\\s*-\\s*|TOTAL\\s+A\\s+PAGAR:\\s*)(?P<valor>[\\d.,]+)\\s*(?:EUR|€|�)"
+      },
+      "cups_comunidades": {}
+    },
+    "NATURGY_CLIENTES_GAS": {
+      "nombre_display": "Naturgy Clientes S.A.U. — Gas mercado libre",
+      "tipo_suministro": "GAS",
+      "unidad_consumo": "kWh",
+      "_notas": "Factura de gas de Naturgy Clientes. El CUPS se valida sólo cuando la comunidad lo tenga confirmado en este perfil.",
+      "firma_exclusion": "(?:AVISO|RECORDATORIO)\\s+DE\\s+PAGO|FACTURA\\s+PENDIENTE",
+      "firmas_identificacion": [
+        "Naturgy\\s+(?:Clientes|Iberia)"
+      ],
+      "firmas_requeridas": [
+        "aqu[ií�]\\s*tienes\\s*tu\\s*factura\\s*de\\s*gas",
+        "N[.º°o�]?\\s*[º°�]?\\s*(?:de\\s*)?factura:\\s*[A-Z]{2}\\d+",
+        "(?:Per[ií�]odo\\s+gas:|Gas:\\s*del)",
+        "Total\\s*a\\s*pagar"
+      ],
+      "regex_preferidos": {
+        "importe_total": [
+          "Total\\s*a\\s*pagar\\s*(?P<valor>\\d{1,3}(?:\\.\\d{3})*,\\s*\\d{2})\\s*(?:€|�)",
+          "Total\\s*a\\s*pagar(?:(?!\\d{1,3}(?:\\.\\d{3})*,\\s*\\d{2}\\s*(?:€|�))[\\s\\S]){0,120}?(?P<valor>\\d{1,3}(?:\\.\\d{3})*,\\s*\\d{2})\\s*(?:€|�)",
+          "(?P<valor>\\d{1,3}(?:\\.\\d{3})*,\\s*\\d{2})\\s*(?:€|�)\\s*Total\\s*a\\s*pagar"
+        ]
+      },
+      "campos_con_puntos_millares": [
+        "consumo_kwh"
+      ],
+      "regex": {
+        "num_factura": "N[.º°o�]\\s*(?:de\\s*)?factura:\\s*(?P<valor>[A-Z0-9]+)",
+        "fecha_factura": "Fecha\\s+de\\s+emisi[oó�]n:\\s*(?P<valor>\\d{2}[/.]\\d{2}[/.]\\d{4})",
+        "fecha_inicio": "(?:Per[ií�]odo\\s+gas:|Gas:)\\s*del\\s*(?P<valor>\\d{2}[/.]\\d{2}[/.]\\d{4})",
+        "fecha_fin": "(?:Per[ií�]odo\\s+gas:|Gas:)\\s*del\\s*\\d{2}[/.]\\d{2}[/.]\\d{4}\\s+al\\s*(?P<valor>\\d{2}[/.]\\d{2}[/.]\\d{4})",
+        "consumo_kwh": "(?:Consumo\\s+gas\\s+|Consumo\\s*kWh\\s*:\\s*(?:\\d+\\s+)?)(?P<valor>[\\d.,]+)\\s*kWh",
+        "importe_total": "Total\\s*a\\s*pagar\\s*(?P<valor>[\\d.,\\s]+)\\s*(?:€|�)?"
+      },
+      "cups_comunidades": {}
+    },
+    "TOTALENERGIES_GAS": {
+      "nombre_display": "TotalEnergies Electricidad y Gas España S.A.U. — Gas",
+      "tipo_suministro": "GAS",
+      "unidad_consumo": "kWh",
+      "_notas": "Facturas y abonos de gas de TotalEnergies. Los importes negativos se conservan para que los abonos se repartan como crédito.",
+      "firmas_identificacion": [
+        "TotalEnergies",
+        "totalenergies\\.es"
+      ],
+      "firmas_requeridas": [
+        "Factura\\s+gas"
+      ],
+      "regex": {
+        "num_factura": "N[º°o�]\\s*Factura:\\s*(?P<valor>[A-Z]+\\d+)",
+        "fecha_factura": "FECHA\\s+FACTURA:\\s*(?P<valor>\\d{1,2}\\s+de\\s+\\w+\\s+de\\s+\\d{4})",
+        "fecha_inicio": "(?:Periodo\\s+de\\s+facturaci[óo�]n:\\s*)?De\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})\\s+al",
+        "fecha_fin": "(?:Periodo\\s+de\\s+facturaci[óo�]n:\\s*)?De\\s+\\d{2}/\\d{2}/\\d{4}\\s+al\\s+(?P<valor>\\d{2}/\\d{2}/\\d{4})",
+        "consumo_kwh": "Total\\s*\\(kWh\\):\\s*(?P<valor>[\\d.,]+)",
+        "termino_fijo": "T[ée�]rmino\\s+Fijo(?:\\s+Distribuidora)?\\s+(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "termino_variable": "T[ée�]rmino\\s+Variable\\s+Distribuidora\\s+(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "impuestos": "Impuesto\\s+Hidrocarburo[^\\n]*?(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "iva": "Impuesto\\s+IVA[^\\n]*\\n\\s*(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "importe_total": "TOTAL\\s+(?:IMPORTE\\s+)?FACTURA\\s+(?P<valor>-?[\\d.,]+)\\s*(?:€|�)",
+        "cups": "CUPS:\\s*(?P<valor>ES\\w+)"
+      },
+      "cups_comunidades": {}
+    },
+    "TIERSAN": {
+      "display_name": "Tiersan",
+      "tax_ids": [], "aliases": ["TIERSAN"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "CALDERAS", "extractor_family": "boilers_hvac",
+      "required_signatures": ["\\bFACTURA\\b"],
+      "excluded_signatures": ["\\bPRESUPUESTO\\b", "\\bALBARAN\\b"]
+    },
+    "ECHEMAN": {
+      "display_name": "Echeman", "tax_ids": [], "aliases": ["ECHEMAN"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "MANTENIMIENTO", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "FENIE_ENERGIA": {
+      "display_name": "Feníe Energía", "tax_ids": [],
+      "aliases": ["FENIE ENERGIA", "FENÍE ENERGÍA"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "ELECTRICIDAD", "extractor_family": "electricity",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "CERRAJERA_MONCASI": {
+      "display_name": "Cerrajera Moncasi", "tax_ids": [],
+      "aliases": ["CERRAJERA MONCASI", "CERRAJERIA MONCASI"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "MANTENIMIENTO", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b", "\\bALBARAN\\b"]
+    },
+    "LIMPIEZAS_COTE": {
+      "display_name": "Limpiezas Cote", "tax_ids": [], "aliases": ["LIMPIEZAS COTE"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "LIMPIEZA", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "SCHINDLER": {
+      "display_name": "Schindler", "tax_ids": [],
+      "aliases": ["SCHINDLER", "SCHINDLER SA"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "ASCENSORES", "extractor_family": "elevators",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b", "\\bAVISO\\b"]
+    },
+    "JPG_REPARACIONES_ELECTRICAS": {
+      "display_name": "JPG Reparaciones Eléctricas", "tax_ids": [],
+      "aliases": ["JPG REPARACIONES ELECTRICAS", "JPG REPARACIONES ELÉCTRICAS"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "MANTENIMIENTO", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b", "\\bPARTE DE TRABAJO\\b"]
+    },
+    "LIMPIEZAS_UTEBO": {
+      "display_name": "Limpiezas Utebo", "tax_ids": [], "aliases": ["LIMPIEZAS UTEBO"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "LIMPIEZA", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "ORONA": {
+      "display_name": "Orona", "tax_ids": [], "aliases": ["ORONA", "ORONA S COOP"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "ASCENSORES", "extractor_family": "elevators",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b", "\\bAVISO\\b"]
+    },
+    "MOEVE": {
+      "display_name": "Moeve", "tax_ids": [], "aliases": ["MOEVE", "CEPSA"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "COMBUSTIBLE", "extractor_family": "gas_fuel",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bALBARAN\\b", "\\bPRESUPUESTO\\b"]
+    },
+    "TRITERMIA": {
+      "display_name": "Tritermia", "tax_ids": [], "aliases": ["TRITERMIA"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "CALDERAS", "extractor_family": "boilers_hvac",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "TELESER": {
+      "display_name": "Teleser", "tax_ids": [], "aliases": ["TELESER"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "CONTADORES", "extractor_family": "metering_management",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "ISS": {
+      "display_name": "ISS Facility Services", "tax_ids": [],
+      "aliases": ["ISS FACILITY SERVICES", "ISS SOLUCIONES DE LIMPIEZA"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "LIMPIEZA", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "LABOIL": {
+      "display_name": "Laboil", "tax_ids": [], "aliases": ["LABOIL"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "COMBUSTIBLE", "extractor_family": "gas_fuel",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bALBARAN\\b", "\\bPRESUPUESTO\\b"]
+    },
+    "ISTA": {
+      "display_name": "Ista", "tax_ids": [],
+      "aliases": ["ISTA METERING SERVICES", "ISTA"],
+      "document_types": ["invoice", "credit_note", "reading"],
+      "service_family": "CONTADORES", "extractor_family": "metering_management",
+      "required_signatures": [], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "ASCENSORS_SALES": {
+      "display_name": "Ascensors Sales", "tax_ids": [],
+      "aliases": ["ASCENSORS SALES", "ASCENSORES SALES"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "ASCENSORES", "extractor_family": "elevators",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "GAS_INSTALACIONES_MANTENIMIENTOS": {
+      "display_name": "Gas Instalaciones y Mantenimientos", "tax_ids": [],
+      "aliases": ["GAS INSTALACIONES Y MANTENIMIENTOS", "GAS INSTALACIONES MANTENIMIENTOS"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "CALDERAS", "extractor_family": "boilers_hvac",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "VILAHEXDOSS": {
+      "display_name": "Vilahexdoss", "tax_ids": [], "aliases": ["VILAHEXDOSS"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "MANTENIMIENTO", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "MARTINEZ_OTERO": {
+      "display_name": "Martínez Otero", "tax_ids": [],
+      "aliases": ["MARTINEZ OTERO", "MARTÍNEZ OTERO"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "MANTENIMIENTO", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "LIMPIEZAS_MOREDA": {
+      "display_name": "Limpiezas Moreda", "tax_ids": [], "aliases": ["LIMPIEZAS MOREDA"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "LIMPIEZA", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "JARDINERIA_JESUS_GRACIA": {
+      "display_name": "Jardinería Jesús Gracia", "tax_ids": [],
+      "aliases": ["JARDINERIA JESUS GRACIA", "JARDINERÍA JESÚS GRACIA"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "MANTENIMIENTO", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
+    },
+    "LIMPIEZAS_MARCEN": {
+      "display_name": "Limpiezas Marcen", "tax_ids": [],
+      "aliases": ["LIMPIEZAS MARCEN", "LIMPIEZAS MARCÉN"],
+      "document_types": ["invoice", "credit_note"],
+      "service_family": "LIMPIEZA", "extractor_family": "periodic_maintenance",
+      "required_signatures": ["\\bFACTURA\\b"], "excluded_signatures": ["\\bPRESUPUESTO\\b"]
     }
   }
 }

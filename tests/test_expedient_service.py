@@ -1,4 +1,5 @@
 import sqlite3
+import shutil
 import sys
 import tempfile
 import unittest
@@ -84,6 +85,180 @@ class ExpedientServiceTest(unittest.TestCase):
         self.assertEqual("gathering_sources", expedient_service.get_case(
             self.connection, case.id_case
         ).status)
+
+    def test_register_source_document_recovers_matching_orphaned_archive(self):
+        """A retry registers a valid archive left behind by an interrupted run."""
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Recuperación",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "interrumpida.pdf"
+        source_path.write_bytes(b"%PDF-1.4 recuperable")
+        archive_root = Path(self.directory.name) / "expedientes"
+
+        archived, created = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        self.assertTrue(created)
+        self.connection.execute(
+            "DELETE FROM source_documents WHERE id_document = ?", (archived.id_document,)
+        )
+        self.connection.commit()
+
+        recovered, recovered_created = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+
+        self.assertTrue(recovered_created)
+        self.assertEqual(archived.archived_path, recovered.archived_path)
+        self.assertEqual(source_path.read_bytes(), recovered.archived_path.read_bytes())
+        self.assertEqual(1, self.connection.execute(
+            "SELECT COUNT(*) FROM source_documents WHERE id_case = ?", (case.id_case,)
+        ).fetchone()[0])
+
+    def test_repair_relinks_a_missing_archive_path_with_one_matching_hash(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Recuperación de ruta",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path.write_bytes(b"%PDF-1.4 ruta recuperable")
+        archive_root = Path(self.directory.name) / "expedientes"
+        document, _ = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        recovered_path = document.archived_path.with_name(
+            f"658_{document.archived_path.name}"
+        )
+        document.archived_path.rename(recovered_path)
+
+        result = expedient_service.repair_archived_source_paths(
+            self.connection, archive_root=archive_root,
+        )
+
+        self.assertEqual((document.id_document,), result.repaired_document_ids)
+        self.assertEqual((), result.unresolved_document_ids)
+        self.assertEqual(
+            str(recovered_path), self.connection.execute(
+                "SELECT archived_path FROM source_documents WHERE id_document=?",
+                (document.id_document,),
+            ).fetchone()[0],
+        )
+
+    def test_repair_leaves_a_missing_path_when_multiple_hash_matches_exist(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Ruta ambigua",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path.write_bytes(b"%PDF-1.4 matching copies")
+        archive_root = Path(self.directory.name) / "expedientes"
+        document, _ = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        renamed_path = document.archived_path.with_name(
+            f"658_{document.archived_path.name}"
+        )
+        document.archived_path.rename(renamed_path)
+        shutil.copy2(renamed_path, renamed_path.with_name(f"copy_{renamed_path.name}"))
+
+        result = expedient_service.repair_archived_source_paths(
+            self.connection, archive_root=archive_root,
+        )
+
+        self.assertEqual((), result.repaired_document_ids)
+        self.assertEqual((document.id_document,), result.unresolved_document_ids)
+        self.assertEqual(
+            str(document.archived_path), self.connection.execute(
+                "SELECT archived_path FROM source_documents WHERE id_document=?",
+                (document.id_document,),
+            ).fetchone()[0],
+        )
+
+    def test_list_archived_path_candidates_returns_only_verified_duplicates(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Copias a elegir",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path.write_bytes(b"%PDF-1.4 copies to choose")
+        archive_root = Path(self.directory.name) / "expedientes"
+        document, _ = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        first_copy = document.archived_path.with_name(f"658_{document.archived_path.name}")
+        document.archived_path.rename(first_copy)
+        second_copy = first_copy.with_name(f"copy_{first_copy.name}")
+        shutil.copy2(first_copy, second_copy)
+        (archive_root / str(case.id_case) / "fuentes" / "otro.pdf").write_bytes(b"otro")
+
+        candidates = expedient_service.list_archived_path_candidates(
+            self.connection, archive_root=archive_root, case_id=case.id_case,
+        )
+
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(document.id_document, candidates[0].document_id)
+        self.assertEqual((first_copy, second_copy), candidates[0].candidate_paths)
+
+    def test_select_archived_path_requires_a_verified_candidate(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Elegir copia",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path.write_bytes(b"%PDF-1.4 selected copy")
+        archive_root = Path(self.directory.name) / "expedientes"
+        document, _ = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        selected_path = document.archived_path.with_name(f"658_{document.archived_path.name}")
+        document.archived_path.rename(selected_path)
+        shutil.copy2(selected_path, selected_path.with_name(f"copy_{selected_path.name}"))
+
+        selected = expedient_service.select_archived_source_path(
+            self.connection, document.id_document, selected_path,
+            archive_root=archive_root,
+        )
+
+        self.assertEqual(selected_path, selected)
+        self.assertEqual(
+            str(selected_path), self.connection.execute(
+                "SELECT archived_path FROM source_documents WHERE id_document=?",
+                (document.id_document,),
+            ).fetchone()[0],
+        )
+
+    def test_list_archived_path_candidates_ignores_an_external_candidate(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="Enlace externo",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path.write_bytes(b"%PDF-1.4 external symbolic link")
+        archive_root = Path(self.directory.name) / "expedientes"
+        document, _ = expedient_service.register_source_document(
+            self.connection, case.id_case, source_path=source_path,
+            archive_root=archive_root, document_kind="invoice",
+        )
+        external_copy = Path(self.directory.name) / "external.pdf"
+        external_copy.write_bytes(source_path.read_bytes())
+        document.archived_path.unlink()
+        internal_copy = document.archived_path.with_name("copia-interna.pdf")
+        internal_copy.write_bytes(source_path.read_bytes())
+        # Windows CI does not grant symlink privileges. Simulate a directory
+        # link exposing an external file so the containment check is covered.
+        with patch.object(Path, "iterdir", return_value=iter((internal_copy, external_copy))):
+            candidates = expedient_service.list_archived_path_candidates(
+                self.connection, archive_root=archive_root, case_id=case.id_case,
+            )
+
+        self.assertEqual((), candidates)
 
     def test_register_source_document_rejects_outer_transaction_without_side_effects(self):
         case = expedient_service.create_case(

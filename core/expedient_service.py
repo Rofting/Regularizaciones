@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Iterator
@@ -28,6 +29,24 @@ ALLOWED_TRANSITIONS = {
     "deliveries_generated": {"closed", "under_review"},
     "closed": {"under_review"},
 }
+
+
+@dataclass(frozen=True)
+class ArchivedPathRepairResult:
+    """Resultado de una recuperación conservadora de rutas archivadas."""
+
+    repaired_document_ids: tuple[int, ...]
+    unresolved_document_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ArchivedPathCandidates:
+    """Copias verificadas para reparar manualmente una ruta archivada."""
+
+    document_id: int
+    original_name: str
+    missing_path: Path
+    candidate_paths: tuple[Path, ...]
 
 
 @contextmanager
@@ -240,6 +259,160 @@ def _safe_filename(name: str) -> str:
     return safe_name or "documento"
 
 
+def _verified_source_directory(archive_root: str | Path, case_id: int) -> Path | None:
+    """Devuelve fuentes del expediente sólo si su ruta canónica no escapa."""
+    root = Path(archive_root).resolve()
+    case_directory = (root / str(case_id)).resolve()
+    source_directory = (root / str(case_id) / "fuentes").resolve()
+    if case_directory.parent != root or source_directory.parent != case_directory:
+        return None
+    return source_directory
+
+
+def _source_hash_index(
+    archive_root: str | Path, case_ids: set[int],
+) -> dict[int, dict[str, list[Path]]]:
+    """Construye una vez las huellas verificadas de cada expediente."""
+    indexes: dict[int, dict[str, list[Path]]] = {}
+    for document_case_id in sorted(case_ids):
+        source_directory = _verified_source_directory(archive_root, document_case_id)
+        hashes: dict[str, list[Path]] = {}
+        if source_directory is not None and source_directory.is_dir():
+            for candidate in source_directory.iterdir():
+                try:
+                    canonical_candidate = candidate.resolve()
+                except OSError:
+                    continue
+                if canonical_candidate.parent != source_directory or not canonical_candidate.is_file():
+                    continue
+                try:
+                    hashes.setdefault(_sha256(canonical_candidate), []).append(canonical_candidate)
+                except OSError:
+                    continue
+        indexes[document_case_id] = hashes
+    return indexes
+
+
+def repair_archived_source_paths(
+    connection: sqlite3.Connection,
+    *,
+    archive_root: str | Path,
+    case_id: int | None = None,
+) -> ArchivedPathRepairResult:
+    """Repara sólo rutas ausentes con una única copia de igual SHA-256.
+
+    El escaneo queda restringido a ``<archive_root>/<expediente>/fuentes``.
+    Si hay cero o más de una copia con la misma huella, la fila no se toca.
+    """
+    query = (
+        "SELECT id_document,id_case,archived_path,sha256 FROM source_documents"
+        + (" WHERE id_case=?" if case_id is not None else "")
+        + " ORDER BY id_document"
+    )
+    rows = connection.execute(query, (() if case_id is None else (case_id,))).fetchall()
+    missing_rows = [row for row in rows if not Path(row["archived_path"]).is_file()]
+    if not missing_rows:
+        return ArchivedPathRepairResult((), ())
+
+    candidates = _source_hash_index(
+        archive_root, {int(row["id_case"]) for row in missing_rows},
+    )
+
+    repaired: list[int] = []
+    unresolved: list[int] = []
+    with _transaction(connection):
+        for row in missing_rows:
+            matching_paths = candidates[int(row["id_case"])].get(str(row["sha256"]), [])
+            if len(matching_paths) != 1:
+                unresolved.append(int(row["id_document"]))
+                continue
+            cursor = connection.execute(
+                """UPDATE source_documents SET archived_path=?
+                   WHERE id_document=? AND sha256=? AND archived_path=?""",
+                (
+                    str(matching_paths[0]), int(row["id_document"]), str(row["sha256"]),
+                    str(row["archived_path"]),
+                ),
+            )
+            if cursor.rowcount == 1:
+                repaired.append(int(row["id_document"]))
+            else:
+                unresolved.append(int(row["id_document"]))
+    return ArchivedPathRepairResult(tuple(repaired), tuple(unresolved))
+
+
+def list_archived_path_candidates(
+    connection: sqlite3.Connection,
+    *,
+    archive_root: str | Path,
+    case_id: int | None = None,
+) -> tuple[ArchivedPathCandidates, ...]:
+    """Devuelve únicamente rutas ausentes con dos o más copias verificadas.
+
+    Cada copia queda limitada a la carpeta ``fuentes`` del expediente y debe
+    coincidir por SHA-256 con el documento registrado.
+    """
+    query = (
+        "SELECT id_document,id_case,original_name,archived_path,sha256 FROM source_documents"
+        + (" WHERE id_case=?" if case_id is not None else "")
+        + " ORDER BY id_document"
+    )
+    rows = connection.execute(query, (() if case_id is None else (case_id,))).fetchall()
+    missing_rows = [row for row in rows if not Path(row["archived_path"]).is_file()]
+    indexes = _source_hash_index(
+        archive_root, {int(row["id_case"]) for row in missing_rows},
+    )
+    results: list[ArchivedPathCandidates] = []
+    for row in missing_rows:
+        paths = indexes[int(row["id_case"])].get(str(row["sha256"]), [])
+        if len(paths) > 1:
+            results.append(ArchivedPathCandidates(
+                document_id=int(row["id_document"]),
+                original_name=str(row["original_name"]),
+                missing_path=Path(row["archived_path"]),
+                candidate_paths=tuple(sorted(paths, key=lambda path: path.name.casefold())),
+            ))
+    return tuple(results)
+
+
+def select_archived_source_path(
+    connection: sqlite3.Connection,
+    document_id: int,
+    selected_path: str | Path,
+    *,
+    archive_root: str | Path,
+) -> Path:
+    """Guarda una ruta elegida por el usuario tras verificar su identidad."""
+    row = connection.execute(
+        """SELECT id_document,id_case,archived_path,sha256 FROM source_documents
+           WHERE id_document=?""",
+        (document_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError("El documento no existe")
+    if Path(row["archived_path"]).is_file():
+        raise ValueError("El documento ya tiene una ruta archivada disponible")
+
+    source_directory = _verified_source_directory(archive_root, int(row["id_case"]))
+    if source_directory is None:
+        raise ValueError("La carpeta de fuentes del expediente no es una ruta segura")
+    candidate = Path(selected_path).resolve()
+    if candidate.parent != source_directory or not candidate.is_file():
+        raise ValueError("La copia elegida debe pertenecer a las fuentes del expediente")
+    if _sha256(candidate) != str(row["sha256"]):
+        raise ValueError("La copia elegida no coincide con la huella del documento")
+
+    with _transaction(connection):
+        cursor = connection.execute(
+            """UPDATE source_documents SET archived_path=?
+               WHERE id_document=? AND sha256=? AND archived_path=?""",
+            (str(candidate), document_id, str(row["sha256"]), str(row["archived_path"])),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("La ruta del documento cambió mientras se seleccionaba la copia")
+    return candidate
+
+
 def register_source_document(connection: sqlite3.Connection, case_id: int, *,
                              source_path: str | Path, archive_root: str | Path,
                              document_kind: str) -> tuple[SourceDocument, bool]:
@@ -273,23 +446,25 @@ def register_source_document(connection: sqlite3.Connection, case_id: int, *,
 
             case = get_case(connection, case_id)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                dir=destination.parent, prefix=f".{destination.name}.",
-                suffix=".tmp", delete=False,
-            ) as staging_file:
-                staging_path = Path(staging_file.name)
-            shutil.copy2(source, staging_path)
             if destination.exists():
-                raise FileExistsError(f"Ya existe un archivo archivado en {destination}")
-            destination_descriptor = os.open(
-                destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            )
-            final_created = True
-            with os.fdopen(destination_descriptor, "wb") as destination_file:
-                with staging_path.open("rb") as staging_file:
-                    shutil.copyfileobj(staging_file, destination_file)
-            staging_path.unlink()
-            staging_path = None
+                if not destination.is_file() or _sha256(destination) != sha256:
+                    raise FileExistsError(f"Ya existe un archivo archivado distinto en {destination}")
+            else:
+                with tempfile.NamedTemporaryFile(
+                    dir=destination.parent, prefix=f".{destination.name}.",
+                    suffix=".tmp", delete=False,
+                ) as staging_file:
+                    staging_path = Path(staging_file.name)
+                shutil.copy2(source, staging_path)
+                destination_descriptor = os.open(
+                    destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                )
+                final_created = True
+                with os.fdopen(destination_descriptor, "wb") as destination_file:
+                    with staging_path.open("rb") as staging_file:
+                        shutil.copyfileobj(staging_file, destination_file)
+                staging_path.unlink()
+                staging_path = None
             cursor = connection.execute(
                 """INSERT INTO source_documents
                    (id_case, original_name, archived_path, sha256, document_kind, status)

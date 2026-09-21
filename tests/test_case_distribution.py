@@ -170,6 +170,50 @@ class CaseDistributionTest(unittest.TestCase):
             stages,
         )
 
+    def test_distribution_persists_raw_eligible_total_and_applied_ratio(self):
+        calculate_case_distribution(self.connection, id_case=self.case_id)
+
+        run = self.connection.execute(
+            "SELECT id_distribution_run,status FROM distribution_runs ORDER BY id_distribution_run DESC"
+        ).fetchone()
+        rows = self.connection.execute(
+            """SELECT id_propietario,coefficient_raw,coefficient_eligible_total,
+                      coefficient_applied
+                 FROM owner_distribution_snapshots
+                WHERE id_distribution_run=? AND concept_key='credit'
+                ORDER BY id_propietario""",
+            (run["id_distribution_run"],),
+        ).fetchall()
+
+        self.assertEqual("completed", run["status"])
+        self.assertEqual(2, len(rows))
+        self.assertEqual((1.0, 3.0), (rows[0]["coefficient_raw"], rows[0]["coefficient_eligible_total"]))
+        self.assertAlmostEqual(1 / 3, rows[0]["coefficient_applied"], places=9)
+        self.assertEqual((2.0, 3.0), (rows[1]["coefficient_raw"], rows[1]["coefficient_eligible_total"]))
+        self.assertAlmostEqual(2 / 3, rows[1]["coefficient_applied"], places=9)
+
+    def test_recalculation_appends_distribution_snapshot_history(self):
+        first = calculate_case_distribution(self.connection, id_case=self.case_id)
+        first_run = self.connection.execute(
+            "SELECT MAX(id_distribution_run) FROM distribution_runs"
+        ).fetchone()[0]
+        self.assertEqual(first.owner_result_count, self.connection.execute(
+            "SELECT COUNT(*) FROM owner_distribution_snapshots WHERE id_distribution_run=?",
+            (first_run,),
+        ).fetchone()[0])
+
+        calculate_case_distribution(self.connection, id_case=self.case_id)
+        runs = self.connection.execute(
+            "SELECT id_distribution_run FROM distribution_runs ORDER BY id_distribution_run"
+        ).fetchall()
+
+        self.assertEqual(2, len(runs))
+        self.assertNotEqual(runs[0][0], runs[1][0])
+        self.assertEqual(first.owner_result_count, self.connection.execute(
+            "SELECT COUNT(*) FROM owner_distribution_snapshots WHERE id_distribution_run=?",
+            (runs[0][0],),
+        ).fetchone()[0])
+
     def test_largest_remainder_breaks_ties_by_owner_identifier_for_negative_credits(self):
         self.assertEqual(
             {1: -34, 2: -33, 3: -33},

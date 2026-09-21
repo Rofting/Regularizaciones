@@ -6,12 +6,25 @@ import csv
 import json
 import math
 import re
+import sqlite3
 import unicodedata
+import calendar
 from datetime import date, datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
+
+from document_classifier import DocumentClassification, classify_document
+from document_text_service import TextExtraction, get_document_text
+from invoice_extractors import FieldEvidence
+from invoice_extractors import extract_invoice_fields
+from provider_registry import (
+    ProviderProfile,
+    load_provider_registry,
+    provider_registry_from_payload,
+    resolve_provider,
+)
 
 
 INVOICE_FIELDS = ("fecha_inicio", "fecha_fin", "importe_total")
@@ -39,14 +52,28 @@ class SourceAnalysis:
     required_fields: tuple[str, ...] = ()
     locator: SourceLocator | None = None
     review_message: str | None = None
+    disposition: str = "operational"
+    provider_key: str | None = None
+    field_evidence: Mapping[str, FieldEvidence] = field(default_factory=dict)
+    analysis_version: str = "source-analysis-v2"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "candidates", MappingProxyType(dict(self.candidates)))
+        evidence = dict(self.field_evidence)
+        candidates = dict(self.candidates)
+        for name, item in evidence.items():
+            candidates.setdefault(name, item.value)
+        object.__setattr__(self, "candidates", MappingProxyType(candidates))
         object.__setattr__(self, "required_fields", tuple(self.required_fields))
+        object.__setattr__(self, "field_evidence", MappingProxyType(evidence))
 
     @classmethod
-    def invoice(cls, candidates: Mapping[str, str | None] | None = None, *, locator=None) -> "SourceAnalysis":
-        return cls("invoice", "high", candidates or {}, INVOICE_FIELDS, locator)
+    def invoice(cls, candidates: Mapping[str, str | None] | None = None, *, locator=None,
+                confidence: str = "high", provider_key: str | None = None,
+                field_evidence: Mapping[str, FieldEvidence] | None = None) -> "SourceAnalysis":
+        return cls(
+            "invoice", confidence, candidates or {}, INVOICE_FIELDS, locator,
+            provider_key=provider_key, field_evidence=field_evidence or {},
+        )
 
     @classmethod
     def reading(cls, candidates: Mapping[str, str | None] | None = None, *, locator=None) -> "SourceAnalysis":
@@ -57,11 +84,57 @@ class SourceAnalysis:
         return cls("owners", "high", candidates or {}, (), locator)
 
     @classmethod
+    def reference(cls, *, locator=None) -> "SourceAnalysis":
+        """Archivo histórico reconocido que no debe entrar como fuente operativa.
+
+        Los modelos Excel completos se importan explícitamente desde el paso de
+        arranque. Cuando llegan dentro de una carpeta de facturas no deben
+        bloquear el expediente ni duplicar importes.
+        """
+        return cls(
+            "other", "high", {}, (), locator,
+            "Modelo Excel de referencia detectado; impórtalo desde «Importar modelo inicial» si quieres usarlo como histórico.",
+            "non_operational",
+        )
+
+    @classmethod
+    def informational(cls, message: str, *, locator=None) -> "SourceAnalysis":
+        """Recognised document that must be archived without entering calculations."""
+        return cls("other", "high", {}, (), locator, message, "non_operational")
+
+    @classmethod
     def unknown(cls, message: str | None = None, *, locator=None) -> "SourceAnalysis":
         return cls(
             "unknown", "low", {}, (), locator,
             message or "No se ha podido identificar el tipo de documento; revise la clasificación.",
         )
+
+
+_GENERIC_INVOICE_MARKERS = (
+    re.compile(r"\bfactura\b", re.IGNORECASE),
+    re.compile(r"n[.º°o]*\s*(?:de\s*)?factura", re.IGNORECASE),
+)
+_GENERIC_DATE_PATTERN = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
+_GENERIC_TOTAL_PATTERN = re.compile(
+    r"(?:total\s+(?:a\s+pagar|factura|importe)|importe\s+total)\D{0,32}"
+    r"(?P<valor>\d{1,3}(?:\.\d{3})*,\d{2}|\d+\.\d{2})",
+    re.IGNORECASE,
+)
+
+
+def classify_generic_invoice_text(text: str, *, locator: SourceLocator | None = None) -> SourceAnalysis | None:
+    """Recognise an invoice without guessing a provider-specific supply type."""
+    normalised = " ".join(str(text or "").split())
+    if not normalised or not any(marker.search(normalised) for marker in _GENERIC_INVOICE_MARKERS):
+        return None
+    if not _GENERIC_DATE_PATTERN.search(normalised):
+        return None
+    total = _GENERIC_TOTAL_PATTERN.search(normalised)
+    if total is None:
+        return None
+    return SourceAnalysis.invoice(
+        {"importe_total": total.group("valor")}, locator=locator, confidence="medium",
+    )
 
 
 def _normalise_header(value: object) -> str:
@@ -98,19 +171,38 @@ def _locator_from_mapping(result: Mapping[str, object], data: Mapping[str, objec
     )
 
 
-def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = None) -> SourceAnalysis:
+def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = None,
+                providers: Mapping[str, object] | None = None) -> SourceAnalysis:
     """Classify a PDF using the existing provider/reading parser."""
     if pdf_processor is None:
         from lector_pdf import procesar_archivo
         provider_config = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
-        result = procesar_archivo(
-            str(path), community_code,
-            ruta_proveedores=str(provider_config),
-        )
+        processor_args = {"ruta_proveedores": str(provider_config)}
+        if providers is not None:
+            processor_args["proveedores"] = providers
+        result = procesar_archivo(str(path), community_code, **processor_args)
     else:
         result = pdf_processor(path, community_code)
-    if not isinstance(result, Mapping) or not result.get("ok"):
+    if not isinstance(result, Mapping):
         return SourceAnalysis.unknown()
+    if not result.get("ok"):
+        locator = _locator_from_mapping(result, {})
+        reason = _string_value(result.get("motivo"))
+        detail = _string_value(result.get("detalle"))
+        if reason == "COMUNIDAD_NO_COINCIDE":
+            detected = _string_value(result.get("codigo_comunidad_detectado"))
+            return SourceAnalysis.informational(
+                detail or f"Documento perteneciente a la comunidad {detected or 'indicada en la fuente'}.",
+                locator=locator,
+            )
+        if reason == "PROVEEDOR_NO_IDENTIFICADO":
+            generic = classify_generic_invoice_text(
+                _string_value(result.get("fragment")) or "", locator=locator,
+            )
+            if generic is not None:
+                return generic
+        message = ": ".join(part for part in (reason, detail) if part)
+        return SourceAnalysis.unknown(message or None, locator=locator)
     raw_data = result.get("datos")
     data = raw_data if isinstance(raw_data, Mapping) else {}
     candidates = {
@@ -120,10 +212,198 @@ def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = 
     }
     locator = _locator_from_mapping(result, data)
     if result.get("tipo") == "FACTURA":
-        return SourceAnalysis.invoice(candidates, locator=locator)
+        return SourceAnalysis.invoice(
+            candidates,
+            locator=locator,
+            provider_key=_string_value(
+                result.get("provider_key", result.get("proveedor_clave"))
+            ),
+            field_evidence=(
+                result.get("field_evidence")
+                if isinstance(result.get("field_evidence"), Mapping)
+                and all(
+                    isinstance(item, FieldEvidence)
+                    for item in result.get("field_evidence", {}).values()
+                )
+                else {}
+            ),
+        )
     if result.get("tipo") == "LECTURA_METRIGEST":
         return SourceAnalysis.reading(candidates, locator=locator)
+    if result.get("tipo") == "JUSTIFICANTE_PAGO":
+        return SourceAnalysis.informational(
+            "Justificante bancario reconocido; se conserva como soporte y no se incorpora como factura.",
+            locator=locator,
+        )
     return SourceAnalysis.unknown(locator=locator)
+
+
+def _classification_locator(
+    extraction: TextExtraction,
+) -> SourceLocator:
+    return SourceLocator(
+        page=extraction.pages[0] if extraction.pages else None,
+        fragment=" ".join(extraction.text.split())[:500] or None,
+    )
+
+
+def _informational_classification(
+    classification: DocumentClassification,
+    locator: SourceLocator,
+) -> SourceAnalysis | None:
+    messages = {
+        "quote": "Presupuesto reconocido; se archiva como soporte y no entra en el reparto.",
+        "delivery_note": "Albarán reconocido; se archiva como soporte y no entra en el reparto.",
+        "bank_receipt": "Justificante bancario reconocido; se conserva como soporte y no se incorpora como factura.",
+        "report": "Informe reconocido; se conserva como soporte y no se incorpora como factura.",
+        "other": "Documento auxiliar reconocido; se conserva como soporte y no entra en el reparto.",
+    }
+    message = messages.get(classification.kind)
+    return SourceAnalysis.informational(message, locator=locator) if message else None
+
+
+def _generic_invoice_profile() -> ProviderProfile:
+    return ProviderProfile(
+        key="UNKNOWN",
+        display_name="Proveedor pendiente",
+        tax_ids=(),
+        aliases=(),
+        document_types=("invoice", "credit_note"),
+        service_family="",
+        extractor_family="standard_spanish_invoice",
+        required_signatures=(),
+        excluded_signatures=(),
+        legacy={},
+    )
+
+
+def _legacy_invoice_candidates(
+    profile: ProviderProfile,
+    text: str,
+    locator: SourceLocator,
+) -> tuple[dict[str, str | None], dict[str, FieldEvidence]]:
+    """Reuse mature provider regexes without reopening or OCRing the PDF."""
+    if not isinstance(profile.legacy.get("regex"), Mapping):
+        return {}, {}
+    from lector_pdf import extraer_datos_factura
+
+    extracted = extraer_datos_factura(text, dict(profile.legacy))
+    candidates: dict[str, str | None] = {}
+    evidence: dict[str, FieldEvidence] = {}
+    for name, value in extracted.items():
+        if value is None or isinstance(value, (dict, list, tuple)):
+            continue
+        string_value = _string_value(value)
+        candidates[str(name)] = string_value
+        evidence[str(name)] = FieldEvidence(
+            value=string_value or "",
+            confidence="medium",
+            source="provider_regex",
+            locator={"page": locator.page, "fragment": locator.fragment},
+            rule_id=f"legacy-provider:{profile.key}:{name}:v1",
+        )
+    return candidates, evidence
+
+
+def analyse_pdf_pipeline(
+    path: Path,
+    *,
+    connection: sqlite3.Connection | None,
+    community_code: str | None,
+    providers: Mapping[str, object] | None = None,
+    provider_registry: Mapping[str, ProviderProfile] | None = None,
+    text_extractor: Callable[[Path, int], TextExtraction] | None = None,
+) -> SourceAnalysis:
+    """Run the cached global pipeline used by folder and bulk ingestion."""
+    extraction = get_document_text(connection, path, extractor=text_extractor)
+    classification = classify_document(extraction.text, path.name)
+    locator = _classification_locator(extraction)
+
+    if not extraction.text.strip():
+        # Keep the mature reader as a recovery adapter for formats that the
+        # cached text service cannot decode yet.  This path is exceptional;
+        # normal documents continue through the single-pass global pipeline.
+        fallback = analyse_pdf(
+            path,
+            community_code=community_code,
+            providers=providers,
+        )
+        if fallback.kind != "unknown":
+            return fallback
+        detail = str(extraction.diagnostics.get("detail") or "No se obtuvo texto legible.")
+        return SourceAnalysis.unknown(detail, locator=locator)
+
+    informational = _informational_classification(classification, locator)
+    if informational is not None:
+        return informational
+
+    if classification.kind == "owners":
+        return SourceAnalysis.owners(locator=locator)
+
+    if classification.kind == "reading":
+        def process_preloaded(_path, selected_community):
+            from lector_pdf import procesar_archivo
+            provider_config = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+            arguments = {
+                "ruta_proveedores": str(provider_config),
+                "extracted_text": extraction.text,
+            }
+            if providers is not None:
+                arguments["proveedores"] = providers
+            return procesar_archivo(str(path), selected_community, **arguments)
+
+        return analyse_pdf(
+            path,
+            pdf_processor=process_preloaded,
+            community_code=community_code,
+            providers=providers,
+        )
+
+    if classification.kind not in {"invoice", "credit_note"}:
+        return SourceAnalysis.unknown(locator=locator)
+
+    if provider_registry is None:
+        if providers is not None:
+            provider_registry = provider_registry_from_payload(providers)
+        else:
+            provider_registry = load_provider_registry(
+                Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+            )
+    match = resolve_provider(
+        provider_registry,
+        extraction.text,
+        path.name,
+        classification.kind,
+    )
+    if match is None:
+        bundle = extract_invoice_fields(_generic_invoice_profile(), extraction.text)
+        return SourceAnalysis.invoice(
+            confidence="medium",
+            locator=locator,
+            field_evidence=bundle.fields,
+        )
+
+    profile = provider_registry[match.provider_key]
+    bundle = extract_invoice_fields(profile, extraction.text)
+    candidates = {name: item.value for name, item in bundle.fields.items()}
+    evidence = dict(bundle.fields)
+    legacy_candidates, legacy_evidence = _legacy_invoice_candidates(
+        profile, extraction.text, locator,
+    )
+    for name, value in legacy_candidates.items():
+        candidates.setdefault(name, value)
+    for name, item in legacy_evidence.items():
+        evidence.setdefault(name, item)
+    return SourceAnalysis.invoice(
+        candidates,
+        locator=locator,
+        # Provider resolution only returns a unique winner.  Combined with a
+        # structurally strong invoice classification this is safe to apply
+        # automatically even when the legacy profile has no extra signature.
+        confidence="high" if classification.confidence == "high" else "medium",
+        provider_key=match.provider_key,
+        field_evidence=evidence,
+    )
 
 
 def classify_headers(
@@ -176,6 +456,9 @@ def _tabular_headers(path: Path) -> tuple[tuple[object, ...], SourceLocator | No
 def analyse_tabular(path: Path) -> SourceAnalysis:
     """Extract explicit rows; incomplete or ambiguous tables remain reviewable."""
     try:
+        reference = _reference_workbook_analysis(path)
+        if reference is not None:
+            return reference
         rows, sheet = _tabular_rows(path)
         for index, headers in enumerate(rows[:30]):
             keys = [_normalise_header(value).replace("_", " ") for value in headers]
@@ -187,20 +470,39 @@ def analyse_tabular(path: Path) -> SourceAnalysis:
                 property_column, periods = legacy_columns
                 if len(periods) < 2:
                     raise ValueError("Faltan dos columnas de lectura por periodo")
-                candidates = _extract_rows(rows[index + 1:], {
-                    "vivienda": property_column, "val_ant": periods[0], "val_act": periods[-1],
-                })
+                candidates = _legacy_reading_rows(
+                    rows[index + 1:], property_column, periods[0], periods[-1],
+                )
                 if not candidates:
                     raise ValueError("La tabla no contiene lecturas")
                 for row in candidates:
-                    if not str(row["vivienda"] or "").strip():
-                        raise ValueError("Hay lecturas sin vivienda")
-                    row["vivienda"] = str(row["vivienda"]).strip()
                     for key in ("val_ant", "val_act"):
-                        row[key] = _tabular_number(row[key])
-                return SourceAnalysis("reading", "high", {"vecinos": _string_value(candidates)},
-                    ("tipo", "fecha_inicio", "fecha_fin"), locator,
-                    "Confirma el servicio y las fechas exactas de las columnas inicial y final.")
+                        # Los informes Meditrade dejan la celda vacía cuando
+                        # el contador informa 0. El importador histórico ya
+                        # aplica esa convención; conservarla aquí permite que
+                        # el flujo auditado decida si es un cero inicial o si
+                        # debe arrastrar la última lectura fiable.
+                        row[key] = (
+                            0.0 if row[key] in (None, "")
+                            else _tabular_number(row[key])
+                        )
+                metadata = _legacy_reading_metadata(headers, periods)
+                values = {"vecinos": _string_value(candidates), **metadata}
+                missing = tuple(
+                    field for field in ("tipo", "fecha_inicio", "fecha_fin")
+                    if not values.get(field)
+                )
+                return SourceAnalysis(
+                    "reading", "high" if not missing else "medium", values, missing, locator,
+                    "Revisa y confirma el servicio y el intervalo deducidos de las columnas de lectura.",
+                )
+            legacy_owners = _meditrade_owner_rows(rows[index + 1:], headers)
+            if legacy_owners is not None:
+                if not legacy_owners:
+                    raise ValueError("El listado no contiene propietarios completos")
+                return SourceAnalysis.owners(
+                    {"propietarios": _string_value(legacy_owners)}, locator=locator,
+                )
             reading_keys = {
                 "vivienda": ("vivienda", "propiedad", "codigo vivienda"),
                 "tipo": ("tipo", "servicio", "suministro"),
@@ -212,7 +514,11 @@ def analyse_tabular(path: Path) -> SourceAnalysis:
             owner_keys = {
                 "codigo_vivienda": ("fdenominacion", "vivienda", "propiedad", "codigo vivienda"),
                 "nombre_propietario": ("nombre", "propietario", "nombre propietario"),
-                "coeficiente": ("coeficiente",), "email": ("email", "correo"),
+                "coeficiente": (
+                    "coeficiente", "participacion", "entero participacion",
+                    "enteros participacion", "enteros de participacion",
+                ),
+                "email": ("email", "correo"),
             }
             reading_columns = _matching_columns(keys, reading_keys)
             owner_columns = _matching_columns(keys, owner_keys)
@@ -279,6 +585,152 @@ def _extract_rows(rows, columns):
     return result
 
 
+def _legacy_reading_rows(rows, property_column: int, initial_column: int, final_column: int):
+    """Return only dwelling rows from Meditrade-style printed reports.
+
+    These reports end with a community control line (code 999) and ``Totales``.
+    They are report footers, not missing homes. Rows with a real dwelling but a
+    missing reading deliberately remain candidates so the normal numeric check
+    can request a review rather than inventing a value.
+    """
+    result = []
+    for row in rows:
+        raw_vivienda = row[property_column] if property_column < len(row) else None
+        vivienda = str(raw_vivienda or "").strip()
+        if not vivienda:
+            continue
+        result.append({
+            "vivienda": vivienda,
+            "val_ant": row[initial_column] if initial_column < len(row) else None,
+            "val_act": row[final_column] if final_column < len(row) else None,
+        })
+    return result
+
+
+_READING_MONTHS = {
+    "ene": 1, "enero": 1, "feb": 2, "febrero": 2, "mar": 3, "marzo": 3,
+    "abr": 4, "abril": 4, "may": 5, "mayo": 5, "jun": 6, "junio": 6,
+    "jul": 7, "julio": 7, "ago": 8, "agosto": 8, "sep": 9, "sept": 9,
+    "septiembre": 9, "oct": 10, "octubre": 10, "nov": 11, "noviembre": 11,
+    "dic": 12, "diciembre": 12,
+}
+
+
+def _legacy_reading_metadata(headers, periods: tuple[int, ...]) -> dict[str, str]:
+    """Derive confirmable service and month boundaries from report headers."""
+    label_text = " ".join(_normalise_header(value) for value in headers)
+    service = None
+    if "acs" in label_text or "agua caliente" in label_text:
+        service = "ACS"
+    elif "calefaccion" in label_text:
+        service = "CALEFACCION"
+
+    values = [headers[index] for index in periods]
+    known_years = [
+        year for value in values
+        if (parts := re.search(r"(?:/|-)(\d{4})$", str(value or "").strip().lower()))
+        for year in (int(parts.group(1)),)
+    ]
+    start = _legacy_header_month(values[0], known_years)
+    end = _legacy_header_month(values[-1], known_years)
+    metadata: dict[str, str] = {}
+    if service:
+        metadata["tipo"] = service
+    if start:
+        metadata["fecha_inicio"] = f"{start[0]:04d}-{start[1]:02d}-01"
+    if end:
+        metadata["fecha_fin"] = f"{end[0]:04d}-{end[1]:02d}-{calendar.monthrange(*end)[1]:02d}"
+    return metadata
+
+
+def _legacy_header_month(value, known_years: list[int]) -> tuple[int, int] | None:
+    """Parse ``7/2025``, ``01/6`` or ``sep-24`` without guessing a day."""
+    text = str(value or "").strip().lower()
+    numeric = re.fullmatch(r"(\d{1,2})/(\d{1,4})", text)
+    named = re.fullmatch(r"([a-záéíóú]+)-(\d{2,4})", text)
+    if numeric:
+        month, raw_year = int(numeric.group(1)), numeric.group(2)
+    elif named:
+        month = _READING_MONTHS.get(named.group(1))
+        raw_year = named.group(2)
+    else:
+        return None
+    if not month or not 1 <= month <= 12:
+        return None
+    if len(raw_year) == 4:
+        year = int(raw_year)
+    elif len(raw_year) == 2:
+        year = 2000 + int(raw_year)
+    else:
+        suffix = int(raw_year)
+        matching = [candidate for candidate in known_years if candidate % 10 == suffix]
+        year = matching[0] if len(matching) == 1 else 2020 + suffix
+    return year, month
+
+
+def _meditrade_owner_rows(rows, headers):
+    """Read Meditrade owner reports, whose emails are printed on the next row."""
+    labels = [_normalise_header(value).replace("_", " ") for value in headers]
+    try:
+        code_column = next(index for index, value in enumerate(labels) if value in ("codigo", "cod"))
+        property_column = labels.index("propiedad")
+        name_column = labels.index("nombre")
+    except StopIteration:
+        return None
+    except ValueError:
+        return None
+    coefficient_aliases = {
+        "coeficiente", "participacion", "entero participacion",
+        "enteros participacion", "enteros de participacion",
+    }
+    coefficient_column = next(
+        (index for index, value in enumerate(labels) if value in coefficient_aliases), None,
+    )
+    result = []
+    current = None
+    from importar_propietarios_csv import _email
+    for row in rows:
+        values = [row[index] if index < len(row) else None for index in range(len(headers))]
+        email = _email(" ".join(str(value or "") for value in values))
+        code = str(values[code_column] or "").strip()
+        vivienda = str(values[property_column] or "").strip()
+        nombre = str(values[name_column] or "").strip()
+        if vivienda and nombre and re.fullmatch(r"\d+(?:\.0)?", code):
+            current = {
+                "codigo_vivienda": vivienda,
+                "nombre_propietario": nombre,
+            }
+            if coefficient_column is not None:
+                coefficient = values[coefficient_column]
+                if coefficient not in (None, ""):
+                    current["coeficiente"] = _tabular_number(coefficient)
+            if email:
+                current["email"] = email
+            result.append(current)
+        elif email and current is not None:
+            current["email"] = email
+    return result
+
+
+def _reference_workbook_analysis(path: Path) -> SourceAnalysis | None:
+    """Recognise the validated multi-sheet Excel model before row analysis."""
+    if path.suffix.lower() != ".xlsx":
+        return None
+    from openpyxl import load_workbook
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet_names = set(workbook.sheetnames)
+        required = {"DATOS", "GAS", "ELECTRICIDAD", "AGUA", "LECTURAS ACS M3", "ANALISIS"}
+        if not required.issubset(sheet_names):
+            return None
+        return SourceAnalysis.reference(locator=SourceLocator(
+            sheet="DATOS", cell="A1",
+            fragment="Modelo Excel de referencia detectado; no se añadirá como factura ni lectura operativa.",
+        ))
+    finally:
+        workbook.close()
+
+
 def _tabular_number(value):
     if value is None or isinstance(value, bool) or str(value).strip() == "":
         raise ValueError("Falta un valor numérico en la tabla")
@@ -334,12 +786,28 @@ def _tabular_rows(path):
     raise ValueError("Formato tabular no compatible")
 
 
-def analyse_source(path: Path, *, community_code: str, pdf_processor=None) -> SourceAnalysis:
+def analyse_source(path: Path, *, community_code: str, pdf_processor=None,
+                   providers: Mapping[str, object] | None = None,
+                   connection: sqlite3.Connection | None = None,
+                   provider_registry: Mapping[str, ProviderProfile] | None = None,
+                   text_extractor: Callable[[Path, int], TextExtraction] | None = None) -> SourceAnalysis:
     """Dispatch a supported source file to the appropriate analyser."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return analyse_pdf(path, pdf_processor=pdf_processor, community_code=community_code)
+        if connection is not None or provider_registry is not None or text_extractor is not None:
+            return analyse_pdf_pipeline(
+                path,
+                connection=connection,
+                community_code=community_code,
+                providers=providers,
+                provider_registry=provider_registry,
+                text_extractor=text_extractor,
+            )
+        return analyse_pdf(
+            path, pdf_processor=pdf_processor, community_code=community_code,
+            providers=providers,
+        )
     if suffix in _TABULAR_SUFFIXES:
         return analyse_tabular(path)
     return SourceAnalysis.unknown()

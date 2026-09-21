@@ -113,6 +113,37 @@ class DocumentReviewTest(unittest.TestCase):
                          [("fecha_inicio", "open")])
         self.assertEqual(issues[0].archived_path, self.document.archived_path)
 
+    def test_resolving_archived_source_issue_closes_only_the_path_incident(self):
+        duplicate = document_review.create_archived_source_issue(
+            self.connection,
+            self.case.id_case,
+            self.document.id_document,
+            duplicate_count=2,
+        )
+        other = document_review.create_review_issue(
+            self.connection,
+            self.case.id_case,
+            self.document.id_document,
+            code="SOURCE_VALUE_REVIEW",
+            field_name="importe_total",
+            message="Comprueba el importe total.",
+        )
+
+        closed = document_review.resolve_archived_source_issue(
+            self.connection,
+            self.case.id_case,
+            self.document.id_document,
+        )
+
+        self.assertEqual(1, closed)
+        self.assertEqual([other.id_issue], [
+            issue.id_issue
+            for issue in document_review.list_open_issues(self.connection, self.case.id_case)
+        ])
+        self.assertEqual("resolved", self.connection.execute(
+            "SELECT status FROM review_issues WHERE id_issue=?", (duplicate.id_issue,)
+        ).fetchone()[0])
+
     def test_candidate_context_is_persisted_without_changing_existing_callers(self):
         document_review.record_candidates(
             self.connection,
@@ -299,6 +330,43 @@ class DocumentReviewTest(unittest.TestCase):
             "SELECT estado_contador_acs FROM propietarios WHERE id_propietario=?", (owner_id,)
         ).fetchone()[0])
 
+    def test_carrying_forward_reset_source_resolves_all_its_resets_with_zero_consumption(self):
+        issue, owner_id, _period_id = self._create_counter_reset_issue(initial=100, final=5)
+
+        resolved = document_review.carry_forward_counter_resets_for_source(
+            self.connection,
+            case_id=self.case.id_case,
+            document_id=self.document.id_document,
+            reason="Lectura posterior todavía no disponible",
+            approved_by="gestora",
+        )
+
+        self.assertEqual(1, resolved)
+        reading = self.connection.execute(
+            """SELECT valor_acumulado,estado,metodo_estimacion,approved_by
+               FROM lecturas_vecino WHERE id_propietario=? AND fecha_lectura='2026-01-31'""",
+            (owner_id,),
+        ).fetchone()
+        self.assertEqual((100.0, "estimado", "counter_reset_carry_forward", "gestora"), tuple(reading))
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+
+    def test_review_groups_counter_resets_by_source(self):
+        first, _owner_id, _period_id = self._create_counter_reset_issue()
+        second = document_review.create_review_issue(
+            self.connection, self.case.id_case, self.document.id_document,
+            code="COUNTER_RESET", field_name="reading.B.ACS",
+            message="El contador disminuye y requiere una estimación aprobada",
+        )
+
+        groups = expedient_ui.group_review_issues(
+            document_review.list_open_issues(self.connection, self.case.id_case)
+        )
+
+        self.assertEqual(1, len(groups))
+        self.assertEqual((first.id_document, 2, first.id_issue), (
+            groups[0]["document_id"], groups[0]["count"], groups[0]["representative"].id_issue,
+        ))
+
     def test_counter_reset_estimate_rejects_non_positive_or_non_numeric_consumption(self):
         issue, owner_id, _period_id = self._create_counter_reset_issue()
 
@@ -452,6 +520,33 @@ class DocumentReviewTest(unittest.TestCase):
         self.assertEqual("counter_reset_estimate", expedient_ui.resolution_route_for_issue(counter))
         self.assertEqual("dismiss_invoice_outside_period", expedient_ui.resolution_route_for_issue(invoice))
         self.assertEqual("generic_correction", expedient_ui.resolution_route_for_issue(generic))
+
+
+class CounterResetIntervalTest(unittest.TestCase):
+    """El reinicio se aprueba sobre las lecturas que la incidencia señala.
+
+    Caso real de la 658: PA2-2ºC baja de 117 a 77 entre noviembre y enero. Al
+    tomar el intervalo del expediente en vez del de la incidencia se miraban
+    otras lecturas, que no bajaban, y la estimación se rechazaba con "la
+    lectura ya no es un reinicio pendiente de aprobar".
+    """
+
+    def test_interval_comes_from_the_issue_field_name(self):
+        self.assertEqual(
+            ("2025-11-01", "2026-01-31"),
+            document_review._issue_reading_dates(
+                "reading.PA2-2ºC.ACS|2025-11-01/2026-01-31", "2025-09-01", "2026-08-31",
+            ),
+        )
+
+    def test_issue_without_interval_falls_back_to_the_case(self):
+        for field in ("reading.PA2-2ºC.ACS", "reading.X.ACS|sin-barra",
+                      "reading.X.ACS|2025-13-45/2026-01-31"):
+            self.assertEqual(
+                ("2025-09-01", "2026-08-31"),
+                document_review._issue_reading_dates(field, "2025-09-01", "2026-08-31"),
+                field,
+            )
 
 
 if __name__ == "__main__":

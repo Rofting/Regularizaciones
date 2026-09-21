@@ -282,6 +282,7 @@ def apply_confirmed_readings(
         )
     }
     pending_review = False
+    unmatched: list[str] = []
 
     for reading in readings:
         if not isinstance(reading, dict):
@@ -292,11 +293,10 @@ def apply_confirmed_readings(
             raise ValueError("La lectura confirmada debe incluir vivienda y tipo válidos")
         owner = owners.get(_normalizar_vivienda(property_code))
         if owner is None:
-            _create_reading_issue(
-                con, case_id, document_id, "UNMATCHED_OWNER",
-                f"reading.{property_code}.{service}",
-                "La vivienda de la lectura no existe entre los propietarios",
-            )
+            # Una incidencia por vivienda convertía un listado desparejado en
+            # cientos de avisos idénticos. Se acumulan y se resumen en una sola
+            # al terminar el fichero.
+            unmatched.append(f"{property_code} ({service})")
             pending_review = True
             continue
         owner_id = owner["id_propietario"]
@@ -310,67 +310,364 @@ def apply_confirmed_readings(
         field_name = f"reading.{owner['codigo_vivienda']}.{service}"
         reset_status = _counter_reset_status(con, document_id, field_name, initial_date, final_date)
 
-        if final_value < initial_value:
-            if reset_status == "resolved":
-                # La aprobación ya sustituyó el valor final por una lectura virtual.
+        initial_observation = record_reading_observation(
+            con, owner_id=owner_id, service=service, reading_date=initial_date,
+            observed_value=initial_value, source_path=source_path, document_id=document_id,
+        )
+        if initial_value == 0:
+            if not apply_zero_carry_forward(
+                con, owner_id=owner_id, service=service, reading_date=initial_date,
+                period_id=period_id, observation_id=initial_observation, source_path=source_path,
+            ):
+                if _zero_review_status(con, document_id, field_name) not in {"resolved", "dismissed"}:
+                    _create_reading_issue(
+                        con, case_id, document_id, "READING_ZERO_REVIEW", field_name,
+                        "La lectura cero no tiene una lectura anterior fiable para conservar",
+                        "0",
+                    )
+                    pending_review = True
                 continue
-            if reset_status == "open":
-                pending_review = True
-                continue
+        else:
             initial_ok = _insert_confirmed_reading(
                 con, owner_id, period_id, service, initial_date, initial_value,
                 "real", source_path,
             )
-            final_ok = _insert_confirmed_reading(
-                con, owner_id, period_id, service, final_date, final_value,
-                "contador_averiado", source_path,
-                "lectura inferior a la anterior; pendiente de estimación aprobada",
+            _link_observation_to_effective_reading(
+                con, observation_id=initial_observation, owner_id=owner_id,
+                service=service, reading_date=initial_date,
+                status="observed" if initial_ok else "conflict",
             )
-            if not initial_ok or not final_ok:
+            if not initial_ok:
                 _create_reading_issue(
                     con, case_id, document_id, "READING_CONFLICT", field_name,
                     "La lectura confirmada contradice una lectura canónica existente",
                 )
-            else:
-                counter_field = (
-                    "estado_contador_acs" if service == "ACS" else "estado_contador_cal"
-                )
-                con.execute(
-                    f"UPDATE propietarios SET {counter_field}='averiado' WHERE id_propietario=?",
-                    (owner_id,),
-                )
-                issue = _create_reading_issue(
-                    con, case_id, document_id, "COUNTER_RESET",
-                    f"{field_name}|{initial_date}/{final_date}",
-                    "El contador disminuye y requiere una estimación aprobada",
-                    f"{initial_value} -> {final_value}",
-                )
-                targets = con.execute("""SELECT id_lectura,fecha_lectura FROM lecturas_vecino
-                    WHERE id_propietario=? AND tipo=? AND fecha_lectura IN (?,?)""",
-                    (owner_id, service, initial_date, final_date)).fetchall()
-                by_date = {row['fecha_lectura']: row['id_lectura'] for row in targets}
-                con.execute("""INSERT OR IGNORE INTO counter_reset_targets
-                    (id_issue,initial_reading_id,final_reading_id) VALUES (?,?,?)""",
-                    (issue.id_issue, by_date[initial_date], by_date[final_date]))
-            pending_review = True
+                pending_review = True
+                continue
+
+        final_observation = record_reading_observation(
+            con, owner_id=owner_id, service=service, reading_date=final_date,
+            observed_value=final_value, source_path=source_path, document_id=document_id,
+        )
+        if final_value == 0:
+            if not apply_zero_carry_forward(
+                con, owner_id=owner_id, service=service, reading_date=final_date,
+                period_id=period_id, observation_id=final_observation, source_path=source_path,
+            ):
+                if _zero_review_status(con, document_id, field_name) not in {"resolved", "dismissed"}:
+                    _create_reading_issue(
+                        con, case_id, document_id, "READING_ZERO_REVIEW", field_name,
+                        "La lectura cero no tiene una lectura anterior fiable para conservar",
+                        "0",
+                    )
+                    pending_review = True
             continue
 
-        initial_ok = _insert_confirmed_reading(
-            con, owner_id, period_id, service, initial_date, initial_value,
-            "real", source_path,
-        )
+        if final_value < initial_value:
+            # Un contador que baja suele ser una lectura provisional rota. La
+            # cifra recibida permanece en reading_observations, pero para el
+            # cálculo se conserva la última lectura fiable hasta que una lectura
+            # posterior recupere la continuidad. Una sustitución real se
+            # confirmará por el flujo explícito de cambio de contador.
+            carried = apply_decrease_carry_forward(
+                con, owner_id=owner_id, service=service, reading_date=final_date,
+                period_id=period_id, observation_id=final_observation,
+                source_path=source_path,
+            )
+            if not carried:
+                _create_reading_issue(
+                    con, case_id, document_id, "READING_INITIAL_REQUIRED", field_name,
+                    "La lectura disminuye y no existe una lectura anterior fiable; "
+                    "introduce la lectura inicial del contador",
+                    str(final_value),
+                )
+                pending_review = True
+            continue
+
         final_ok = _insert_confirmed_reading(
             con, owner_id, period_id, service, final_date, final_value,
             "real", source_path,
         )
-        if not initial_ok or not final_ok:
+        _link_observation_to_effective_reading(
+            con, observation_id=final_observation, owner_id=owner_id,
+            service=service, reading_date=final_date,
+            status="observed" if final_ok else "conflict",
+        )
+        if not final_ok:
             _create_reading_issue(
                 con, case_id, document_id, "READING_CONFLICT", field_name,
                 "La lectura confirmada contradice una lectura canónica existente",
             )
             pending_review = True
 
+    if unmatched:
+        muestra = ", ".join(unmatched[:5])
+        resto = f" y {len(unmatched) - 5} más" if len(unmatched) > 5 else ""
+        _create_reading_issue(
+            con, case_id, document_id, "UNMATCHED_OWNER",
+            f"reading.sin_propietario.{document_id}",
+            f"{len(unmatched)} lectura(s) de este fichero no corresponden a ningún "
+            f"propietario de la comunidad: {muestra}{resto}. Revisa el listado de "
+            f"propietarios o los códigos de vivienda del fichero.",
+            detected_value="; ".join(unmatched),
+        )
+
     return pending_review
+
+
+def record_reading_observation(
+    con: sqlite3.Connection,
+    *,
+    owner_id: int,
+    service: str,
+    reading_date: str,
+    observed_value: float,
+    source_path: str,
+    document_id: int,
+) -> int:
+    """Registra el valor de origen antes de decidir su proyección canónica."""
+    existing = con.execute(
+        """SELECT id_observation FROM reading_observations
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?
+             AND observed_value=? AND id_document=?
+           ORDER BY id_observation DESC LIMIT 1""",
+        (owner_id, service, reading_date, observed_value, document_id),
+    ).fetchone()
+    if existing is not None:
+        return int(existing["id_observation"])
+    cursor = con.execute(
+        """INSERT INTO reading_observations
+           (id_propietario,tipo,fecha_lectura,observed_value,source_path,id_document,status)
+           VALUES (?,?,?,?,?,?,'observed')""",
+        (owner_id, service, reading_date, observed_value, source_path, document_id),
+    )
+    return int(cursor.lastrowid)
+
+
+def _link_observation_to_effective_reading(
+    con: sqlite3.Connection,
+    *,
+    observation_id: int,
+    owner_id: int,
+    service: str,
+    reading_date: str,
+    status: str,
+) -> None:
+    effective = con.execute(
+        """SELECT id_lectura FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
+        (owner_id, service, reading_date),
+    ).fetchone()
+    con.execute(
+        """UPDATE reading_observations
+           SET status=?, effective_reading_id=? WHERE id_observation=?""",
+        (status, effective["id_lectura"] if effective is not None else None, observation_id),
+    )
+
+
+def apply_zero_carry_forward(
+    con: sqlite3.Connection,
+    *,
+    owner_id: int,
+    service: str,
+    reading_date: str,
+    period_id: int,
+    observation_id: int,
+    source_path: str,
+) -> bool:
+    """Conserva la última lectura válida al recibir un cero, sin ocultarlo."""
+    current_reference = con.execute(
+        """SELECT id_lectura FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?
+             AND valor_acumulado<>0
+             AND (
+                 estado='real'
+                 OR (
+                     estado='estimado'
+                     AND metodo_estimacion='counter_reset_carry_forward'
+                     AND trim(COALESCE(approved_by,''))<>''
+                     AND trim(COALESCE(approved_at,''))<>''
+                 )
+             )""",
+        (owner_id, service, reading_date),
+    ).fetchone()
+    if current_reference is not None:
+        con.execute(
+            "INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+            (current_reference["id_lectura"], period_id),
+        )
+        con.execute(
+            """UPDATE reading_observations
+               SET status='carried_forward',effective_reading_id=?
+               WHERE id_observation=?""",
+            (current_reference["id_lectura"], observation_id),
+        )
+        return True
+    confirmed_zero = con.execute(
+        """SELECT id_lectura FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?
+             AND valor_acumulado=0 AND estado='real'""",
+        (owner_id, service, reading_date),
+    ).fetchone()
+    if confirmed_zero is not None:
+        con.execute(
+            "INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+            (confirmed_zero["id_lectura"], period_id),
+        )
+        con.execute(
+            """UPDATE reading_observations
+               SET status='observed',effective_reading_id=?,previous_reading_id=NULL
+               WHERE id_observation=?""",
+            (confirmed_zero["id_lectura"], observation_id),
+        )
+        return True
+    previous = con.execute(
+        """SELECT id_lectura,valor_acumulado FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura < ?
+             AND (estado='real' OR (estado='estimado'
+                  AND trim(COALESCE(approved_by,''))<>''
+                  AND trim(COALESCE(approved_at,''))<>''))
+           ORDER BY fecha_lectura DESC,id_lectura DESC LIMIT 1""",
+        (owner_id, service, reading_date),
+    ).fetchone()
+    if previous is None:
+        con.execute(
+            "UPDATE reading_observations SET status='review_required' WHERE id_observation=?",
+            (observation_id,),
+        )
+        return False
+    current = con.execute(
+        """SELECT id_lectura,valor_acumulado,estado,metodo_estimacion
+           FROM lecturas_vecino WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
+        (owner_id, service, reading_date),
+    ).fetchone()
+    if current is not None and (
+        abs(float(current["valor_acumulado"]) - float(previous["valor_acumulado"])) > 0.01
+        or current["estado"] == "real"
+    ):
+        con.execute(
+            "UPDATE reading_observations SET status='conflict' WHERE id_observation=?",
+            (observation_id,),
+        )
+        return False
+    if current is None:
+        cursor = con.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,
+                metodo_estimacion,fuente,notas)
+               VALUES (?,?,?,?,?,'estimado','carry_forward_zero',?,?)""",
+            (
+                owner_id, period_id, service, reading_date, previous["valor_acumulado"],
+                source_path, f"Lectura 0 recibida; se conserva la lectura válida de {reading_date}.",
+            ),
+        )
+        effective_id = int(cursor.lastrowid)
+    else:
+        effective_id = int(current["id_lectura"])
+    con.execute(
+        "INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+        (effective_id, period_id),
+    )
+    con.execute(
+        """UPDATE reading_observations
+           SET status='carried_forward',effective_reading_id=?,previous_reading_id=?
+           WHERE id_observation=?""",
+        (effective_id, previous["id_lectura"], observation_id),
+    )
+    return True
+
+
+def apply_decrease_carry_forward(
+    con: sqlite3.Connection,
+    *,
+    owner_id: int,
+    service: str,
+    reading_date: str,
+    period_id: int,
+    observation_id: int,
+    source_path: str,
+) -> bool:
+    """Publica la última lectura fiable cuando la observación disminuye.
+
+    El valor observado nunca se modifica. La proyección canónica temporal
+    evita consumos negativos y se reemplaza naturalmente cuando llega una
+    lectura real igual o superior a la última fiable.
+    """
+    previous = con.execute(
+        """SELECT id_lectura,valor_acumulado FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura < ?
+             AND valor_acumulado>0
+             AND (estado='real' OR (estado='estimado'
+                  AND metodo_estimacion='counter_reset_carry_forward'
+                  AND trim(COALESCE(approved_by,''))<>''
+                  AND trim(COALESCE(approved_at,''))<>''))
+           ORDER BY fecha_lectura DESC,id_lectura DESC LIMIT 1""",
+        (owner_id, service, reading_date),
+    ).fetchone()
+    if previous is None:
+        con.execute(
+            "UPDATE reading_observations SET status='review_required' WHERE id_observation=?",
+            (observation_id,),
+        )
+        return False
+
+    current = con.execute(
+        """SELECT id_lectura,estado,metodo_estimacion FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
+        (owner_id, service, reading_date),
+    ).fetchone()
+    notes = (
+        "Lectura acumulada inferior a la última fiable; se conserva "
+        f"temporalmente la lectura {previous['valor_acumulado']}."
+    )
+    if current is None:
+        cursor = con.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,
+                metodo_estimacion,fuente,notas)
+               VALUES (?,?,?,?,?,'estimado','carry_forward_decrease',?,?)""",
+            (
+                owner_id, period_id, service, reading_date,
+                previous["valor_acumulado"], source_path, notes,
+            ),
+        )
+        effective_id = int(cursor.lastrowid)
+    elif current["estado"] == "contador_averiado" or (
+        current["estado"] == "estimado"
+        and current["metodo_estimacion"] in (None, "carry_forward_decrease")
+    ):
+        con.execute(
+            """UPDATE lecturas_vecino
+               SET valor_acumulado=?,estado='estimado',
+                   metodo_estimacion='carry_forward_decrease',fuente=?,notas=?,
+                   approved_by=NULL,approved_at=NULL
+               WHERE id_lectura=?""",
+            (previous["valor_acumulado"], source_path, notes, current["id_lectura"]),
+        )
+        effective_id = int(current["id_lectura"])
+    else:
+        con.execute(
+            "UPDATE reading_observations SET status='conflict' WHERE id_observation=?",
+            (observation_id,),
+        )
+        return False
+
+    con.execute(
+        "INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+        (effective_id, period_id),
+    )
+    con.execute(
+        """UPDATE reading_observations
+           SET status='carried_forward',effective_reading_id=?,previous_reading_id=?
+           WHERE id_observation=?""",
+        (effective_id, previous["id_lectura"], observation_id),
+    )
+    counter_field = "estado_contador_acs" if service == "ACS" else "estado_contador_cal"
+    con.execute(
+        f"UPDATE propietarios SET {counter_field}='ok' WHERE id_propietario=?",
+        (owner_id,),
+    )
+    return True
 
 
 def _confirmed_date(value: object) -> str:
@@ -446,6 +743,26 @@ def _counter_reset_status(
         (document_id, field_name, f"{field_name}|{initial_date}/{final_date}", initial_date, final_date),
     ).fetchone()
     return row["status"] if row is not None else None
+
+
+def _zero_review_status(
+    con: sqlite3.Connection, document_id: int, field_name: str,
+) -> str | None:
+    """Estado de la última revisión de este cero en esta misma fuente.
+
+    Sin esta comprobación, cada reaplicación de la fuente volvía a abrir la
+    incidencia que la persona acababa de cerrar: resolvías, se reaplicaba el
+    fichero, se detectaba el mismo cero y nacía una incidencia nueva. En la
+    658 llegaron a encadenarse seis para la misma vivienda.
+    """
+    row = con.execute(
+        """SELECT status FROM review_issues
+           WHERE id_document=? AND code='READING_ZERO_REVIEW' AND field_name=?
+           ORDER BY id_issue DESC LIMIT 1""",
+        (document_id, field_name),
+    ).fetchone()
+    return row["status"] if row is not None else None
+
 
 
 def _create_reading_issue(

@@ -1,5 +1,6 @@
 import sqlite3
 import json
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -10,12 +11,94 @@ from typing import Callable, Collection, Iterator, Mapping
 import document_review
 import expedient_service
 import gestor_bd
+from excel_profiles import configured_profile_paths, load_profile
 from importar_lecturas_metrigest import apply_confirmed_readings
 from expedient_models import RegularizationCase, SourceDocument, document_from_row
 from source_analysis import SourceAnalysis, analyse_source
+from source_eligibility import evaluate_invoice_eligibility
 
 
 _savepoint_counter = count()
+
+
+def _active_modules_for_case(
+    connection: sqlite3.Connection,
+    case_id: int,
+) -> tuple[str, ...] | None:
+    """Return configured modules, or None when no unique profile exists."""
+    rows = connection.execute(
+        """SELECT cases.id_comunidad,communities.codigo,profiles.profile_key
+             FROM regularization_cases cases
+             JOIN comunidades communities
+               ON communities.id_comunidad=cases.id_comunidad
+             LEFT JOIN excel_template_profiles profiles
+               ON profiles.id_comunidad=cases.id_comunidad
+              AND profiles.status='active'
+            WHERE cases.id_case=?
+            ORDER BY profiles.id_template_profile""",
+        (case_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    project_root = Path(__file__).resolve().parents[1]
+    profile_keys = tuple(
+        str(item["profile_key"]) for item in rows if item["profile_key"]
+    )
+    try:
+        if len(profile_keys) == 1:
+            return tuple(load_profile(profile_keys[0], project_root).active_modules)
+        if profile_keys:
+            return None
+        matching = []
+        for path in configured_profile_paths(project_root):
+            profile = load_profile(path.stem, project_root)
+            if profile.community_code == str(rows[0]["codigo"]):
+                matching.append(profile)
+    except (LookupError, ValueError, OSError):
+        return None
+    if len(matching) != 1:
+        return None
+    return tuple(matching[0].active_modules)
+
+
+def _invoice_eligibility_for_case(
+    connection: sqlite3.Connection,
+    case_id: int,
+    candidates: Mapping[str, str | None],
+) -> tuple[str, str | None] | None:
+    modules = _active_modules_for_case(connection, case_id)
+    service = str(candidates.get("tipo_suministro") or "").strip()
+    start_value = str(candidates.get("fecha_inicio") or "").strip()
+    end_value = str(candidates.get("fecha_fin") or "").strip()
+    if modules is None or not service or not start_value or not end_value:
+        return None
+    try:
+        period_start = date.fromisoformat(start_value)
+        period_end = date.fromisoformat(end_value)
+    except ValueError:
+        return None
+    case = connection.execute(
+        """SELECT communities.codigo,cases.fecha_inicio,cases.fecha_fin
+             FROM regularization_cases cases
+             JOIN comunidades communities
+               ON communities.id_comunidad=cases.id_comunidad
+            WHERE cases.id_case=?""",
+        (case_id,),
+    ).fetchone()
+    if case is None:
+        return None
+    decision = evaluate_invoice_eligibility(
+        community_code=str(case["codigo"]),
+        case_start=date.fromisoformat(str(case["fecha_inicio"])),
+        case_end=date.fromisoformat(str(case["fecha_fin"])),
+        active_modules=modules,
+        document_kind="invoice",
+        service_family=service,
+        period_start=period_start,
+        period_end=period_end,
+        community_confidence="high",
+    )
+    return decision.status, decision.reason
 
 
 @contextmanager
@@ -82,31 +165,69 @@ def _required_fields_for_kind(analysis: SourceAnalysis, document_kind: str) -> t
     """Uses the effective classification, not a conflicting automatic guess."""
     if document_kind == analysis.kind:
         return tuple(field.strip() for field in analysis.required_fields)
-    if document_kind == "invoice":
-        return SourceAnalysis.invoice().required_fields
-    return ()
+    required_by_kind = {
+        "invoice": SourceAnalysis.invoice().required_fields,
+        "reading": ("tipo", "fecha_inicio", "fecha_fin", "vecinos"),
+        "owners": ("propietarios",),
+    }
+    return tuple(required_by_kind.get(document_kind, ()))
 
 
-def _replace_unvalidated_candidates_not_in_analysis(
+def _is_unmistakable_invoice(analysis: SourceAnalysis, candidates: Mapping[str, str | None]) -> bool:
+    """Exige evidencia completa antes de corregir una clasificación manual."""
+    if analysis.kind != "invoice" or analysis.confidence.strip().lower() != "high":
+        return False
+    if not candidates.get("proveedor") or candidates.get("vecinos") or candidates.get("propietarios"):
+        return False
+    for field_name in ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"):
+        value = candidates.get(field_name)
+        if value is None or not str(value).strip():
+            return False
+        try:
+            document_review.validate_candidate_value(field_name, str(value))
+        except ValueError:
+            return False
+    return True
+
+
+def _recover_invalid_confirmed_candidates(
     connection: sqlite3.Connection,
+    case_id: int,
     document_id: int,
+    analysis: SourceAnalysis,
     candidates: Mapping[str, str | None],
 ) -> None:
-    """Evita que valores automáticos obsoletos bloqueen una nueva revisión."""
-    candidate_names = {field.strip() for field in candidates}
+    """Recupera sólo valores manuales inválidos con una extracción fiable."""
+    if analysis.confidence.strip().lower() != "high":
+        return
     rows = connection.execute(
-        """SELECT field_name FROM extraction_candidates
-           WHERE id_document = ?
-             AND validation_status NOT IN ('validated', 'rejected')""",
+        """SELECT field_name,value FROM extraction_candidates
+           WHERE id_document=? AND source='manual' AND validation_status='validated'""",
         (document_id,),
     ).fetchall()
     for row in rows:
-        if row["field_name"] not in candidate_names:
-            connection.execute(
-                """DELETE FROM extraction_candidates
-                   WHERE id_document = ? AND field_name = ?
-                     AND validation_status NOT IN ('validated', 'rejected')""",
-                (document_id, row["field_name"]),
+        field_name = row["field_name"]
+        replacement = candidates.get(field_name)
+        if replacement is None or not str(replacement).strip():
+            continue
+        try:
+            document_review.validate_candidate_value(field_name, str(row["value"] or ""))
+        except ValueError:
+            try:
+                document_review.validate_candidate_value(field_name, str(replacement))
+            except ValueError:
+                continue
+            document_review.record_automatic_candidate_recovery(
+                connection,
+                case_id,
+                document_id,
+                field_name=field_name,
+                original_value=row["value"],
+                corrected_value=str(replacement),
+                reason=(
+                    "El valor confirmado no supera la validación semántica y "
+                    "se recupera desde un análisis de confianza alta."
+                ),
             )
 
 
@@ -119,23 +240,131 @@ def _persist_analysis(
     reanalysis: bool,
 ) -> None:
     analysis = _normalised_analysis(analysis)
-    candidates = {field.strip(): value for field, value in analysis.candidates.items()}
+    candidates = {
+        field.strip(): value
+        for field, value in analysis.candidates.items()
+        if field not in analysis.field_evidence
+        or analysis.field_evidence[field].confidence.lower() != "low"
+    }
+    if analysis.disposition == "non_operational":
+        eligibility_status, eligibility_reason = "not_applicable", "non_operational"
+    elif analysis.kind == "unknown":
+        eligibility_status, eligibility_reason = "review_required", "document_unknown"
+    elif analysis.kind == "invoice" and analysis.field_evidence and not analysis.provider_key:
+        eligibility_status, eligibility_reason = "review_required", "provider_unknown"
+    elif analysis.kind == "invoice":
+        eligibility = _invoice_eligibility_for_case(connection, case_id, candidates)
+        if eligibility is None:
+            eligibility_status, eligibility_reason = "eligible", None
+        else:
+            eligibility_status, eligibility_reason = eligibility
+    else:
+        # Legacy analyses already validated by their provider-specific parser
+        # remain compatible while the new orchestrator is rolled out.
+        eligibility_status, eligibility_reason = "eligible", None
     with _transaction(connection):
+        stored = connection.execute(
+            """SELECT document_kind,classification_confidence,source_context
+               FROM source_documents WHERE id_document=? AND id_case=?""",
+            (document.id_document, case_id),
+        ).fetchone()
+        if stored is None:
+            raise LookupError("El documento no pertenece al expediente")
         confirmed_kind = document_review.resolved_classification_kind(
             connection, document.id_document,
         )
-        effective_kind = confirmed_kind or analysis.kind.strip()
+        if (
+            confirmed_kind
+            and analysis.kind == "other"
+            and analysis.confidence.strip().lower() == "high"
+            and analysis.disposition == "non_operational"
+        ):
+            document_review.record_automatic_candidate_recovery(
+                connection,
+                case_id,
+                document.id_document,
+                field_name="document_kind",
+                original_value=confirmed_kind,
+                corrected_value="other",
+                reason=(
+                    analysis.review_message
+                    or "Documento informativo reconocido con confianza alta; no interviene en el cálculo."
+                ),
+            )
+            confirmed_kind = None
+        if (
+            confirmed_kind in {"reading", "owners"}
+            and _is_unmistakable_invoice(analysis, candidates)
+        ):
+            document_review.record_automatic_candidate_recovery(
+                connection,
+                case_id,
+                document.id_document,
+                field_name="document_kind",
+                original_value=confirmed_kind,
+                corrected_value="invoice",
+                reason=(
+                    "Proveedor y campos completos de factura detectados con confianza alta; "
+                    "la clasificación anterior no contiene lecturas ni propietarios."
+                ),
+            )
+            confirmed_kind = None
+        uninformative = analysis.kind == "unknown" and not any(
+            value is not None and str(value).strip() for value in candidates.values()
+        )
+        effective_kind = confirmed_kind or (
+            stored["document_kind"] if uninformative else analysis.kind.strip()
+        )
+        effective_confidence = (
+            stored["classification_confidence"]
+            if uninformative and stored["classification_confidence"]
+            else analysis.confidence.strip()
+        )
+        effective_context = (
+            stored["source_context"]
+            if uninformative and stored["source_context"]
+            else _compact_context(analysis)
+        )
         required_fields = _required_fields_for_kind(analysis, effective_kind)
         connection.execute(
             """UPDATE source_documents
-               SET document_kind = ?, classification_confidence = ?, source_context = ?
+               SET document_kind = ?, classification_confidence = ?, source_context = ?,
+                   provider_key = ?, analysis_version = ?, eligibility_status = ?,
+                   eligibility_reason = ?,
+                   status = CASE
+                       WHEN ? = 'not_applicable' THEN 'not_applicable'
+                       WHEN status = 'not_applicable' THEN 'registered'
+                       ELSE status
+                   END
                WHERE id_document = ? AND id_case = ?""",
-            (effective_kind, analysis.confidence.strip(), _compact_context(analysis), document.id_document, case_id),
+            (
+                effective_kind, effective_confidence, effective_context,
+                analysis.provider_key, analysis.analysis_version,
+                eligibility_status, eligibility_reason,
+                eligibility_status,
+                document.id_document, case_id,
+            ),
         )
-        if reanalysis:
-            _replace_unvalidated_candidates_not_in_analysis(
-                connection, document.id_document, candidates,
+        for field_name, evidence in analysis.field_evidence.items():
+            connection.execute(
+                """INSERT INTO source_field_evidence (
+                       id_document,field_name,value,confidence,source,locator_json,
+                       rule_id,extractor_version
+                   ) VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id_document,field_name,rule_id,extractor_version)
+                   DO UPDATE SET value=excluded.value,confidence=excluded.confidence,
+                                 source=excluded.source,locator_json=excluded.locator_json,
+                                 created_at=datetime('now')""",
+                (
+                    document.id_document, field_name, evidence.value,
+                    evidence.confidence, evidence.source,
+                    json.dumps(dict(evidence.locator), ensure_ascii=False),
+                    evidence.rule_id, evidence.extractor_version,
+                ),
             )
+        _recover_invalid_confirmed_candidates(
+            connection, case_id, document.id_document, analysis, candidates,
+        )
         document_review.record_candidates(
             connection,
             document.id_document,
@@ -149,7 +378,67 @@ def _persist_analysis(
             document_review.clear_open_automatic_issues(
                 connection, case_id, document.id_document,
             )
+        if eligibility_reason == "provider_unknown":
+            document_review.create_review_issue(
+                connection,
+                case_id,
+                document.id_document,
+                code="PROVIDER_UNKNOWN",
+                field_name="document.provider",
+                detected_value=None,
+                message=(
+                    "No se ha identificado con seguridad el emisor. Confirma el proveedor "
+                    "una sola vez; después se reanalizarán sus fechas e importes."
+                ),
+            )
+            return
+        if eligibility_status == "not_applicable":
+            return
         if (
+            eligibility_status == "review_required"
+            and eligibility_reason not in {"document_unknown", "provider_unknown"}
+            and effective_kind == "invoice"
+        ):
+            messages = {
+                "period_outside_case": (
+                    "La factura pertenece a otro período. Confirma el expediente correcto "
+                    "antes de incorporarla al reparto."
+                ),
+                "service_unknown": (
+                    "El servicio de la factura no coincide con los conceptos configurados "
+                    "para esta comunidad."
+                ),
+            }
+            document_review.create_review_issue(
+                connection,
+                case_id,
+                document.id_document,
+                code="ELIGIBILITY_REVIEW_REQUIRED",
+                field_name="document.eligibility",
+                detected_value=eligibility_reason,
+                message=messages.get(
+                    eligibility_reason,
+                    "La factura necesita una decisión de aplicabilidad antes del reparto.",
+                ),
+            )
+            return
+        classification_conflict = bool(
+            confirmed_kind
+            and effective_kind != analysis.kind
+            and analysis.kind == "invoice"
+            and _looks_like_invoice(candidates)
+        )
+        if classification_conflict:
+            document_review.create_classification_required_issue(
+                connection,
+                case_id,
+                document.id_document,
+                message=(
+                    "La clasificación guardada no coincide con el nuevo análisis, que parece una factura. "
+                    "Confirma el tipo correcto antes de aplicar la fuente."
+                ),
+            )
+        elif (
             effective_kind == "unknown"
             and not document_review.has_closed_classification_outcome(
                 connection, document.id_document,
@@ -178,6 +467,262 @@ def _source_document(connection: sqlite3.Connection, document_id: int) -> Source
     if row is None:
         raise LookupError("El documento no existe")
     return document_from_row(row)
+
+
+def _community_has_owners(connection: sqlite3.Connection, case_id: int) -> bool:
+    """¿Hay ya propietarios contra los que emparejar las lecturas?"""
+    return connection.execute(
+        """SELECT 1 FROM propietarios AS owners
+           JOIN regularization_cases AS cases ON cases.id_comunidad = owners.id_comunidad
+           WHERE cases.id_case = ? AND owners.activo = 1 LIMIT 1""",
+        (case_id,),
+    ).fetchone() is not None
+
+
+
+def _auto_apply_clean_analysis(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document: SourceDocument,
+    analysis: SourceAnalysis,
+) -> SourceDocument:
+    """Aplica fuentes inequívocas; las dudas siguen llegando a incidencias.
+
+    La confirmación por pantalla era útil como salvaguarda inicial, pero no
+    debe convertir un lote limpio de facturas en cientos de clics. Sólo se
+    publica automáticamente un análisis de confianza alta, sin incidencias y
+    de un tipo operativo conocido. Las extracciones incompletas permanecen
+    pendientes para la revisión humana normal.
+    """
+    if analysis.confidence.strip().lower() != "high":
+        return document
+    eligibility = connection.execute(
+        "SELECT eligibility_status FROM source_documents WHERE id_document=?",
+        (document.id_document,),
+    ).fetchone()
+    if eligibility is not None and eligibility[0] != "eligible":
+        return document
+    if document.document_kind not in {"invoice", "owners", "reading"}:
+        return document
+    if document.document_kind == "reading" and not _community_has_owners(connection, case_id):
+        # Sin el listado de propietarios, cada vivienda de cada fichero de
+        # lecturas abriría su propia incidencia de "vivienda desconocida".
+        # La fuente espera: auto_apply_case_sources la aplicará después, ya
+        # en su orden (propietarios, facturas y luego lecturas).
+        return document
+    if _has_open_document_issues(connection, document.id_document):
+        return document
+    required_by_kind = {
+        "invoice": ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"),
+        "owners": ("propietarios",),
+        "reading": ("tipo", "fecha_inicio", "fecha_fin", "vecinos"),
+    }
+    values = {
+        row["field_name"]: row["value"]
+        for row in connection.execute(
+            """SELECT field_name,value FROM extraction_candidates
+               WHERE id_document=? AND value IS NOT NULL AND trim(value)<>''""",
+            (document.id_document,),
+        ).fetchall()
+    }
+    if any(not values.get(field) for field in required_by_kind[document.document_kind]):
+        return document
+    try:
+        return confirm_source_candidates(
+            connection, case_id, document.id_document,
+            confirmed_by="deteccion_automatica",
+        )
+    except (ValueError, LookupError):
+        # ``confirm_source_candidates`` contiene las comprobaciones canónicas
+        # adicionales (por ejemplo, tipo de suministro). Materializamos sólo
+        # los campos que falten para que la interfaz los muestre como una
+        # incidencia concreta, no como una confirmación masiva.
+        document_review.create_missing_field_issues(
+            connection, case_id, document.id_document,
+            required_by_kind[document.document_kind],
+        )
+        return _source_document(connection, document.id_document)
+
+
+def auto_apply_case_sources(connection: sqlite3.Connection, case_id: int) -> tuple[int, int]:
+    """Aplica de una vez las fuentes seguras ya presentes en un expediente.
+
+    También sanea expedientes creados antes de la validación automática. El
+    resultado es ``(aplicadas, pendientes)`` y nunca cierra incidencias ni
+    inventa valores para una fuente incompleta.
+    """
+    rows = connection.execute(
+        """SELECT id_document FROM source_documents
+           WHERE id_case=? AND classification_confidence='high'
+             AND document_kind IN ('invoice','reading','owners')""",
+        (case_id,),
+    ).fetchall()
+    order = {"owners": 0, "invoice": 1, "reading": 2}
+    rows = sorted(
+        rows,
+        key=lambda row: order[_source_document(connection, int(row["id_document"])).document_kind],
+    )
+    applied = 0
+    for row in rows:
+        document = _source_document(connection, int(row["id_document"]))
+        before = document.status
+        result = _auto_apply_clean_analysis(
+            connection, case_id, document,
+            SourceAnalysis(document.document_kind, "high"),
+        )
+        if before != "validated" and result.status == "validated":
+            applied += 1
+    pending = _open_issue_count(connection, case_id)
+    return applied, pending
+
+
+def list_pending_sources(
+    connection: sqlite3.Connection, case_id: int,
+) -> tuple[SourceDocument, ...]:
+    """Devuelve fuentes operativas que aún necesitan revisión o aplicación."""
+    rows = connection.execute(
+        """SELECT d.id_document
+           FROM source_documents AS d
+           WHERE d.id_case=? AND d.classification_confidence IS NOT NULL
+             AND d.document_kind<>'other' AND (
+               d.status<>'validated' OR d.document_kind='unknown'
+               OR NOT EXISTS (
+                   SELECT 1 FROM archivos_procesados AS a
+                   WHERE a.nombre_archivo='source_document:' || d.id_document
+               )
+               OR EXISTS (
+                   SELECT 1 FROM extraction_candidates AS c
+                   WHERE c.id_document=d.id_document
+                     AND c.validation_status='candidate'
+                     AND c.value IS NOT NULL AND trim(c.value)<>''
+               )
+             )
+           ORDER BY d.id_document""",
+        (case_id,),
+    ).fetchall()
+    return tuple(_source_document(connection, int(row["id_document"])) for row in rows)
+
+
+def _candidate_values(connection: sqlite3.Connection, document_id: int) -> dict[str, str]:
+    rows = connection.execute(
+        """SELECT field_name,value FROM extraction_candidates
+           WHERE id_document=? AND value IS NOT NULL AND trim(value)<>''
+             AND validation_status<>'rejected'""",
+        (document_id,),
+    ).fetchall()
+    return {row["field_name"]: row["value"] for row in rows}
+
+
+def _reading_required_fields(values: Mapping[str, str]) -> tuple[str, ...]:
+    """Obtiene los datos de cabecera que faltan en filas de lectura heredadas."""
+    raw_rows = values.get("vecinos")
+    if not raw_rows:
+        return ("tipo", "fecha_inicio", "fecha_fin", "vecinos")
+    try:
+        rows = json.loads(raw_rows)
+    except (json.JSONDecodeError, TypeError):
+        return ("vecinos",)
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        return ("vecinos",)
+    required = []
+    for row_field, candidate_field in (
+        ("tipo", "tipo"), ("fecha_ant", "fecha_inicio"), ("fecha_act", "fecha_fin"),
+    ):
+        if any(not row.get(row_field) for row in rows):
+            required.append(candidate_field)
+    return tuple(required)
+
+
+def _structured_candidate_error(field_name: str, value: str) -> str | None:
+    if field_name not in {"vecinos", "propietarios"}:
+        return None
+    try:
+        rows = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return f"El campo {field_name} no tiene un formato de lista válido."
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        return f"El campo {field_name} debe contener una lista no vacía de registros."
+    if field_name == "propietarios" and any(
+        not row.get("codigo_vivienda") or not row.get("nombre_propietario") for row in rows
+    ):
+        return "Cada propietario necesita una vivienda y un nombre."
+    return None
+
+
+def _invalid_candidate_message(field_name: str, value: str) -> str | None:
+    structured_error = _structured_candidate_error(field_name, value)
+    if structured_error:
+        return structured_error
+    try:
+        document_review.validate_candidate_value(field_name, value)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _looks_like_invoice(values: Mapping[str, str]) -> bool:
+    return bool(values.get("tipo_suministro") and values.get("importe_total"))
+
+
+def ensure_pending_source_issues(connection: sqlite3.Connection, case_id: int) -> int:
+    """Convierte toda fuente bloqueante en una decisión visible y resoluble."""
+    created_before = _open_issue_count(connection, case_id)
+    for document in list_pending_sources(connection, case_id):
+        if _has_open_document_issues(connection, document.id_document):
+            continue
+        values = _candidate_values(connection, document.id_document)
+        if (
+            document.document_kind in {"reading", "owners"}
+            and _looks_like_invoice(values)
+            and not values.get("vecinos")
+            and not values.get("propietarios")
+        ):
+            document_review.create_classification_required_issue(
+                connection, case_id, document.id_document,
+                message=(
+                    "La clasificación guardada no coincide con el contenido extraído, que parece una factura. "
+                    "Confirma el tipo correcto antes de aplicar la fuente."
+                ),
+            )
+            continue
+        if document.document_kind == "invoice":
+            required = ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total")
+        elif document.document_kind == "owners":
+            required = ("propietarios",)
+        elif document.document_kind == "reading":
+            required = _reading_required_fields(values)
+        elif document.document_kind == "unknown":
+            if not document_review.has_closed_classification_outcome(
+                connection, document.id_document,
+            ):
+                document_review.create_classification_required_issue(
+                    connection, case_id, document.id_document,
+                    message="Confirma si la fuente es una factura, lectura, propietarios u otro documento.",
+                )
+            continue
+        else:
+            continue
+
+        document_review.create_missing_field_issues(
+            connection, case_id, document.id_document, required,
+        )
+        fields_to_validate = set(required)
+        if document.document_kind == "owners":
+            fields_to_validate.add("propietarios")
+        elif document.document_kind == "reading":
+            fields_to_validate.add("vecinos")
+        for field_name in fields_to_validate:
+            value = values.get(field_name)
+            if not value:
+                continue
+            message = _invalid_candidate_message(field_name, value)
+            if message:
+                document_review.create_invalid_field_issue(
+                    connection, case_id, document.id_document,
+                    field_name=field_name, detected_value=value,
+                    message=message,
+                )
+    return _open_issue_count(connection, case_id) - created_before
 
 
 def _open_issue_count(connection: sqlite3.Connection, case_id: int) -> int:
@@ -240,7 +785,7 @@ def apply_confirmed_source(
                 connection, case, period_id, document, values, already_applied,
             )
         elif document.document_kind == "owners":
-            _apply_confirmed_owners(connection, case, values)
+            _apply_confirmed_owners(connection, case, document, values)
         else:
             raise ValueError("Sólo se pueden aplicar facturas, lecturas o propietarios confirmados")
 
@@ -290,12 +835,17 @@ def confirm_source_candidates(connection: sqlite3.Connection, case_id: int,
         return result
 
 
-def _apply_confirmed_owners(connection: sqlite3.Connection, case: RegularizationCase,
-                            values: Mapping[str, str]) -> None:
+def _apply_confirmed_owners(
+    connection: sqlite3.Connection,
+    case: RegularizationCase,
+    document: SourceDocument,
+    values: Mapping[str, str],
+) -> None:
     _required_confirmed(values, "propietarios")
     rows = json.loads(values["propietarios"])
     if not isinstance(rows, list) or not rows:
         raise ValueError("La fuente debe contener propietarios confirmados")
+    coefficient_conflicts: list[dict[str, object]] = []
     for row in rows:
         if not isinstance(row, dict) or not row.get("codigo_vivienda") or not row.get("nombre_propietario"):
             raise ValueError("Cada propietario necesita vivienda y nombre")
@@ -305,17 +855,51 @@ def _apply_confirmed_owners(connection: sqlite3.Connection, case: Regularization
             if coefficient is None or coefficient < 0:
                 raise ValueError("El coeficiente debe ser un número no negativo")
             fields["coeficiente"] = coefficient
-        owner = connection.execute("SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda=?",
-                                   (case.community_id, row["codigo_vivienda"])).fetchone()
+        # El mismo piso llega de fuentes distintas ('MP-1ºA' y 'MP-1ºA    ');
+        # sin normalizar, la búsqueda falla y se inserta una segunda fila que
+        # duplica el coeficiente y parte las lecturas en dos.
+        codigo = gestor_bd.normalizar_codigo_vivienda(row["codigo_vivienda"])
+        owner = connection.execute(
+            """SELECT id_propietario,coeficiente FROM propietarios
+               WHERE id_comunidad=? AND codigo_vivienda=?""",
+            (case.community_id, codigo),
+        ).fetchone()
         if owner:
+            incoming = fields.get("coeficiente")
+            current = owner["coeficiente"]
+            if (
+                incoming is not None and current is not None
+                and abs(float(incoming) - float(current)) > 0.0001
+            ):
+                coefficient_conflicts.append({
+                    "vivienda": codigo,
+                    "guardado": float(current),
+                    "detectado": float(incoming),
+                })
+                # La participación registral sólo cambia mediante una
+                # corrección explícita. El resto de datos de la fuente sí se
+                # puede actualizar sin perder la discrepancia.
+                fields.pop("coeficiente", None)
             assignments = ','.join(f'{key}=?' for key in fields)
             connection.execute(f"UPDATE propietarios SET {assignments} WHERE id_propietario=?",
                                (*fields.values(), owner[0]))
         else:
+            fields["tipo_unidad"] = gestor_bd.clasificar_tipo_unidad(codigo)
             columns = ','.join(fields)
             placeholders = ','.join('?' for _ in fields)
             connection.execute(f"INSERT INTO propietarios(id_comunidad,codigo_vivienda,{columns}) VALUES (?,?,{placeholders})",
-                               (case.community_id, row["codigo_vivienda"], *fields.values()))
+                               (case.community_id, codigo, *fields.values()))
+    if coefficient_conflicts:
+        document_review.create_review_issue(
+            connection, case.id_case, document.id_document,
+            code="OWNER_COEFFICIENT_CONFLICT", field_name="coeficientes",
+            detected_value=json.dumps(coefficient_conflicts, ensure_ascii=False),
+            message=(
+                f"{len(coefficient_conflicts)} participación(es) difieren de los valores "
+                "registrales guardados. Se han conservado los valores existentes; "
+                "revise el listado y confirme sólo si realmente han cambiado."
+            ),
+        )
 
 
 def _confirmed_candidate_values(
@@ -359,7 +943,9 @@ def _apply_confirmed_invoice(
     values: Mapping[str, str],
     already_applied: sqlite3.Row | None,
 ) -> int | None:
-    _required_confirmed(values, "tipo_suministro", "importe_total")
+    _required_confirmed(
+        values, "tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total",
+    )
     numeric_fields = (
         "consumo_total", "termino_fijo", "termino_variable", "impuestos", "iva",
     )
@@ -573,6 +1159,7 @@ def add_analysed_document_to_case(
     _persist_analysis(
         connection, case_id, document, analysis, reanalysis=not created,
     )
+    document = _auto_apply_clean_analysis(connection, case_id, document, analysis)
     return IngestionResult(
         _source_document(connection, document.id_document),
         created,
@@ -592,7 +1179,9 @@ def _case_analyser(
     ).fetchone()
     if row is None:
         raise LookupError("El expediente no existe")
-    return lambda path: analyse_source(path, community_code=row["codigo"])
+    return lambda path: analyse_source(
+        path, community_code=row["codigo"], connection=connection,
+    )
 
 
 def reanalyze_case_documents(
@@ -600,8 +1189,23 @@ def reanalyze_case_documents(
     case_id: int,
     *,
     analyser: Callable[[Path], SourceAnalysis] | None = None,
+    archive_root: str | Path | None = None,
 ) -> tuple[IngestionResult, ...]:
-    """Actualiza sólo los datos automáticos de las fuentes de un expediente."""
+    """Actualiza los datos automáticos y recupera rutas archivadas verificables."""
+    source_archive_root = (
+        Path(archive_root)
+        if archive_root is not None
+        else Path(__file__).resolve().parents[1] / "data" / "expedientes"
+    )
+    expedient_service.repair_archived_source_paths(
+        connection, archive_root=source_archive_root, case_id=case_id,
+    )
+    ambiguous_sources = {
+        item.document_id: item
+        for item in expedient_service.list_archived_path_candidates(
+            connection, archive_root=source_archive_root, case_id=case_id,
+        )
+    }
     active_analyser = analyser or _case_analyser(connection, case_id)
     documents = connection.execute(
         """SELECT id_document, id_case, original_name, archived_path, sha256,
@@ -612,6 +1216,20 @@ def reanalyze_case_documents(
     results = []
     for row in documents:
         document = document_from_row(row)
+        if not document.archived_path.is_file():
+            candidate_set = ambiguous_sources.get(document.id_document)
+            document_review.create_archived_source_issue(
+                connection,
+                case_id,
+                document.id_document,
+                duplicate_count=(len(candidate_set.candidate_paths) if candidate_set else 0),
+            )
+            results.append(IngestionResult(
+                _source_document(connection, document.id_document),
+                False,
+                _open_issue_count(connection, case_id),
+            ))
+            continue
         _persist_analysis(
             connection,
             case_id,

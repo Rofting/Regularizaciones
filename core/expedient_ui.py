@@ -1,5 +1,6 @@
 import os
 import json
+import sqlite3
 import stat
 import sys
 import tkinter as tk
@@ -8,17 +9,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypeVar
 
 import customtkinter as ctk
 
 import case_ingestion
+import cuotas_servicio
+import community_discovery
 import community_onboarding
 import document_review
 import expedient_service
 import gestor_bd
+import source_batch
 import ui_moderna as UIM
-from source_analysis import analyse_source
 from expedient_models import ReviewIssue
 from ui_moderna import C
 
@@ -28,6 +31,20 @@ if TYPE_CHECKING:
 
 
 _SOURCE_SUFFIXES = frozenset({".pdf", ".xlsx", ".xls", ".csv"})
+_Issue = TypeVar("_Issue")
+
+
+def issue_page(
+    issues: Sequence[_Issue], page: int, page_size: int = 10,
+) -> tuple[tuple[_Issue, ...], int, int]:
+    """Return one bounded, one-based page without losing the total page count."""
+    if page_size < 1:
+        raise ValueError("El tamaño de página debe ser positivo")
+    items = tuple(issues)
+    total_pages = max(1, (len(items) + page_size - 1) // page_size)
+    normalised_page = min(max(int(page), 1), total_pages)
+    start = (normalised_page - 1) * page_size
+    return items[start:start + page_size], normalised_page, total_pages
 
 
 def source_summary(kinds) -> str:
@@ -44,6 +61,24 @@ def source_summary(kinds) -> str:
         f"{counts[kind]} {singular if counts[kind] == 1 else plural}"
         for kind, singular, plural in labels if counts[kind]
     ) or "Sin documentos analizados"
+
+
+def group_review_issues(issues: Sequence[ReviewIssue]) -> tuple[dict[str, object], ...]:
+    """Agrupa revisiones repetidas del mismo informe en una sola decisión."""
+    groups: list[dict[str, object]] = []
+    repeatable_groups: dict[tuple[int, str], dict[str, object]] = {}
+    for issue in issues:
+        if issue.code not in {"COUNTER_RESET", "READING_ZERO_REVIEW"}:
+            groups.append({"document_id": issue.id_document, "count": 1, "representative": issue})
+            continue
+        key = (issue.id_document, issue.code)
+        group = repeatable_groups.get(key)
+        if group is None:
+            group = {"document_id": issue.id_document, "count": 0, "representative": issue}
+            repeatable_groups[key] = group
+            groups.append(group)
+        group["count"] = int(group["count"]) + 1
+    return tuple(groups)
 
 
 def issue_context_label(source_context: str | None) -> str:
@@ -95,6 +130,80 @@ def show_issue_context(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     )
 
 
+def _history_event_label(event_type: str, details_json: str) -> str:
+    """Turn durable audit events into concise labels for the period review."""
+    try:
+        details = json.loads(details_json or "{}")
+    except (TypeError, ValueError):
+        details = {}
+    labels = {
+        "source_registered": "Fuente archivada",
+        "source_status_changed": "Estado de fuente actualizado",
+        "manual_correction": "Decisión registrada",
+        "case_status_changed": "Estado del expediente actualizado",
+        "excel_export_recorded": "Excel oficial registrado",
+        "letters_recorded": "Lote de cartas registrado",
+    }
+    title = labels.get(event_type, event_type.replace("_", " ").capitalize())
+    meaningful = [
+        str(details[key]) for key in ("name", "field", "reason", "to", "status", "output_path")
+        if details.get(key) not in (None, "")
+    ]
+    return title + (" · " + " · ".join(meaningful) if meaningful else "")
+
+
+def open_case_history_dialog(app: "AppGestionFincas", case_id: int) -> None:
+    """Lets a manager audit any selected historical period without reprocessing it."""
+    dialog = _dialog(app, "Historial del período", 820, 620)
+    panel = ctk.CTkScrollableFrame(dialog)
+    panel.pack(fill="both", expand=True, padx=16, pady=16)
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        rows = connection.execute(
+            """SELECT h.event_type,h.details_json,h.created_at,d.original_name
+                 FROM case_history_events h
+                 LEFT JOIN source_documents d ON d.id_document=h.id_document
+                WHERE h.id_case=?
+                ORDER BY h.created_at DESC,h.id_event DESC""",
+            (case_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    if not rows:
+        ctk.CTkLabel(
+            panel,
+            text=("Todavía no hay eventos del período. Las fuentes, lecturas y resultados "
+                  "se conservarán aquí a medida que se incorporen o validen."),
+            justify="left", wraplength=720, text_color=C["texto_sec"],
+        ).pack(anchor="w", padx=14, pady=18)
+        return
+    ctk.CTkLabel(
+        panel,
+        text="Historial inmutable del expediente",
+        font=UIM.fuente(17, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=12, pady=(10, 3))
+    ctk.CTkLabel(
+        panel,
+        text=("Incluye fuentes archivadas, decisiones manuales y salidas. "
+              "Las lecturas originales no se sustituyen."),
+        wraplength=720, justify="left", text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=12, pady=(0, 12))
+    for row in rows:
+        card = ctk.CTkFrame(panel, fg_color=C["panel"], corner_radius=10,
+                            border_width=1, border_color=C["borde"])
+        card.pack(fill="x", padx=8, pady=4)
+        ctk.CTkLabel(
+            card, text=_history_event_label(row["event_type"], row["details_json"]),
+            font=UIM.fuente(11, "bold"), text_color=C["texto"], anchor="w",
+            wraplength=670,
+        ).pack(fill="x", padx=12, pady=(9, 2))
+        source = f" · {row['original_name']}" if row["original_name"] else ""
+        ctk.CTkLabel(
+            card, text=f"{row['created_at']}{source}", font=UIM.fuente(10),
+            text_color=C["texto_sec"], anchor="w", wraplength=670,
+        ).pack(fill="x", padx=12, pady=(0, 9))
+
+
 @dataclass(frozen=True)
 class GuidedStep:
     """One visible step in the guided regularization workspace."""
@@ -115,6 +224,27 @@ class GuidedWorkspaceState:
     steps: tuple[GuidedStep, ...]
 
 
+@dataclass(frozen=True)
+class ReviewSummary:
+    """Separates stored technical checks from the decisions a manager must take."""
+
+    technical_count: int
+    groups: tuple[dict[str, object], ...]
+
+    @property
+    def actionable_count(self) -> int:
+        return len(self.groups)
+
+
+def review_summary(issues: Sequence[ReviewIssue]) -> ReviewSummary:
+    """Collapse repeatable checks without hiding their underlying audit rows."""
+    items = tuple(issues)
+    return ReviewSummary(
+        technical_count=len(items),
+        groups=group_review_issues(items),
+    )
+
+
 _GUIDED_STEP_LABELS = (
     ("fuentes", "Fuentes"),
     ("validar", "Validar"),
@@ -125,6 +255,7 @@ _GUIDED_STEP_LABELS = (
 
 def guided_workspace_state(
     *, has_case: bool, document_count: int, open_issue_count: int, case_status: str,
+    has_registered_template: bool = True,
 ) -> GuidedWorkspaceState:
     """Returns the next safe user action without replacing workflow service gates."""
     if not has_case:
@@ -134,11 +265,19 @@ def guided_workspace_state(
     elif open_issue_count:
         active_step, next_action = "validar", "resolver_incidencias"
         headline = "Resuelve las incidencias"
-        detail = f"Hay {open_issue_count} dato(s) pendiente(s) antes de continuar."
+        detail = f"Hay {open_issue_count} decisión(es) pendiente(s) antes de continuar."
     elif case_status in {"ready_for_calculation"}:
+        # Ya no se pide el modelo inicial: si la comunidad no tiene plantilla,
+        # generar la crea desde el modelo canónico del despacho. «Importar
+        # modelo inicial» sigue disponible para partir de un libro propio.
         active_step, next_action = "reparto", "generar_excel"
         headline = "Genera el Excel oficial"
-        detail = "Las fuentes están validadas; prepara el modelo antes del reparto final."
+        detail = (
+            "Las fuentes están validadas; prepara el modelo antes del reparto final."
+            if has_registered_template else
+            "Las fuentes están validadas. Se creará la plantilla de esta comunidad "
+            "a partir del modelo del despacho."
+        )
     elif case_status in {"calculated"}:
         active_step, next_action = "reparto", "calcular_reparto"
         headline = "Calcula el reparto final"
@@ -150,15 +289,21 @@ def guided_workspace_state(
     elif case_status in {"deliveries_generated", "closed"}:
         active_step, next_action = "cartas", "abrir_salidas"
         headline = "Cartas generadas"
-        detail = "Puedes abrir las salidas o revisar los documentos generados."
+        detail = (
+            "Puedes abrir las salidas o repetir Excel, reparto o cartas. "
+            "Cada repetición conserva las ejecuciones anteriores en el historial."
+        )
     elif document_count <= 0 or case_status in {"draft", "gathering_sources", ""}:
         active_step, next_action = "fuentes", "anadir_fuentes"
         headline = "Incorpora las fuentes"
         detail = "Añade facturas, lecturas y Excel del período para iniciar la revisión."
     elif case_status == "under_review":
-        active_step, next_action = "validar", "resolver_incidencias"
-        headline = "Comprueba la validación"
-        detail = "Revisa las fuentes incorporadas y confirma los datos que el sistema solicite."
+        active_step, next_action = "validar", "confirmar_fuentes"
+        headline = "Confirmar fuentes"
+        detail = (
+            "No quedan incidencias. Confirma y aplica las fuentes al expediente "
+            "antes de generar el Excel oficial."
+        )
     else:
         active_step, next_action = "fuentes", "anadir_fuentes"
         headline = "Completa las fuentes"
@@ -232,6 +377,176 @@ def source_files_in_folder(folder: Path) -> list[Path]:
         ),
         key=lambda path: str(path.relative_to(root)).casefold(),
     )
+
+
+def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
+    """Offer automatic creation for clear community groups in a source folder."""
+    if getattr(app, "_procesando", False):
+        messagebox.showwarning("Espera", "Termina la operación actual antes de analizar una carpeta.", parent=app)
+        return
+    folder = filedialog.askdirectory(parent=app, title="Selecciona la carpeta con documentos de comunidades")
+    if not folder:
+        return
+    paths = source_files_in_folder(Path(folder))
+    if not paths:
+        messagebox.showwarning(
+            "Sin fuentes compatibles",
+            "La carpeta no contiene PDF, XLSX, XLS o CSV visibles.",
+            parent=app,
+        )
+        return
+
+    app._estado("Detectando comunidades en la carpeta…", procesando=True)
+
+    def work():
+        try:
+            proposal = community_discovery.build_global_intake(paths)
+            candidates = community_discovery.discover_communities(paths)
+        except Exception as error:
+            def failed():
+                app._estado("No se pudo analizar la carpeta", procesando=False)
+                messagebox.showerror("No se pudo analizar la carpeta", str(error), parent=app)
+            app.after(0, failed)
+            return
+        app.after(0, lambda: _show_detected_communities(
+            app, Path(folder), candidates, len(paths), proposal,
+        ))
+
+    app._en_hilo(work)
+
+
+def _show_detected_communities(
+    app: "AppGestionFincas", folder: Path, candidates, source_count: int, proposal,
+) -> None:
+    app._estado("Detección de comunidades lista", procesando=False)
+    dialog = _dialog(app, "Comunidades detectadas", 800, 620)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16,
+                         border_width=1, border_color=C["borde"])
+    panel.pack(fill="both", expand=True, padx=18, pady=18)
+    ctk.CTkLabel(panel, text="Comunidades detectadas", font=UIM.fuente(21, "bold"),
+                 text_color=C["texto"]).pack(anchor="w", padx=22, pady=(20, 2))
+    ctk.CTkLabel(
+        panel,
+        text=(f"Se han revisado {source_count} archivo(s) de {folder.name}. "
+              "Se han agrupado sin usar la comunidad o el período seleccionados. "
+              "Los originales no se moverán ni se modificarán."),
+        font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=720, justify="left",
+    ).pack(anchor="w", padx=22, pady=(0, 14))
+
+    body = ctk.CTkScrollableFrame(panel, fg_color=C["panel_2"], corner_radius=11)
+    body.pack(fill="both", expand=True, padx=22, pady=(0, 12))
+    approved = []
+    groups_by_code = {group.community_code: group for group in proposal.groups}
+    for candidate in candidates:
+        row = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=10,
+                           border_width=1, border_color=C["borde"])
+        row.pack(fill="x", padx=8, pady=6)
+        variable = tk.BooleanVar(value=candidate.can_create, master=dialog)
+        if candidate.can_create:
+            approved.append((candidate, variable))
+        ctk.CTkCheckBox(row, text="", variable=variable, width=26,
+                         state="normal" if candidate.can_create else "disabled",
+                         fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left", padx=(12, 4), pady=12)
+        details = ctk.CTkFrame(row, fg_color="transparent")
+        details.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=11)
+        ctk.CTkLabel(details, text=f"{candidate.code} — {candidate.name}",
+                     font=UIM.fuente(12, "bold"), text_color=C["texto"]).pack(anchor="w")
+        group = groups_by_code.get(candidate.code)
+        cif_text = candidate.cif or "CIF no localizado"
+        group_detail = ""
+        if group is not None:
+            services = ", ".join(group.supply_hints) or "tipo por revisar"
+            group_detail = (
+                f"{len(group.source_paths)} documento(s) · {group.display_periods} · "
+                f"{services}"
+            )
+        ctk.CTkLabel(
+            details,
+            text=(candidate.blocked_reason or
+                  f"{group_detail or f'{len(candidate.source_paths)} documento(s)'} · {cif_text}"),
+            font=UIM.fuente(10),
+            text_color=C["alerta"] if candidate.blocked_reason else C["texto_sec"],
+            wraplength=560, justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+
+    if proposal.unassigned_paths:
+        ctk.CTkLabel(
+            body,
+            text=(f"{len(proposal.unassigned_paths)} documento(s) quedan sin comunidad asignada: "
+                  "no se asociarán a la comunidad activa. Renómbralos con el código o revísalos desde la bandeja."),
+            font=UIM.fuente(10), text_color=C["alerta"], wraplength=680, justify="left",
+        ).pack(anchor="w", padx=14, pady=(10, 14))
+
+    if not candidates:
+        ctk.CTkLabel(
+            body,
+            text="No se ha encontrado un código seguro. Nombra los archivos con el código al inicio (por ejemplo, 658_factura.pdf) o guárdalos dentro de una carpeta llamada 658.",
+            font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=650, justify="left",
+        ).pack(anchor="w", padx=14, pady=14)
+
+    footer = ctk.CTkFrame(panel, fg_color="transparent")
+    footer.pack(fill="x", padx=22, pady=(0, 18))
+
+    def create_selected():
+        selected = tuple(candidate for candidate, variable in approved if variable.get())
+        if not selected:
+            messagebox.showwarning("Sin comunidades seleccionadas", "Marca al menos una comunidad detectada.", parent=dialog)
+            return
+        for widget in footer.winfo_children():
+            widget.configure(state="disabled")
+        app._estado("Creando comunidades detectadas…", procesando=True)
+
+        def create_work():
+            connection = None
+            try:
+                connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+                created = []
+                for candidate in selected:
+                    community_id = gestor_bd.obtener_o_crear_comunidad(
+                        connection, candidate.code, candidate.name, cif=candidate.cif,
+                    )
+                    created.append((community_id, candidate))
+            except Exception as error:
+                def failed():
+                    app._estado("No se pudieron crear las comunidades", procesando=False)
+                    for widget in footer.winfo_children():
+                        widget.configure(state="normal")
+                    messagebox.showerror("No se pudieron crear las comunidades", str(error), parent=dialog)
+                app.after(0, failed)
+                return
+            finally:
+                if connection is not None:
+                    connection.close()
+
+            def completed():
+                for _community_id, candidate in created:
+                    app._crear_excel_si_no_existe(candidate.code, candidate.name)
+                app._cargar_comunidades()
+                first = created[0][1]
+                option = f"{first.code} — {first.name}"
+                if option in getattr(app, "_ids_comunidad", {}):
+                    app.comunidad_actual.set(option)
+                    app.cb_comunidad.set(option)
+                    app._on_comunidad_seleccionada()
+                app._estado("Comunidades detectadas creadas", procesando=False)
+                dialog.destroy()
+                messagebox.showinfo(
+                    "Comunidades creadas",
+                    f"Se han creado o actualizado {len(created)} comunidad(es).\n\n"
+                    "Los documentos originales permanecen en su carpeta. Selecciona una comunidad y crea su expediente antes de añadir sus fuentes al flujo guiado.",
+                    parent=app,
+                )
+            app.after(0, completed)
+
+        app._en_hilo(create_work)
+
+    ctk.CTkButton(footer, text="Crear comunidades seleccionadas", command=create_selected,
+                  height=38, corner_radius=9, font=UIM.fuente(11, "bold"),
+                  fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right")
+    ctk.CTkButton(footer, text="Cancelar", command=dialog.destroy, height=38,
+                  corner_radius=9, font=UIM.fuente(11), fg_color="transparent",
+                  border_width=1, border_color=C["borde"], text_color=C["primario"],
+                  hover_color=C["acento_suave"]).pack(side="right", padx=(0, 8))
 
 
 def issue_guidance(field_name: str) -> dict[str, str]:
@@ -1214,6 +1529,28 @@ def _field(parent, label: str, row: int, *, placeholder: str = ""):
     return entry
 
 
+def _packed_field(parent, label: str, *, placeholder: str = ""):
+    """Campo apilado para paneles que ya distribuyen sus hijos con ``pack``."""
+    ctk.CTkLabel(
+        parent,
+        text=label.upper(),
+        font=UIM.fuente(10, "bold"),
+        text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=22, pady=(13, 4))
+    entry = ctk.CTkEntry(
+        parent,
+        height=38,
+        corner_radius=9,
+        border_color=C["borde"],
+        fg_color=C["panel_2"],
+        text_color=C["texto"],
+        placeholder_text=placeholder,
+        font=UIM.fuente(12),
+    )
+    entry.pack(fill="x", padx=22)
+    return entry
+
+
 def open_create_case_dialog(app: "AppGestionFincas") -> None:
     if not getattr(app, "id_comunidad", None):
         messagebox.showwarning(
@@ -1391,8 +1728,55 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
             duplicate_count = 0
             errors = []
             kinds = []
-            total = len(paths)
-            for index, path in enumerate(paths, start=1):
+            lookup = gestor_bd.conectar(database_path)
+            try:
+                case_ingestion.assert_case_belongs_to_community(
+                    lookup, case_id, community_id,
+                )
+                community = lookup.execute(
+                    "SELECT codigo FROM comunidades WHERE id_comunidad = ?", (community_id,),
+                ).fetchone()
+                community_code = community["codigo"]
+            finally:
+                lookup.close()
+            accepted_paths, foreign_paths = community_discovery.partition_sources_for_community(
+                (Path(path) for path in paths), community_code,
+            )
+            if foreign_paths:
+                app.log(
+                    f"Se han apartado {len(foreign_paths)} fuente(s) que indican otra comunidad. "
+                    "Impórtalas desde Bandeja global.",
+                    "aviso",
+                )
+            total = len(accepted_paths)
+            phase_labels = {
+                "hashing": "Calculando huella",
+                "text": "Leyendo texto",
+                "classification": "Clasificando",
+                "provider": "Identificando proveedor",
+                "fields": "Extrayendo campos",
+                "completed": "Finalizado",
+            }
+
+            def batch_progress(event):
+                label = phase_labels.get(event.phase, event.phase)
+                filename = f": {event.filename}" if event.filename else ""
+                app.after(
+                    0,
+                    lambda text=f"{label} {event.completed}/{event.total}{filename}":
+                    app._estado(text, procesando=True),
+                )
+
+            batch_items = source_batch.analyse_batch(
+                accepted_paths,
+                community_code=community_code,
+                database_path=database_path,
+                max_workers=3,
+                progress=batch_progress,
+            )
+            for index, item in enumerate(batch_items, start=1):
+                source_path = item.path
+                path = str(source_path)
                 filename = Path(path).name
                 connection = None
                 app._estado(
@@ -1400,19 +1784,22 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                     procesando=True,
                 )
                 app.log(f"Fuente {index} de {total}: {filename}", "info")
+                if item.error is not None or item.analysis is None:
+                    errors.append((filename, item.error or "Análisis sin resultado"))
+                    app.log(
+                        f"No se pudo analizar {filename}: {item.error or 'sin resultado'}",
+                        "error",
+                    )
+                    continue
                 try:
                     connection = gestor_bd.conectar(database_path)
                     case_ingestion.assert_case_belongs_to_community(connection, case_id, community_id)
-                    community = connection.execute(
-                        "SELECT codigo FROM comunidades WHERE id_comunidad = ?", (community_id,),
-                    ).fetchone()
-                    analysis = analyse_source(Path(path), community_code=community["codigo"])
                     result = case_ingestion.add_analysed_document_to_case(
                         connection,
                         case_id,
                         source_path=path,
                         archive_root=archive_root,
-                        analysis=analysis,
+                        analysis=item.analysis,
                     )
                 except Exception as exc:
                     errors.append((filename, str(exc)))
@@ -1441,6 +1828,11 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                     "Fuentes analizadas",
                     f"{source_summary(kinds)}\n\n{created_count} nuevas · {duplicate_count} duplicadas · {len(errors)} con error\n"
                     "Revisa las incidencias del expediente para confirmar los datos pendientes."
+                    + (
+                        f"\n\n{len(foreign_paths)} fuente(s) de otras comunidades se apartaron. "
+                        "Usa Bandeja global para clasificarlas."
+                        if foreign_paths else ""
+                    )
                     + ("\n\n" + "\n".join(f"{name}: {error}" for name, error in errors) if errors else ""),
                     parent=app,
                 )
@@ -1490,68 +1882,392 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
 
 
 def open_confirm_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
-    """Show extracted values and explicitly apply each reviewed source."""
+    """Muestra sólo fuentes con dudas después de aplicar las seguras en lote."""
     dialog = _dialog(app, "Confirmar fuentes", 850, 720)
     panel = ctk.CTkScrollableFrame(dialog)
     panel.pack(fill="both", expand=True, padx=16, pady=16)
 
+    def confirm_pending_source(document_id: int) -> None:
+        error = None
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            result = case_ingestion.confirm_source_candidates(
+                connection, case_id, document_id, confirmed_by="usuario_local",
+            )
+            if result.status != "validated":
+                error = "La fuente necesita resolver las nuevas incidencias detectadas antes de continuar."
+        except (LookupError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            connection.rollback()
+            error = str(exc)
+            case_ingestion.ensure_pending_source_issues(connection, case_id)
+        finally:
+            connection.close()
+        if error:
+            messagebox.showwarning(
+                "No se pudo confirmar la fuente", error, parent=dialog,
+            )
+        else:
+            app.log("Fuente confirmada y aplicada al expediente.", "ok")
+        render()
+
     def render():
+        ready_for_calculation = False
         for widget in panel.winfo_children():
             widget.destroy()
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
-            documents = connection.execute("""SELECT id_document,original_name,document_kind,status
-                FROM source_documents WHERE id_case=? AND document_kind IN ('invoice','reading','owners')
-                ORDER BY id_document""", (case_id,)).fetchall()
-            for document in documents:
+            automatic, _pending = case_ingestion.auto_apply_case_sources(connection, case_id)
+            case_ingestion.ensure_pending_source_issues(connection, case_id)
+            issues = document_review.list_open_issues(connection, case_id)
+            issue_document_ids = {issue.id_document for issue in issues}
+            pending_sources = tuple(
+                source for source in case_ingestion.list_pending_sources(connection, case_id)
+                if source.id_document not in issue_document_ids
+            )
+            if not issues and not pending_sources:
+                document_review.validate_case_ready(connection, case_id)
+                ready_for_calculation = True
+            for grouped in group_review_issues(issues):
+                issue = grouped["representative"]
+                reset_count = int(grouped["count"])
                 group = ctk.CTkFrame(panel)
                 group.pack(fill="x", pady=8)
-                ctk.CTkLabel(group, text=f"{document['original_name']} · {document['document_kind']} · {document['status']}",
-                             wraplength=740).pack(anchor="w", padx=12, pady=8)
-                candidates = connection.execute("""SELECT field_name,value,validation_status
-                    FROM extraction_candidates WHERE id_document=? ORDER BY field_name""",
-                    (document['id_document'],)).fetchall()
-                for candidate in candidates:
-                    ctk.CTkLabel(group, text=f"{candidate['field_name']}: {candidate['value'] or 'Pendiente'}",
-                                 wraplength=740, justify="left").pack(anchor="w", padx=12, pady=3)
-                    ctk.CTkButton(group, text=f"Corregir {candidate['field_name']}",
-                        command=lambda document_id=document['id_document'], field=candidate['field_name']:
-                            correct(document_id, field)).pack(anchor="w", padx=12, pady=2)
-                ctk.CTkButton(group, text="Confirmar fuente",
-                    command=lambda document_id=document['id_document']: confirm(document_id)).pack(anchor="e", padx=12, pady=10)
-            if not documents:
-                ctk.CTkLabel(panel, text="No hay fuentes reconocidas pendientes de confirmación.").pack(pady=16)
+                ctk.CTkLabel(
+                    group, text=Path(issue.archived_path).name,
+                    font=UIM.fuente(12, "bold"), wraplength=740,
+                ).pack(anchor="w", padx=12, pady=(10, 2))
+                if issue.code == "COUNTER_RESET" and reset_count > 1:
+                    message = (
+                        f"Se detectaron {reset_count} contadores reiniciados en el mismo informe de período. "
+                        "Puedes conservar de una vez la última lectura válida de cada vivienda hasta que "
+                        "lleguen lecturas posteriores fiables."
+                    )
+                    action_text = f"Mantener lecturas previas ({reset_count})"
+                    action = lambda selected=issue, count=reset_count: (
+                        dialog.destroy(),
+                        open_counter_reset_carry_forward_dialog(
+                            app, selected.id_case, selected.id_document, count,
+                            Path(selected.archived_path).name,
+                        ),
+                    )
+                elif issue.code == "READING_ZERO_REVIEW":
+                    message = (
+                        f"Se detectaron {reset_count} lecturas a 0 en el mismo informe. "
+                        "Se conserva una lectura canónica ya existente; si no la hay, el cero se confirma "
+                        "como lectura inicial. Cada decisión queda auditada."
+                    )
+                    action_text = f"Aplicar criterio a ceros ({reset_count})"
+                    action = lambda selected=issue, count=reset_count: (
+                        dialog.destroy(),
+                        open_initial_zero_confirmation_dialog(
+                            app, selected.id_case, selected.id_document, count,
+                            Path(selected.archived_path).name,
+                        ),
+                    )
+                else:
+                    message = issue.message
+                    action_text = "Resolver incidencia"
+                    action = lambda selected=issue: (
+                        dialog.destroy(), open_issue_dialog(app, selected),
+                    )
+                ctk.CTkLabel(
+                    group, text=message, wraplength=740, justify="left",
+                    text_color=C["texto_sec"],
+                ).pack(anchor="w", padx=12, pady=(0, 6))
+                ctk.CTkButton(
+                    group, text=action_text, height=32, corner_radius=8,
+                    fg_color=C["primario"], hover_color=C["primario_hover"],
+                    command=action,
+                ).pack(anchor="e", padx=12, pady=(0, 10))
+            kind_labels = {
+                "invoice": "Factura", "reading": "Lecturas", "owners": "Propietarios",
+            }
+            for source in pending_sources:
+                group = ctk.CTkFrame(panel)
+                group.pack(fill="x", pady=8)
+                ctk.CTkLabel(
+                    group, text=source.original_name,
+                    font=UIM.fuente(12, "bold"), wraplength=740,
+                ).pack(anchor="w", padx=12, pady=(10, 2))
+                ctk.CTkLabel(
+                    group,
+                    text=(
+                        f"Tipo: {kind_labels.get(source.document_kind, source.document_kind)}. "
+                        "Los datos están completos, pero necesitan tu confirmación antes de aplicarse."
+                    ),
+                    wraplength=740, justify="left", text_color=C["texto_sec"],
+                ).pack(anchor="w", padx=12, pady=(0, 6))
+                ctk.CTkButton(
+                    group, text="Confirmar fuente", height=32, corner_radius=8,
+                    fg_color=C["primario"], hover_color=C["primario_hover"],
+                    command=lambda document_id=source.id_document: confirm_pending_source(document_id),
+                ).pack(anchor="e", padx=12, pady=(0, 10))
+            if not issues and not pending_sources:
+                text = (
+                    f"Se han aplicado automáticamente {automatic} fuente(s) completas.\n"
+                    "El expediente ya está listo para generar el Excel oficial."
+                    if automatic else "El expediente ya está listo para generar el Excel oficial."
+                )
+                ctk.CTkLabel(panel, text=text, justify="left").pack(pady=16)
         finally:
             connection.close()
 
-    def correct(document_id, field):
+        if ready_for_calculation:
+            def completed():
+                if dialog.winfo_exists():
+                    dialog.destroy()
+                app._refrescar_lista_expedientes(select_case_id=case_id)
+                app._refrescar_expediente()
+                app.log(
+                    "Fuentes aplicadas y validadas. El expediente está listo para generar el Excel oficial.",
+                    "ok",
+                )
+                messagebox.showinfo(
+                    "Fuentes listas",
+                    "Las fuentes se han aplicado automáticamente. Ya puedes generar el Excel oficial.",
+                    parent=app,
+                )
+            app.after(0, completed)
+
+    render()
+
+
+def open_counter_reset_carry_forward_dialog(
+    app: "AppGestionFincas", case_id: int, document_id: int, count: int, source_name: str,
+) -> None:
+    """Una sola autorización para un reinicio generalizado en una fuente."""
+    dialog = _dialog(app, "Reinicio masivo de contadores", 700, 430)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16)
+    panel.pack(fill="both", expand=True, padx=18, pady=18)
+    ctk.CTkLabel(
+        panel, text="Conservar las últimas lecturas válidas",
+        font=UIM.fuente(20, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=22, pady=(22, 6))
+    ctk.CTkLabel(
+        panel,
+        text=(
+            f"{source_name} contiene {count} contadores cuyo valor disminuye. "
+            "Se conservará la lectura previa como cierre temporal y se anotará un consumo provisional de 0. "
+            "Cuando llegue una lectura posterior fiable, podrás recalcular el período."
+        ),
+        wraplength=600, justify="left", text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=22, pady=(0, 14))
+    reason = _packed_field(panel, "Motivo y fuente consultada")
+    reason.insert(0, "Reinicio masivo; se conserva la última lectura válida hasta la siguiente lectura fiable.")
+
+    actions = ctk.CTkFrame(panel, fg_color="transparent")
+    actions.pack(fill="x", padx=22, pady=(22, 18))
+    ctk.CTkButton(
+        actions, text="Cancelar", command=dialog.destroy, height=38, corner_radius=9,
+        **UIM.secondary_button_kwargs(),
+    ).pack(side="right")
+
+    def apply_carry_forward():
+        if app._procesando:
+            return
+        rationale = reason.get().strip()
+        if not rationale:
+            messagebox.showwarning("Motivo requerido", "Indica el motivo del criterio temporal.", parent=dialog)
+            return
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
-            issue = document_review.create_review_issue(connection, case_id, document_id,
-                code="SOURCE_VALUE_REVIEW", field_name=field,
-                message="Comprueba el valor extraído en el documento original.")
+            resolved = document_review.carry_forward_counter_resets_for_source(
+                connection, case_id=case_id, document_id=document_id,
+                reason=rationale, approved_by="usuario_local",
+            )
+            remaining = len(document_review.list_open_issues(connection, case_id))
+            ready = None
+            if not remaining and not document_review.case_has_unapplied_sources(connection, case_id):
+                ready = document_review.validate_case_ready(connection, case_id)
+        except Exception as error:
+            connection.rollback()
+            messagebox.showwarning("No se pudo aplicar el criterio", str(error), parent=dialog)
+            return
         finally:
             connection.close()
         dialog.destroy()
-        open_issue_dialog(app, issue)
+        app._refrescar_lista_expedientes(select_case_id=case_id)
+        app._refrescar_expediente()
+        if ready is not None and ready.status == "ready_for_calculation":
+            app.log(f"Criterio temporal aplicado a {resolved} contador(es). Listo para cálculo.", "ok")
+        else:
+            app.log(f"Criterio temporal aplicado a {resolved} contador(es). Quedan {remaining} incidencia(s).", "aviso")
 
-    def confirm(document_id):
+    ctk.CTkButton(
+        actions, text=f"Aplicar a los {count} contadores", command=apply_carry_forward,
+        height=38, corner_radius=9, fg_color=C["exito"], hover_color=C["exito_hover"],
+        font=UIM.fuente(12, "bold"),
+    ).pack(side="right", padx=(0, 8))
+
+
+def open_initial_zero_confirmation_dialog(
+    app: "AppGestionFincas", case_id: int, document_id: int, count: int, source_name: str,
+) -> None:
+    """Pide una única confirmación humana para ceros iniciales de una fuente."""
+    dialog = _dialog(app, "Resolver lecturas a 0", 700, 430)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16)
+    panel.pack(fill="both", expand=True, padx=18, pady=18)
+    ctk.CTkLabel(
+        panel, text="Aplicar criterio a las lecturas a 0", font=UIM.fuente(20, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=22, pady=(22, 6))
+    ctk.CTkLabel(
+        panel,
+        text=(
+            f"{source_name} contiene {count} lecturas a 0. Si ya hay una lectura canónica fiable "
+            "para esa fecha, se conservará; si no existe, el cero se guardará como lectura inicial real. "
+            "Las lecturas posteriores del archivo podrán continuar normalmente."
+        ),
+        wraplength=600, justify="left", text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=22, pady=(0, 14))
+    reason = _packed_field(panel, "Motivo y fuente consultada")
+    reason.insert(0, "Ceros contrastados; se conserva la lectura canónica existente cuando la haya.")
+
+    actions = ctk.CTkFrame(panel, fg_color="transparent")
+    actions.pack(fill="x", padx=22, pady=(22, 18))
+    ctk.CTkButton(
+        actions, text="Cancelar", command=dialog.destroy, height=38, corner_radius=9,
+        **UIM.secondary_button_kwargs(),
+    ).pack(side="right")
+
+    def confirm_zeroes():
+        if app._procesando:
+            return
+        rationale = reason.get().strip()
+        if not rationale:
+            messagebox.showwarning("Motivo requerido", "Indica el criterio aplicado a estos ceros.", parent=dialog)
+            return
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
-            case_ingestion.confirm_source_candidates(connection, case_id, document_id,
-                                                      confirmed_by="usuario_local")
-            if not document_review.list_open_issues(connection, case_id) and not document_review.case_has_unapplied_sources(connection, case_id):
-                document_review.validate_case_ready(connection, case_id)
-        except ValueError as error:
-            # Required canonical fields may not have been part of a legacy
-            # extractor's requirement list; make every missing value editable.
-            document = connection.execute("SELECT document_kind FROM source_documents WHERE id_document=?", (document_id,)).fetchone()
-            fields = {"invoice": ("tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total"),
-                      "reading": ("vecinos",), "owners": ("propietarios",)}
-            document_review.create_missing_field_issues(connection, case_id, document_id, fields.get(document['document_kind'], ()))
-            messagebox.showwarning("Fuente pendiente de revisión", str(error), parent=app)
+            resolved = document_review.confirm_initial_zero_readings_for_source(
+                connection, case_id=case_id, document_id=document_id,
+                reason=rationale, approved_by="usuario_local",
+            )
+            remaining = len(document_review.list_open_issues(connection, case_id))
+            ready = None
+            if not remaining and not document_review.case_has_unapplied_sources(connection, case_id):
+                ready = document_review.validate_case_ready(connection, case_id)
+        except Exception as error:
+            connection.rollback()
+            messagebox.showwarning("No se pudo aplicar el criterio", str(error), parent=dialog)
+            return
         finally:
             connection.close()
+        dialog.destroy()
+        app._refrescar_lista_expedientes(select_case_id=case_id)
+        app._refrescar_expediente()
+        if ready is not None and ready.status == "ready_for_calculation":
+            app.log(f"Criterio aplicado a {resolved} lecturas a 0. Listo para cálculo.", "ok")
+        else:
+            app.log(f"Criterio aplicado a {resolved} lecturas a 0. Quedan {remaining} incidencia(s).", "aviso")
+
+    ctk.CTkButton(
+        actions, text=f"Aplicar a los {count} ceros", command=confirm_zeroes,
+        height=38, corner_radius=9, fg_color=C["exito"], hover_color=C["exito_hover"],
+        font=UIM.fuente(12, "bold"),
+    ).pack(side="right", padx=(0, 8))
+
+
+def open_archived_path_resolution_dialog(app: "AppGestionFincas", case_id: int) -> None:
+    """Permite elegir una copia ya verificada sin mover ni borrar fuentes."""
+    dialog = _dialog(app, "Resolver copias archivadas", 860, 680)
+    ctk.CTkLabel(
+        dialog,
+        text="Elige la copia correcta",
+        font=UIM.fuente(20, "bold"),
+        text_color=C["texto"],
+    ).pack(anchor="w", padx=22, pady=(20, 3))
+    ctk.CTkLabel(
+        dialog,
+        text=(
+            "Se muestran solo archivos con la misma huella que el documento registrado. "
+            "Elegir una copia actualiza la referencia del expediente; no mueve ni borra archivos."
+        ),
+        font=UIM.fuente(11), text_color=C["texto_sec"], justify="left", wraplength=790,
+    ).pack(anchor="w", padx=22, pady=(0, 12))
+    panel = ctk.CTkScrollableFrame(dialog, fg_color=C["fondo"])
+    panel.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+    def open_candidate(path: Path) -> None:
+        try:
+            if sys.platform != "win32":
+                raise OSError("Abrir el archivo solo está disponible en Windows.")
+            os.startfile(str(path))
+        except Exception as exc:
+            messagebox.showerror("No se pudo abrir la copia", str(exc), parent=dialog)
+
+    def render() -> None:
+        for widget in panel.winfo_children():
+            widget.destroy()
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            candidates = expedient_service.list_archived_path_candidates(
+                connection, archive_root=app.ruta_archivo_expedientes, case_id=case_id,
+            )
+        finally:
+            connection.close()
+
+        if not candidates:
+            ctk.CTkLabel(
+                panel,
+                text="No hay copias duplicadas pendientes en este expediente.",
+                font=UIM.fuente(12), text_color=C["texto_sec"],
+            ).pack(anchor="w", padx=14, pady=20)
+            return
+
+        for item in candidates:
+            group = ctk.CTkFrame(
+                panel, fg_color=C["panel"], corner_radius=11,
+                border_width=1, border_color=C["borde"],
+            )
+            group.pack(fill="x", padx=3, pady=6)
+            ctk.CTkLabel(
+                group, text=item.original_name, font=UIM.fuente(12, "bold"),
+                text_color=C["texto"], anchor="w", wraplength=720,
+            ).pack(fill="x", padx=14, pady=(12, 2))
+            ctk.CTkLabel(
+                group,
+                text=f"Hay {len(item.candidate_paths)} copias idénticas. Abre una si necesitas comprobarla.",
+                font=UIM.fuente(10), text_color=C["texto_sec"], anchor="w",
+            ).pack(fill="x", padx=14, pady=(0, 7))
+            for candidate in item.candidate_paths:
+                row = ctk.CTkFrame(group, fg_color=C["panel_2"], corner_radius=8)
+                row.pack(fill="x", padx=14, pady=3)
+                ctk.CTkLabel(
+                    row, text=candidate.name, font=UIM.fuente(10), text_color=C["texto"],
+                    anchor="w", wraplength=420,
+                ).pack(side="left", fill="x", expand=True, padx=10, pady=8)
+                ctk.CTkButton(
+                    row, text="Abrir", width=68, height=29, corner_radius=7,
+                    **UIM.secondary_button_kwargs(),
+                    command=lambda path=candidate: open_candidate(path),
+                ).pack(side="right", padx=(4, 7), pady=5)
+                ctk.CTkButton(
+                    row, text="Usar esta copia", width=126, height=29, corner_radius=7,
+                    fg_color=C["primario"], hover_color=C["primario_hover"],
+                    command=lambda document_id=item.document_id, path=candidate: select(document_id, path),
+                ).pack(side="right", padx=(0, 4), pady=5)
+
+    def select(document_id: int, path: Path) -> None:
+        if not messagebox.askyesno(
+            "Confirmar copia",
+            f"Se usará esta copia para el expediente:\n\n{path.name}\n\nNo se moverá ni borrará ningún archivo.",
+            parent=dialog,
+        ):
+            return
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            selected = expedient_service.select_archived_source_path(
+                connection, document_id, path, archive_root=app.ruta_archivo_expedientes,
+            )
+            document_review.resolve_archived_source_issue(
+                connection, case_id, document_id,
+            )
+        except (LookupError, ValueError, RuntimeError, OSError) as exc:
+            messagebox.showerror("No se pudo actualizar la ruta", str(exc), parent=dialog)
+            return
+        finally:
+            connection.close()
+        app.log(f"Ruta archivada recuperada: {selected.name}", "ok")
         app._refrescar_lista_expedientes(select_case_id=case_id)
         app._refrescar_expediente()
         render()
@@ -1576,11 +2292,332 @@ def resolution_route_for_issue(issue: ReviewIssue) -> str:
         return "dismiss_invoice_outside_period"
     if issue.code == "DOCUMENT_CLASSIFICATION_REQUIRED":
         return "classify_unknown"
+    if issue.code == "ARCHIVED_SOURCE_DUPLICATE":
+        return "archived_source_duplicate"
+    if issue.code == "ARCHIVED_SOURCE_MISSING":
+        return "archived_source_missing"
     return "generic_correction"
+
+
+def open_service_fees_dialog(app: "AppGestionFincas", servicio: str = "ACS") -> None:
+    """Cuotas que la comunidad cobra a los vecinos por ACS o calefacción.
+
+    Es el lado de los ingresos del estudio y el único dato que no sale de
+    ninguna factura ni de ningún contador: lo decide la comunidad. Sin él, el
+    análisis no puede comparar lo cobrado con lo que ha costado el servicio.
+    """
+    if not app.id_comunidad or not app.id_periodo:
+        messagebox.showinfo(
+            "Cuotas cobradas",
+            "Elige antes una comunidad y un período.",
+            parent=app,
+        )
+        return
+
+    dialog = _dialog(app, f"Cuotas cobradas de {servicio}", 720, 640)
+    panel = ctk.CTkFrame(
+        dialog, fg_color=C["panel"], corner_radius=16,
+        border_width=1, border_color=C["borde"],
+    )
+    panel.pack(fill="both", expand=True, padx=18, pady=18)
+    panel.grid_columnconfigure(0, weight=1)
+    panel.grid_rowconfigure(6, weight=1)
+
+    ctk.CTkLabel(
+        panel, text=f"Cuotas cobradas de {servicio}", font=UIM.fuente(20, "bold"),
+        text_color=C["texto"],
+    ).grid(row=0, column=0, sticky="w", padx=22, pady=(22, 2))
+    ctk.CTkLabel(
+        panel,
+        text=(
+            "Lo que la comunidad gira a los vecinos durante el período. La cuota "
+            "fija mensual se genera de una vez a partir de sus tramos; las "
+            "liquidaciones por consumo se añaden una a una."
+        ),
+        font=UIM.fuente(12), text_color=C["texto_sec"], wraplength=640, justify="left",
+    ).grid(row=1, column=0, sticky="w", padx=22, pady=(0, 14))
+
+    # --- cuota fija mensual --------------------------------------------------
+    fijas = ctk.CTkFrame(panel, fg_color=C["fondo"], corner_radius=10)
+    fijas.grid(row=2, column=0, sticky="ew", padx=22)
+    fijas.grid_columnconfigure(1, weight=1)
+    ctk.CTkLabel(
+        fijas, text="Cuota fija mensual", font=UIM.fuente(13, "bold"), text_color=C["texto"],
+    ).grid(row=0, column=0, columnspan=4, sticky="w", padx=14, pady=(12, 2))
+    ctk.CTkLabel(
+        fijas,
+        text="Un tramo por cada cambio de importe: mes de inicio e importe del recibo.",
+        font=UIM.fuente(11), text_color=C["texto_sec"],
+    ).grid(row=1, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 8))
+
+    tramos: list[tuple[ctk.CTkEntry, ctk.CTkEntry]] = []
+    contenedor_tramos = ctk.CTkFrame(fijas, fg_color="transparent")
+    contenedor_tramos.grid(row=2, column=0, columnspan=4, sticky="ew", padx=14)
+    contenedor_tramos.grid_columnconfigure((1, 3), weight=1)
+
+    def anadir_tramo(desde: str = "", importe: str = "") -> None:
+        fila = len(tramos)
+        ctk.CTkLabel(
+            contenedor_tramos, text="Desde (aaaa-mm)", font=UIM.fuente(11),
+            text_color=C["texto_sec"],
+        ).grid(row=fila, column=0, sticky="w", pady=3)
+        mes = ctk.CTkEntry(contenedor_tramos, height=30, corner_radius=8, width=120)
+        mes.grid(row=fila, column=1, sticky="w", padx=(6, 18), pady=3)
+        mes.insert(0, desde)
+        ctk.CTkLabel(
+            contenedor_tramos, text="Importe (€/mes)", font=UIM.fuente(11),
+            text_color=C["texto_sec"],
+        ).grid(row=fila, column=2, sticky="w", pady=3)
+        valor = ctk.CTkEntry(contenedor_tramos, height=30, corner_radius=8, width=120)
+        valor.grid(row=fila, column=3, sticky="w", padx=6, pady=3)
+        valor.insert(0, importe)
+        tramos.append((mes, valor))
+
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        periodo = connection.execute(
+            "SELECT fecha_inicio,fecha_fin FROM periodos WHERE id_periodo=?",
+            (app.id_periodo,),
+        ).fetchone()
+    finally:
+        connection.close()
+    anadir_tramo(str(periodo["fecha_inicio"])[:7] if periodo else "", "")
+    anadir_tramo()
+
+    ctk.CTkButton(
+        fijas, text="Añadir tramo", width=120, height=28, corner_radius=8,
+        font=UIM.fuente(11), command=lambda: anadir_tramo(),
+        **UIM.secondary_button_kwargs(),
+    ).grid(row=3, column=0, sticky="w", padx=14, pady=(8, 12))
+
+    # --- liquidación por consumo --------------------------------------------
+    variables = ctk.CTkFrame(panel, fg_color=C["fondo"], corner_radius=10)
+    variables.grid(row=3, column=0, sticky="ew", padx=22, pady=(12, 0))
+    variables.grid_columnconfigure((1, 3, 5), weight=1)
+    ctk.CTkLabel(
+        variables, text="Liquidación por consumo", font=UIM.fuente(13, "bold"),
+        text_color=C["texto"],
+    ).grid(row=0, column=0, columnspan=6, sticky="w", padx=14, pady=(12, 2))
+    ctk.CTkLabel(
+        variables, text="Lo cobrado tras cada lectura de contadores.",
+        font=UIM.fuente(11), text_color=C["texto_sec"],
+    ).grid(row=1, column=0, columnspan=6, sticky="w", padx=14, pady=(0, 8))
+    for columna, etiqueta in ((0, "Fecha"), (2, "Importe (€)"), (4, "Consumo")):
+        ctk.CTkLabel(
+            variables, text=etiqueta, font=UIM.fuente(11), text_color=C["texto_sec"],
+        ).grid(row=2, column=columna, sticky="w", padx=(14 if columna == 0 else 0, 4))
+    fecha_var = ctk.CTkEntry(variables, height=30, corner_radius=8, width=120)
+    fecha_var.grid(row=2, column=1, sticky="w", padx=(0, 14))
+    importe_var = ctk.CTkEntry(variables, height=30, corner_radius=8, width=110)
+    importe_var.grid(row=2, column=3, sticky="w", padx=(0, 14))
+    consumo_var = ctk.CTkEntry(variables, height=30, corner_radius=8, width=110)
+    consumo_var.grid(row=2, column=5, sticky="w", padx=(0, 14))
+
+    resumen_texto = ctk.CTkLabel(
+        panel, text="", font=UIM.fuente(12, "bold"), text_color=C["texto"], justify="left",
+    )
+    resumen_texto.grid(row=4, column=0, sticky="w", padx=22, pady=(14, 4))
+
+    listado = ctk.CTkTextbox(panel, height=170, corner_radius=8, font=UIM.fuente(11))
+    listado.grid(row=6, column=0, sticky="nsew", padx=22, pady=(0, 10))
+
+    def refrescar() -> None:
+        conexion = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            apuntes = cuotas_servicio.listar(
+                conexion, community_id=app.id_comunidad,
+                period_id=app.id_periodo, servicio=servicio,
+            )
+            total = cuotas_servicio.resumen(
+                conexion, community_id=app.id_comunidad,
+                period_id=app.id_periodo, servicio=servicio,
+            )
+        finally:
+            conexion.close()
+        resumen_texto.configure(
+            text=(
+                f"Cobrado: {total.fija:,.2f} € de cuota fija + {total.variable:,.2f} € "
+                f"por consumo = {total.total:,.2f} €   ({total.apuntes} apunte(s))"
+            ).replace(",", " ")
+        )
+        listado.configure(state="normal")
+        listado.delete("1.0", "end")
+        for apunte in apuntes:
+            extra = f"  ·  consumo {apunte['consumo']}" if apunte["consumo"] is not None else ""
+            listado.insert(
+                "end",
+                f"{apunte['fecha']}   {apunte['concepto']:<9} {apunte['importe']:>10.2f} €{extra}\n",
+            )
+        if not apuntes:
+            listado.insert("end", "Todavía no hay cuotas anotadas para este período.\n")
+        listado.configure(state="disabled")
+
+    def generar_mensuales() -> None:
+        pares = []
+        for mes, valor in tramos:
+            texto_mes, texto_valor = mes.get().strip(), valor.get().strip()
+            if not texto_mes and not texto_valor:
+                continue
+            if not texto_mes or not texto_valor:
+                messagebox.showwarning(
+                    "Tramo incompleto",
+                    "Cada tramo necesita su mes de inicio y su importe.",
+                    parent=dialog,
+                )
+                return
+            pares.append((f"{texto_mes}-01" if len(texto_mes) == 7 else texto_mes, texto_valor))
+        if not pares:
+            messagebox.showwarning(
+                "Sin tramos", "Indica al menos un importe mensual.", parent=dialog,
+            )
+            return
+        conexion = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            creadas = cuotas_servicio.generar_cuotas_mensuales(
+                conexion, community_id=app.id_comunidad, period_id=app.id_periodo,
+                servicio=servicio, tramos=pares, notas="Cuota mensual del recibo",
+            )
+            conexion.commit()
+        except (ValueError, LookupError) as error:
+            messagebox.showerror("No se pudo guardar", str(error), parent=dialog)
+            return
+        finally:
+            conexion.close()
+        app.log(f"Cuotas mensuales de {servicio}: {creadas} mes(es) anotados.", "ok")
+        refrescar()
+
+    def anadir_liquidacion() -> None:
+        conexion = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            cuotas_servicio.registrar_cuota(
+                conexion, community_id=app.id_comunidad, period_id=app.id_periodo,
+                servicio=servicio, concepto="variable",
+                fecha=fecha_var.get().strip(), importe=importe_var.get().strip(),
+                consumo=consumo_var.get().strip() or None,
+                notas="Liquidación por consumo",
+            )
+            conexion.commit()
+        except (ValueError, LookupError) as error:
+            messagebox.showerror("No se pudo guardar", str(error), parent=dialog)
+            return
+        finally:
+            conexion.close()
+        for campo in (fecha_var, importe_var, consumo_var):
+            campo.delete(0, "end")
+        refrescar()
+
+    ctk.CTkButton(
+        fijas, text="Generar cuotas del período", width=200, height=30, corner_radius=8,
+        font=UIM.fuente(11), fg_color=C["primario"], hover_color=C["primario_hover"],
+        command=generar_mensuales,
+    ).grid(row=3, column=1, columnspan=3, sticky="e", padx=14, pady=(8, 12))
+    ctk.CTkButton(
+        variables, text="Añadir liquidación", width=160, height=30, corner_radius=8,
+        font=UIM.fuente(11), fg_color=C["primario"], hover_color=C["primario_hover"],
+        command=anadir_liquidacion,
+    ).grid(row=3, column=0, columnspan=6, sticky="e", padx=14, pady=(8, 12))
+
+    ctk.CTkButton(
+        panel, text="Cerrar", width=110, height=32, corner_radius=8,
+        command=dialog.destroy, **UIM.secondary_button_kwargs(),
+    ).grid(row=7, column=0, sticky="e", padx=22, pady=(0, 18))
+
+    refrescar()
+
+
+
+def open_skip_source_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
+    """Deja fuera del expediente la fuente de una incidencia, con su motivo.
+
+    Hay documentos que sencillamente no deben entrar (un Excel de consulta, un
+    PDF ilegible, un listado repetido). Sin esta salida, su incidencia era
+    obligatoria y bloqueaba el expediente entero.
+    """
+    dialog = _dialog(app, "Omitir fuente", 560, 360)
+    panel = ctk.CTkFrame(
+        dialog, fg_color=C["panel"], corner_radius=16,
+        border_width=1, border_color=C["borde"],
+    )
+    panel.pack(fill="both", expand=True, padx=18, pady=18)
+    panel.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(
+        panel, text="Omitir esta fuente", font=UIM.fuente(20, "bold"),
+        text_color=C["texto"],
+    ).grid(row=0, column=0, sticky="w", padx=22, pady=(22, 3))
+    ctk.CTkLabel(
+        panel,
+        text=(
+            f"{Path(issue.archived_path).name}\n\n"
+            "El documento no se borra: se queda registrado como omitido, se "
+            "cierran sus incidencias y deja de bloquear el expediente. Puedes "
+            "recuperarlo más adelante reanalizando las fuentes."
+        ),
+        font=UIM.fuente(12), text_color=C["texto_sec"],
+        wraplength=470, justify="left",
+    ).grid(row=1, column=0, sticky="w", padx=22, pady=(0, 14))
+    ctk.CTkLabel(
+        panel, text="Motivo (queda registrado)", font=UIM.fuente(12, "bold"),
+        text_color=C["texto"],
+    ).grid(row=2, column=0, sticky="w", padx=22)
+    motivo = ctk.CTkEntry(panel, height=34, corner_radius=8)
+    motivo.grid(row=3, column=0, sticky="ew", padx=22, pady=(4, 16))
+    motivo.insert(0, "No corresponde a este expediente")
+
+    acciones = ctk.CTkFrame(panel, fg_color="transparent")
+    acciones.grid(row=4, column=0, sticky="e", padx=22, pady=(0, 20))
+
+    def confirmar():
+        texto = motivo.get().strip()
+        if not texto:
+            messagebox.showwarning(
+                "Falta el motivo", "Indica por qué se omite esta fuente.", parent=dialog,
+            )
+            return
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            cerradas = document_review.ignore_source_document(
+                connection, issue.id_case, issue.id_document,
+                reason=texto, dismissed_by="usuario_local",
+            )
+        except (LookupError, ValueError) as error:
+            messagebox.showerror("No se pudo omitir", str(error), parent=dialog)
+            return
+        finally:
+            connection.close()
+        dialog.destroy()
+        app.log(
+            f"Fuente omitida: {Path(issue.archived_path).name} "
+            f"({cerradas} incidencia(s) cerradas) — {texto}",
+            "aviso",
+        )
+        app._refrescar_expediente()
+
+    ctk.CTkButton(
+        acciones, text="Cancelar", width=100, height=32, corner_radius=8,
+        fg_color="transparent", border_width=1, border_color=C["borde"],
+        text_color=C["texto"], hover_color=C["acento_suave"],
+        command=dialog.destroy,
+    ).pack(side="left", padx=(0, 8))
+    ctk.CTkButton(
+        acciones, text="Omitir fuente", width=130, height=32, corner_radius=8,
+        fg_color=C["primario"], hover_color=C["primario_hover"],
+        command=confirmar,
+    ).pack(side="left")
+
 
 
 def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     route = resolution_route_for_issue(issue)
+    if route == "archived_source_duplicate":
+        open_archived_path_resolution_dialog(app, issue.id_case)
+        return
+    if route == "archived_source_missing":
+        messagebox.showwarning(
+            "Archivo archivado no disponible",
+            "No se encuentra una copia verificada de esta fuente. Vuelve a añadir el archivo original y después pulsa Reanalizar fuentes.",
+            parent=app,
+        )
+        return
     dialog = _dialog(app, "Resolver incidencia", 680, 720)
     panel = ctk.CTkFrame(
         dialog,

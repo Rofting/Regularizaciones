@@ -1,19 +1,30 @@
+import re
+import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from itertools import count
 from typing import Collection, Iterator, Mapping
 
 from expedient_models import RegularizationCase, ReviewIssue, review_issue_from_row
-from expedient_service import get_case, set_case_status
+from expedient_service import get_case, link_case_to_period, set_case_status
 
 
 _savepoint_counter = count()
 _MISSING_FIELD_CODE = "MISSING_REQUIRED_FIELD"
 _COUNTER_RESET_CODE = "COUNTER_RESET"
+_READING_ZERO_CODE = "READING_ZERO_REVIEW"
 _INVOICE_OUTSIDE_PERIOD_CODE = "INVOICE_OUTSIDE_PERIOD"
 _CLASSIFICATION_REQUIRED_CODE = "DOCUMENT_CLASSIFICATION_REQUIRED"
-_AUTOMATIC_REVIEW_CODES = (_MISSING_FIELD_CODE, _CLASSIFICATION_REQUIRED_CODE)
+_ARCHIVED_SOURCE_DUPLICATE_CODE = "ARCHIVED_SOURCE_DUPLICATE"
+_ARCHIVED_SOURCE_MISSING_CODE = "ARCHIVED_SOURCE_MISSING"
+_AUTOMATIC_REVIEW_CODES = (
+    _MISSING_FIELD_CODE,
+    _CLASSIFICATION_REQUIRED_CODE,
+    _ARCHIVED_SOURCE_DUPLICATE_CODE,
+    _ARCHIVED_SOURCE_MISSING_CODE,
+)
 _VALIDATION_STATUSES = {"candidate", "validated", "rejected"}
 _ISSUE_ORIGINS = {"automatic", "manual"}
 
@@ -51,6 +62,39 @@ def _normalise_value(value: str | None) -> str | None:
     return normalized or None
 
 
+def _validate_issue_value(field_name: str, value: str) -> str:
+    """Reject placeholders before they can become a manual canonical value."""
+    if field_name in {"fecha_inicio", "fecha_fin", "fecha_factura"}:
+        for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(value, pattern).date().isoformat()
+            except ValueError:
+                continue
+        raise ValueError("Introduce una fecha válida (dd/mm/aaaa).")
+    if field_name in {"importe_total", "consumo_total", "consumo_kwh", "consumo_m3"}:
+        try:
+            amount = Decimal(value.replace(".", "").replace(",", "."))
+        except InvalidOperation:
+            raise ValueError("Introduce un importe o consumo numérico válido.") from None
+        if not amount.is_finite():
+            raise ValueError("Introduce un importe o consumo numérico válido.")
+    if field_name == "tipo_suministro" and (not re.search(r"[A-Za-zÁÉÍÓÚáéíóú]", value)):
+        raise ValueError("Indica un tipo de suministro válido, por ejemplo GAS, ACS o MANTENIMIENTO.")
+    if field_name == "tipo":
+        reading_type = value.strip().upper()
+        if reading_type not in {"ACS", "CALEFACCION"}:
+            raise ValueError("El tipo de lectura debe ser ACS o CALEFACCION.")
+        return reading_type
+    if field_name == "document_kind" and value.casefold() not in {"invoice", "reading", "owners", "other"}:
+        raise ValueError("El tipo de documento debe ser factura, lectura, propietarios u otro.")
+    return value
+
+
+def validate_candidate_value(field_name: str, value: str) -> str:
+    """Aplica a una extracción las mismas reglas usadas al resolver incidencias."""
+    return _validate_issue_value(field_name, value)
+
+
 def _positive_consumption(value: object) -> Decimal:
     """Valida el consumo confirmado sin convertirlo en una lectura acumulada."""
     if isinstance(value, bool):
@@ -67,6 +111,29 @@ def _positive_consumption(value: object) -> Decimal:
 def _decimal_text(value: Decimal | float | int) -> str:
     rendered = format(Decimal(str(value)), "f")
     return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+
+
+def _issue_reading_dates(
+    field_name: str, case_start: str, case_end: str,
+) -> tuple[str, str]:
+    """Intervalo de lecturas que una incidencia declara en su propio nombre.
+
+    El formato es 'reading.<vivienda>.<servicio>|<inicio>/<fin>'. Sin sufijo se
+    usa el intervalo del expediente, que es como se creaban antes.
+    """
+    _, separador, intervalo = field_name.partition("|")
+    if not separador:
+        return case_start, case_end
+    inicio, barra, fin = intervalo.partition("/")
+    if not barra:
+        return case_start, case_end
+    for fecha in (inicio, fin):
+        try:
+            datetime.strptime(fecha, "%Y-%m-%d")
+        except ValueError:
+            return case_start, case_end
+    return inicio, fin
+
 
 
 def _counter_reset_target(
@@ -107,8 +174,16 @@ def _counter_reset_target(
         "SELECT 1 FROM counter_reset_targets WHERE id_issue=?", (issue['id_issue'],)
     ).fetchone():
         raise LookupError("La pareja de lecturas de la incidencia no pertenece al propietario y servicio")
-    initial_date = target['initial_date'] if target else case['fecha_inicio']
-    final_date = target['final_date'] if target else case['fecha_fin']
+    if target:
+        initial_date, final_date = target["initial_date"], target["final_date"]
+    else:
+        # La incidencia lleva su propio intervalo en el nombre del campo
+        # ('reading.PA2-2ºC.ACS|2025-11-01/2026-01-31'). Usar en su lugar las
+        # fechas del expediente apuntaba a otras lecturas, que no bajaban, y
+        # la estimación se rechazaba como "ya no es un reinicio pendiente".
+        initial_date, final_date = _issue_reading_dates(
+            str(issue["field_name"]), case["fecha_inicio"], case["fecha_fin"],
+        )
     readings = connection.execute(
         """SELECT id_lectura,fecha_lectura,valor_acumulado,estado,metodo_estimacion,
                   fuente,notas,approved_by,approved_at
@@ -126,8 +201,17 @@ def _counter_reset_target(
     final = by_date.get(final_date)
     if initial is None or final is None:
         raise LookupError("No se encuentran las lecturas inicial y final del período")
-    if final["estado"] != "contador_averiado" or final["valor_acumulado"] >= initial["valor_acumulado"]:
-        raise LookupError("La lectura ya no es un reinicio pendiente de aprobar")
+    # Lo que define un reinicio pendiente es que la lectura final siga siendo
+    # menor que la inicial y que nadie haya aprobado aún una estimación. Exigir
+    # además el estado 'contador_averiado' bloqueaba los casos en los que el
+    # gestor ya había resuelto a mano un conflicto sobre esa misma lectura, que
+    # la dejaba en 'real' sin dejar de ser un reinicio.
+    if final["valor_acumulado"] >= initial["valor_acumulado"]:
+        raise LookupError(
+            "La lectura final ya no es menor que la inicial: no hay reinicio que aprobar"
+        )
+    if final["metodo_estimacion"] == "counter_reset_manual":
+        raise LookupError("Este reinicio ya tiene una estimación aprobada")
     return case, owner, initial, final
 
 
@@ -232,7 +316,7 @@ def create_missing_field_issues(connection: sqlite3.Connection, case_id: int,
                     """INSERT INTO review_issues
                        (id_case, id_document, code, field_name, detected_value, message, status, origin)
                        VALUES (?, ?, ?, ?, NULL, ?, 'open', 'automatic')
-                       ON CONFLICT(id_document, code, field_name, status) DO NOTHING""",
+                       ON CONFLICT(id_document, code, field_name) WHERE status='open' DO NOTHING""",
                     (
                         case_id, document_id, _MISSING_FIELD_CODE, field_name,
                         f"Falta el campo requerido: {field_name}",
@@ -295,7 +379,7 @@ def _create_review_issue(
             """INSERT INTO review_issues
                (id_case,id_document,code,field_name,detected_value,message,status,origin)
                VALUES (?,?,?,?,?,?,'open',?)
-               ON CONFLICT(id_document,code,field_name,status) DO NOTHING""",
+               ON CONFLICT(id_document,code,field_name) WHERE status='open' DO NOTHING""",
             (
                 case_id,
                 document_id,
@@ -352,6 +436,99 @@ def create_review_issue(
     )
 
 
+def create_invalid_field_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    field_name: str,
+    message: str,
+    detected_value: str | None = None,
+) -> ReviewIssue:
+    """Materializa como automática una extracción presente pero no utilizable."""
+    return _create_review_issue(
+        connection,
+        case_id,
+        document_id,
+        code=_MISSING_FIELD_CODE,
+        field_name=field_name,
+        message=message,
+        detected_value=detected_value,
+        origin="automatic",
+    )
+
+
+def record_automatic_candidate_recovery(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    field_name: str,
+    original_value: str | None,
+    corrected_value: str,
+    reason: str,
+) -> int:
+    """Sustituye un valor confirmado pero inválido dejando trazabilidad completa.
+
+    Se usa únicamente cuando un nuevo análisis de confianza alta ofrece un
+    valor semánticamente válido. La incidencia nace ya resuelta porque no hay
+    una decisión humana pendiente, pero la corrección queda en el mismo
+    historial inmutable que las correcciones manuales.
+    """
+    normalized_field = field_name.strip()
+    normalized_reason = reason.strip()
+    normalized_value = _normalise_value(corrected_value)
+    if not normalized_field or not normalized_reason or normalized_value is None:
+        raise ValueError("Campo, valor y motivo de recuperación son obligatorios")
+    normalized_value = _validate_issue_value(normalized_field, normalized_value)
+
+    with _transaction(connection):
+        document = connection.execute(
+            "SELECT id_case FROM source_documents WHERE id_document=?",
+            (document_id,),
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        cursor = connection.execute(
+            """INSERT INTO review_issues
+               (id_case,id_document,code,field_name,detected_value,message,
+                status,origin,resolved_at)
+               VALUES (?,?,?,?,?,?,'resolved','automatic',datetime('now'))""",
+            (
+                case_id,
+                document_id,
+                "AUTOMATIC_ANALYSIS_RECOVERY",
+                normalized_field,
+                _normalise_value(original_value),
+                normalized_reason,
+            ),
+        )
+        issue_id = int(cursor.lastrowid)
+        connection.execute(
+            """INSERT INTO manual_corrections
+               (id_issue,original_value,corrected_value,reason,resolved_by)
+               VALUES (?,?,?,?,?)""",
+            (
+                issue_id,
+                _normalise_value(original_value),
+                normalized_value,
+                normalized_reason,
+                "deteccion_automatica",
+            ),
+        )
+        connection.execute(
+            """INSERT INTO extraction_candidates
+               (id_document,field_name,value,source,validation_status)
+               VALUES (?,?,?,'analysis_recovery','candidate')
+               ON CONFLICT(id_document,field_name) DO UPDATE SET
+                   value=excluded.value,
+                   source=excluded.source,
+                   validation_status=excluded.validation_status""",
+            (document_id, normalized_field, normalized_value),
+        )
+    return issue_id
+
+
 def create_classification_required_issue(
     connection: sqlite3.Connection,
     case_id: int,
@@ -366,6 +543,37 @@ def create_classification_required_issue(
         document_id,
         code=_CLASSIFICATION_REQUIRED_CODE,
         field_name="document_kind",
+        message=message,
+        origin="automatic",
+    )
+
+
+def create_archived_source_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    duplicate_count: int,
+) -> ReviewIssue:
+    """Registra una ruta archivada no disponible sin inventar una copia válida."""
+    if duplicate_count > 1:
+        code = _ARCHIVED_SOURCE_DUPLICATE_CODE
+        message = (
+            f"Hay {duplicate_count} copias verificadas con la misma huella. "
+            "Elige la copia correcta antes de reanalizar esta fuente."
+        )
+    else:
+        code = _ARCHIVED_SOURCE_MISSING_CODE
+        message = (
+            "No se localiza la copia archivada con la misma huella. "
+            "Vuelve a añadir el archivo original para poder analizarlo."
+        )
+    return _create_review_issue(
+        connection,
+        case_id,
+        document_id,
+        code=code,
+        field_name="archived_path",
         message=message,
         origin="automatic",
     )
@@ -415,12 +623,39 @@ def clear_open_automatic_issues(
         ).fetchone()
         if document is None or document["id_case"] != case_id:
             raise LookupError("El documento no pertenece al expediente")
+        placeholders = ", ".join("?" for _ in _AUTOMATIC_REVIEW_CODES)
         connection.execute(
-            """DELETE FROM review_issues
-               WHERE id_case = ? AND id_document = ? AND status = 'open'
-                 AND origin = 'automatic' AND code IN (?, ?)""",
+            f"""DELETE FROM review_issues
+                WHERE id_case = ? AND id_document = ? AND status = 'open'
+                  AND origin = 'automatic' AND code IN ({placeholders})""",
             (case_id, document_id, *_AUTOMATIC_REVIEW_CODES),
         )
+
+
+def resolve_archived_source_issue(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+) -> int:
+    """Cierra las incidencias de archivo al recuperar una ruta verificada."""
+    with _transaction(connection):
+        document = connection.execute(
+            "SELECT id_case FROM source_documents WHERE id_document = ?", (document_id,)
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        result = connection.execute(
+            """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
+               WHERE id_case=? AND id_document=? AND status='open' AND origin='automatic'
+                 AND code IN (?, ?)""",
+            (
+                case_id,
+                document_id,
+                _ARCHIVED_SOURCE_DUPLICATE_CODE,
+                _ARCHIVED_SOURCE_MISSING_CODE,
+            ),
+        )
+    return result.rowcount
 
 
 def list_open_issues(connection: sqlite3.Connection, case_id: int) -> tuple[ReviewIssue, ...]:
@@ -435,6 +670,133 @@ def list_open_issues(connection: sqlite3.Connection, case_id: int) -> tuple[Revi
         (case_id,),
     ).fetchall()
     return tuple(review_issue_from_row(row) for row in rows)
+
+
+def _normalise_reading_property(value: str) -> str:
+    return re.sub(r"[\s\.º°]", "", value.upper())
+
+
+def _resolve_reading_conflict(
+    connection: sqlite3.Connection,
+    issue: sqlite3.Row,
+    value: str,
+    *,
+    reason: str,
+    resolved_by: str,
+) -> str:
+    """Makes a reviewed reading authoritative before reapplying its source."""
+    match = re.fullmatch(r"reading\.(.+)\.(ACS|CALEFACCION)", str(issue["field_name"]))
+    if match is None:
+        raise LookupError("La incidencia de lectura no identifica una vivienda válida")
+    try:
+        confirmed_value = Decimal(value.replace(",", "."))
+    except InvalidOperation:
+        raise ValueError("Introduce una lectura acumulada numérica válida.") from None
+    if not confirmed_value.is_finite() or confirmed_value < 0:
+        raise ValueError("Introduce una lectura acumulada numérica válida.")
+
+    property_code, service = match.groups()
+    case = get_case(connection, issue["id_case"])
+    owners = connection.execute(
+        """SELECT DISTINCT owner.id_propietario,owner.codigo_vivienda
+           FROM reading_observations AS observation
+           JOIN propietarios AS owner ON owner.id_propietario=observation.id_propietario
+           WHERE observation.id_document=? AND observation.tipo=?
+             AND owner.id_comunidad=?""",
+        (issue["id_document"], service, case.community_id),
+    ).fetchall()
+    owner = next(
+        (item for item in owners if _normalise_reading_property(item["codigo_vivienda"])
+         == _normalise_reading_property(property_code)),
+        None,
+    )
+    if owner is None:
+        raise LookupError("La vivienda de la incidencia no pertenece al expediente")
+    observation = connection.execute(
+        """SELECT id_observation,fecha_lectura FROM reading_observations
+           WHERE id_document=? AND id_propietario=? AND tipo=? AND status='conflict'
+           ORDER BY id_observation DESC LIMIT 1""",
+        (issue["id_document"], owner["id_propietario"], service),
+    ).fetchone()
+    if observation is None:
+        raise LookupError("No se localiza la lectura en conflicto para corregirla")
+    reading = connection.execute(
+        """SELECT id_lectura FROM lecturas_vecino
+           WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
+        (owner["id_propietario"], service, observation["fecha_lectura"]),
+    ).fetchone()
+    if reading is None:
+        raise LookupError("No se localiza la lectura canónica en conflicto")
+
+    rows_candidate = connection.execute(
+        "SELECT value FROM extraction_candidates WHERE id_document=? AND field_name='vecinos'",
+        (issue["id_document"],),
+    ).fetchone()
+    if rows_candidate is None:
+        raise LookupError("La fuente no conserva las filas de lecturas para corregirla")
+    try:
+        source_rows = json.loads(rows_candidate["value"])
+    except (TypeError, json.JSONDecodeError):
+        raise LookupError("Las filas de lecturas de la fuente no tienen un formato válido") from None
+    if not isinstance(source_rows, list):
+        raise LookupError("Las filas de lecturas de la fuente no tienen un formato válido")
+
+    defaults = {
+        row["field_name"]: row["value"]
+        for row in connection.execute(
+            """SELECT field_name,value FROM extraction_candidates
+               WHERE id_document=? AND field_name IN ('tipo','fecha_inicio','fecha_fin')""",
+            (issue["id_document"],),
+        )
+    }
+    updated = False
+    for source_row in source_rows:
+        if not isinstance(source_row, dict):
+            continue
+        if _normalise_reading_property(str(source_row.get("vivienda") or "")) != _normalise_reading_property(property_code):
+            continue
+        source_service = str(source_row.get("tipo") or defaults.get("tipo") or "").upper()
+        if source_service != service:
+            continue
+        initial_date = str(source_row.get("fecha_ant") or defaults.get("fecha_inicio") or "")
+        final_date = str(source_row.get("fecha_act") or defaults.get("fecha_fin") or "")
+        if observation["fecha_lectura"] == initial_date:
+            source_row["val_ant"] = float(confirmed_value)
+        elif observation["fecha_lectura"] == final_date:
+            source_row["val_act"] = float(confirmed_value)
+        else:
+            continue
+        updated = True
+        break
+    if not updated:
+        raise LookupError("No se localiza la fila de la lectura en la fuente")
+
+    corrected_text = _decimal_text(confirmed_value)
+    connection.execute(
+        """UPDATE extraction_candidates
+           SET value=?,source='manual',validation_status='validated'
+           WHERE id_document=? AND field_name='vecinos'""",
+        (json.dumps(source_rows, ensure_ascii=False), issue["id_document"]),
+    )
+    connection.execute(
+        """UPDATE lecturas_vecino
+           SET valor_acumulado=?,estado='real',metodo_estimacion='manual_conflict_resolution',
+               notas=?,approved_by=?,approved_at=datetime('now')
+           WHERE id_lectura=?""",
+        (
+            corrected_text,
+            f"Lectura confirmada manualmente; motivo={reason}",
+            resolved_by,
+            reading["id_lectura"],
+        ),
+    )
+    connection.execute(
+        """UPDATE reading_observations
+           SET status='observed',effective_reading_id=?,previous_reading_id=NULL
+           WHERE id_observation=?""",
+        (reading["id_lectura"], observation["id_observation"]),
+    )
+    return corrected_text
 
 
 def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
@@ -453,9 +815,18 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
         issue = _issue_row(connection, issue_id)
         if issue is None or issue["status"] != "open":
             raise LookupError("Incidencia no encontrada")
+        normalized_value = _validate_issue_value(str(issue["field_name"]), normalized_value)
         if issue["code"] == _COUNTER_RESET_CODE:
             raise ValueError(
                 "Un reinicio de contador sólo se puede cerrar con una estimación aprobada"
+            )
+        if issue["code"] == _READING_ZERO_CODE:
+            # Esta corrección sólo guardaba un candidato de extracción, sin
+            # tocar la lectura: el diálogo decía "guardado" y la incidencia
+            # reaparecía al reaplicar la fuente. Se cierra por su propio camino.
+            raise ValueError(
+                "Una lectura a cero se confirma desde «Revisar ceros», que sí "
+                "escribe la lectura canónica"
             )
         candidate = connection.execute(
             """SELECT value FROM extraction_candidates
@@ -463,6 +834,11 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
             (issue["id_document"], issue["field_name"]),
         ).fetchone()
         original_value = candidate["value"] if candidate is not None else None
+        if issue["code"] == "READING_CONFLICT":
+            normalized_value = _resolve_reading_conflict(
+                connection, issue, normalized_value,
+                reason=normalized_reason, resolved_by=normalized_resolved_by,
+            )
         connection.execute(
             """INSERT INTO manual_corrections
                (id_issue, original_value, corrected_value, reason, resolved_by)
@@ -482,6 +858,14 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
                    validation_status = excluded.validation_status""",
             (issue["id_document"], issue["field_name"], normalized_value),
         )
+        if issue["code"] == _CLASSIFICATION_REQUIRED_CODE:
+            next_status = "not_applicable" if normalized_value == "other" else "under_review"
+            connection.execute(
+                """UPDATE source_documents
+                   SET document_kind=?, status=?, confirmed_by=NULL, confirmed_at=NULL
+                   WHERE id_document=?""",
+                (normalized_value, next_status, issue["id_document"]),
+            )
         connection.execute(
             """UPDATE review_issues SET status = 'resolved', resolved_at = datetime('now')
                WHERE id_issue = ?""",
@@ -569,6 +953,14 @@ def approve_counter_reset_estimate(
             f"UPDATE propietarios SET {owner_state}='ok' WHERE id_propietario=?",
             (owner["id_propietario"],),
         )
+        # El mismo reinicio lo reportan todos los ficheros de lecturas que
+        # cubren ese intervalo, y el índice de unicidad es por documento: sin
+        # esto quedaban incidencias gemelas que ya no se podían aprobar.
+        connection.execute(
+            """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
+               WHERE status='open' AND code=? AND field_name=? AND id_case=?""",
+            (_COUNTER_RESET_CODE, issue["field_name"], issue["id_case"]),
+        )
         connection.execute(
             """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
                WHERE id_issue=?""",
@@ -577,6 +969,218 @@ def approve_counter_reset_estimate(
         resolved = _issue_row(connection, issue_id)
         _reapply_reviewed_document(connection, issue['id_case'], issue['id_document'])
     return review_issue_from_row(resolved)
+
+
+def carry_forward_counter_resets_for_source(
+    connection: sqlite3.Connection,
+    *,
+    case_id: int,
+    document_id: int,
+    reason: str,
+    approved_by: str,
+) -> int:
+    """Aprueba en bloque el criterio temporal para reinicios de una fuente.
+
+    Conserva la última lectura acumulada conocida de cada contador afectado,
+    por lo que el consumo provisional del intervalo es cero. Cada corrección
+    queda auditada, pero el gestor toma una sola decisión para el documento.
+    """
+    normalized_reason = reason.strip()
+    normalized_approver = approved_by.strip()
+    if not normalized_reason:
+        raise ValueError("El motivo del criterio temporal es obligatorio")
+    if not normalized_approver:
+        raise ValueError("La persona que aprueba el criterio temporal es obligatoria")
+
+    with _transaction(connection):
+        rows = connection.execute(
+            """SELECT id_issue FROM review_issues
+               WHERE id_case=? AND id_document=? AND code=? AND status='open'
+               ORDER BY id_issue""",
+            (case_id, document_id, _COUNTER_RESET_CODE),
+        ).fetchall()
+        if not rows:
+            return 0
+        for row in rows:
+            issue = _issue_row(connection, row["id_issue"])
+            if issue is None:
+                raise LookupError("Incidencia de reinicio no encontrada")
+            _case, owner, initial, final = _counter_reset_target(connection, issue)
+            original_text = _decimal_text(Decimal(str(final["valor_acumulado"])))
+            corrected_text = _decimal_text(Decimal(str(initial["valor_acumulado"])))
+            notes = (
+                f"Lectura previa conservada tras reinicio masivo; valor original={original_text}; "
+                f"consumo provisional=0; lectura virtual={corrected_text}; "
+                f"motivo={normalized_reason}; aprobada por={normalized_approver}"
+            )
+            if final["notas"]:
+                notes = f"{final['notas']} | {notes}"
+            connection.execute(
+                """INSERT INTO manual_corrections
+                   (id_issue,original_value,corrected_value,reason,resolved_by)
+                   VALUES (?,?,?,?,?)""",
+                (issue["id_issue"], original_text, corrected_text, normalized_reason, normalized_approver),
+            )
+            connection.execute(
+                """INSERT INTO extraction_candidates
+                   (id_document,field_name,value,source,validation_status)
+                   VALUES (?, ?, ?, 'manual_counter_reset_carry_forward', 'validated')
+                   ON CONFLICT(id_document,field_name) DO UPDATE SET
+                       value=excluded.value,source=excluded.source,
+                       validation_status=excluded.validation_status""",
+                (issue["id_document"], issue["field_name"], corrected_text),
+            )
+            connection.execute(
+                """UPDATE lecturas_vecino
+                   SET valor_acumulado=?,estado='estimado',metodo_estimacion='counter_reset_carry_forward',
+                       notas=?,approved_by=?,approved_at=datetime('now')
+                   WHERE id_lectura=?""",
+                (corrected_text, notes, normalized_approver, final["id_lectura"]),
+            )
+            owner_state = (
+                "estado_contador_acs"
+                if issue["field_name"].partition("|")[0].endswith(".ACS")
+                else "estado_contador_cal"
+            )
+            connection.execute(
+                f"UPDATE propietarios SET {owner_state}='ok' WHERE id_propietario=?",
+                (owner["id_propietario"],),
+            )
+            connection.execute(
+                "UPDATE review_issues SET status='resolved',resolved_at=datetime('now') WHERE id_issue=?",
+                (issue["id_issue"],),
+            )
+        _reapply_reviewed_document(connection, case_id, document_id)
+    return len(rows)
+
+
+def confirm_initial_zero_readings_for_source(
+    connection: sqlite3.Connection,
+    *,
+    case_id: int,
+    document_id: int,
+    reason: str,
+    approved_by: str,
+) -> int:
+    """Confirma en bloque ceros iniciales de una fuente y reanuda su aplicación."""
+    normalized_reason = reason.strip()
+    normalized_approver = approved_by.strip()
+    if not normalized_reason:
+        raise ValueError("El motivo para confirmar los ceros iniciales es obligatorio")
+    if not normalized_approver:
+        raise ValueError("La persona que confirma los ceros iniciales es obligatoria")
+
+    with _transaction(connection):
+        case = get_case(connection, case_id)
+        period_id = link_case_to_period(connection, case_id)
+        document = connection.execute(
+            "SELECT id_case,archived_path FROM source_documents WHERE id_document=?",
+            (document_id,),
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+        rows = connection.execute(
+            """SELECT id_issue,field_name FROM review_issues
+               WHERE id_case=? AND id_document=? AND code='READING_ZERO_REVIEW'
+                 AND status='open' ORDER BY id_issue""",
+            (case_id, document_id),
+        ).fetchall()
+        if not rows:
+            return 0
+
+        for issue in rows:
+            match = re.fullmatch(r"reading\.(.+)\.(ACS|CALEFACCION)", str(issue["field_name"]))
+            if match is None:
+                raise LookupError("La incidencia no apunta a una lectura inicial válida")
+            property_code, service = match.groups()
+            owner = connection.execute(
+                "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda=?",
+                (case.community_id, property_code),
+            ).fetchone()
+            if owner is None:
+                raise LookupError("La vivienda de la lectura no pertenece al expediente")
+            observation = connection.execute(
+                """SELECT id_observation,fecha_lectura FROM reading_observations
+                   WHERE id_document=? AND id_propietario=? AND tipo=?
+                     AND observed_value=0
+                   ORDER BY fecha_lectura,id_observation LIMIT 1""",
+                (document_id, owner["id_propietario"], service),
+            ).fetchone()
+            if observation is None:
+                raise LookupError("No existe una observación inicial a cero pendiente")
+            current = connection.execute(
+                """SELECT id_lectura,valor_acumulado,estado,metodo_estimacion,approved_by,approved_at
+                   FROM lecturas_vecino
+                   WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
+                (owner["id_propietario"], service, observation["fecha_lectura"]),
+            ).fetchone()
+            approved_counter_reset = current is not None and (
+                current["estado"] == "estimado"
+                and current["metodo_estimacion"] == "counter_reset_carry_forward"
+                and str(current["approved_by"] or "").strip()
+                and str(current["approved_at"] or "").strip()
+            )
+            # Un cero que el propio sistema ya resolvió arrastrando la lectura
+            # anterior no es un valor ajeno con el que chocar: es la respuesta a
+            # este mismo cero. Rechazarlo dejaba la incidencia sin ninguna vía
+            # de cierre, porque la estimación nunca llega a estado 'real'.
+            carried_forward_zero = current is not None and (
+                current["estado"] == "estimado"
+                and current["metodo_estimacion"] == "carry_forward_zero"
+            )
+            if (
+                current is not None
+                and float(current["valor_acumulado"]) != 0
+                and current["estado"] != "real"
+                and not approved_counter_reset
+                and not carried_forward_zero
+            ):
+                raise ValueError("Ya existe una lectura canónica distinta de cero para esta fecha")
+            if current is None:
+                cursor = connection.execute(
+                    """INSERT INTO lecturas_vecino
+                       (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,
+                        metodo_estimacion,fuente,notas,approved_by,approved_at)
+                       VALUES (?,?,?,?,0,'real','confirmed_initial_zero',?,?,?,datetime('now'))""",
+                    (
+                        owner["id_propietario"], period_id, service, observation["fecha_lectura"],
+                        str(document["archived_path"]),
+                        f"Lectura inicial a 0 confirmada en bloque; motivo={normalized_reason}",
+                        normalized_approver,
+                    ),
+                )
+                reading_id = int(cursor.lastrowid)
+                observation_status = "observed"
+                corrected_value = "0"
+            else:
+                reading_id = int(current["id_lectura"])
+                observation_status = "observed" if float(current["valor_acumulado"]) == 0 else "carried_forward"
+                corrected_value = _decimal_text(Decimal(str(current["valor_acumulado"])))
+            connection.execute(
+                "INSERT OR IGNORE INTO reading_periods(id_lectura,id_periodo) VALUES (?,?)",
+                (reading_id, period_id),
+            )
+            connection.execute(
+                """UPDATE reading_observations
+                   SET status=?,effective_reading_id=?,previous_reading_id=NULL
+                   WHERE id_observation=?""",
+                (observation_status, reading_id, observation["id_observation"]),
+            )
+            connection.execute(
+                """INSERT INTO manual_corrections
+                   (id_issue,original_value,corrected_value,reason,resolved_by)
+                   VALUES (?,?,?,?,?)""",
+                (issue["id_issue"], "0", corrected_value, normalized_reason, normalized_approver),
+            )
+            connection.execute(
+                """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
+                   WHERE id_issue=?""",
+                (issue["id_issue"],),
+            )
+
+        from case_ingestion import apply_confirmed_source
+        apply_confirmed_source(connection, case_id, document_id)
+    return len(rows)
 
 
 def dismiss_invoice_outside_period(
@@ -621,6 +1225,87 @@ def dismiss_invoice_outside_period(
     return review_issue_from_row(dismissed)
 
 
+def ignore_source_document(
+    connection: sqlite3.Connection,
+    case_id: int,
+    document_id: int,
+    *,
+    reason: str,
+    dismissed_by: str,
+) -> int:
+    """Deja una fuente fuera del expediente, con su motivo y sin borrarla.
+
+    Un listado que el gestor no quiere incorporar, un PDF ilegible o un Excel
+    que sólo sirve de consulta bloqueaban el expediente entero: sus incidencias
+    eran obligatorias y no había forma de saltarlas. Omitir cierra todas sus
+    incidencias abiertas y marca el documento como ignorado, de modo que deja
+    de contar como fuente pendiente de aplicar. El archivo y sus extracciones
+    se conservan, así que la decisión es reversible reanalizando la fuente.
+
+    Devuelve cuántas incidencias se han cerrado.
+    """
+    normalized_reason = reason.strip()
+    normalized_actor = dismissed_by.strip()
+    if not normalized_reason:
+        raise ValueError("El motivo para omitir la fuente es obligatorio")
+    if not normalized_actor:
+        raise ValueError("La persona responsable de omitir la fuente es obligatoria")
+
+    with _transaction(connection):
+        document = connection.execute(
+            "SELECT id_case FROM source_documents WHERE id_document=?", (document_id,)
+        ).fetchone()
+        if document is None or document["id_case"] != case_id:
+            raise LookupError("El documento no pertenece al expediente")
+
+        issues = connection.execute(
+            "SELECT id_issue,detected_value FROM review_issues WHERE id_document=? AND status='open'",
+            (document_id,),
+        ).fetchall()
+        for issue in issues:
+            connection.execute(
+                """INSERT INTO manual_corrections
+                   (id_issue,original_value,corrected_value,reason,resolved_by)
+                   VALUES (?,?,?,?,?)""",
+                (
+                    issue["id_issue"], issue["detected_value"], "fuente_omitida",
+                    normalized_reason, normalized_actor,
+                ),
+            )
+        connection.execute(
+            """UPDATE review_issues SET status='dismissed',resolved_at=datetime('now')
+               WHERE id_document=? AND status='open'""",
+            (document_id,),
+        )
+        connection.execute(
+            "UPDATE source_documents SET status='not_applicable' WHERE id_document=?",
+            (document_id,),
+        )
+    return len(issues)
+
+
+def restore_ignored_source(
+    connection: sqlite3.Connection, case_id: int, document_id: int,
+) -> None:
+    """Devuelve al circuito una fuente omitida, para volver a analizarla."""
+    with _transaction(connection):
+        connection.execute(
+            """UPDATE source_documents SET status='registered'
+               WHERE id_document=? AND id_case=? AND status='not_applicable'""",
+            (document_id, case_id),
+        )
+
+
+def list_ignored_sources(connection: sqlite3.Connection, case_id: int):
+    """Fuentes que el gestor dejó fuera, para poder revisarlas o recuperarlas."""
+    return connection.execute(
+        """SELECT id_document,original_name FROM source_documents
+           WHERE id_case=? AND status='not_applicable' ORDER BY original_name""",
+        (case_id,),
+    ).fetchall()
+
+
+
 def assert_case_final_readings_approved(
     connection: sqlite3.Connection, case_id: int
 ) -> None:
@@ -639,15 +1324,23 @@ def assert_case_final_readings_approved(
         raise LookupError("Expediente no encontrado")
     if case["id_periodo"] is None:
         return
+    # Sólo se exige aprobación a lo que de verdad pide una decisión humana: un
+    # contador averiado o una estimación manual. Los carry-forward de cero o
+    # disminución son criterios automáticos —conservan la última lectura
+    # fiable— y no llevan aprobador. Garajes y locales quedan fuera.
     unresolved = connection.execute(
         """SELECT COUNT(*) FROM period_readings AS reading
            JOIN propietarios AS owner ON owner.id_propietario=reading.id_propietario
            WHERE owner.id_comunidad=? AND reading.id_periodo=?
              AND reading.fecha_lectura=?
+             AND owner.tipo_unidad='vivienda'
              AND (
                  reading.estado='contador_averiado'
                  OR (
                      reading.estado='estimado'
+                     AND COALESCE(reading.metodo_estimacion,'') NOT IN (
+                         'carry_forward_zero','carry_forward_decrease'
+                     )
                      AND (
                          trim(COALESCE(reading.approved_by,''))=''
                          OR trim(COALESCE(reading.approved_at,''))=''
@@ -697,7 +1390,7 @@ def case_has_unapplied_sources(connection: sqlite3.Connection, case_id: int) -> 
     """Analysed sources may only pass readiness after canonical application."""
     return connection.execute("""SELECT 1 FROM source_documents d
         WHERE d.id_case=? AND d.classification_confidence IS NOT NULL
-          AND d.document_kind<>'other' AND (
+          AND d.document_kind<>'other' AND d.status<>'not_applicable' AND (
             d.status<>'validated' OR d.document_kind='unknown'
             OR NOT EXISTS (SELECT 1 FROM archivos_procesados a
                            WHERE a.nombre_archivo='source_document:' || d.id_document)

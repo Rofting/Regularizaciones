@@ -158,6 +158,11 @@ class AppGestionFincas(ctk.CTk):
         self.ruta_bd_expedientes = RUTA_BD
         self.ruta_archivo_expedientes = BASE_DIR / "data" / "expedientes"
         self._procesando        = False
+        self._issues_page       = 1
+        self._issues_case_id    = None
+        self._issues_current    = ()
+        self._workspace_command = self._accion_crear_expediente
+        self._workspace_action_label = "Crear expediente"
 
         self._crear_ui_v3()
         self._cargar_comunidades()
@@ -207,6 +212,7 @@ class AppGestionFincas(ctk.CTk):
         self.cb_expediente.grid(row=1, column=2, sticky="ew", padx=10)
         actions = ctk.CTkFrame(context, fg_color="transparent")
         actions.grid(row=1, column=3, padx=(14, 0))
+        ctk.CTkButton(actions, text="Bandeja global", command=self._accion_bandeja_global, height=38, corner_radius=9, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="left", padx=(0, 7))
         ctk.CTkButton(actions, text="Nueva comunidad", command=self._nueva_comunidad, height=38, corner_radius=9, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="left", padx=(0, 7))
         ctk.CTkButton(actions, text="Crear expediente", command=self._accion_crear_expediente, height=38, corner_radius=9, font=UIM.fuente(11, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left")
         self.banner_periodo = ctk.CTkFrame(self, fg_color=C["acento_suave"], corner_radius=10)
@@ -223,7 +229,7 @@ class AppGestionFincas(ctk.CTk):
         nav.grid_propagate(False)
         ctk.CTkLabel(nav, text="Expediente", font=UIM.fuente(11, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=16, pady=(16, 8))
         self.workflow_step_rows, self.etapas, self.botones = {}, {}, {}
-        rows = (("fuentes", "1", "Fuentes", self._accion_anadir_fuentes), ("validar", "2", "Validar", self._accion_resolver_incidencias), ("reparto", "3", "Reparto", self._accion_generar_excel_expediente), ("cartas", "4", "Cartas", self._accion_generar_cartas_expediente))
+        rows = (("fuentes", "1", "Fuentes", self._accion_anadir_fuentes), ("validar", "2", "Validar", self._accion_resolver_incidencias), ("reparto", "3", "Reparto", self._accion_siguiente_paso), ("cartas", "4", "Cartas", self._accion_generar_cartas_expediente))
         for key, number, label, command in rows:
             row = UIM.WorkflowStepRow(nav, number=number, label=label, status="pending", command=command)
             row.pack(fill="x", padx=8, pady=3)
@@ -235,7 +241,15 @@ class AppGestionFincas(ctk.CTk):
             height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs(),
         )
         self.botones["Reanalizar fuentes"].pack(fill="x", padx=12, pady=(0, 5))
+        ctk.CTkButton(nav, text="Resolver copias", command=self._accion_resolver_copias_archivadas,
+                      height=31, corner_radius=8, font=UIM.fuente(10),
+                      **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
         ctk.CTkButton(nav, text="Confirmar fuentes", command=self._accion_confirmar_fuentes,
+                      height=31, corner_radius=8, font=UIM.fuente(10),
+                      **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
+        # Lo cobrado a los vecinos no está en ninguna factura ni en ningún
+        # contador: sin este paso el análisis no tiene con qué comparar el coste.
+        ctk.CTkButton(nav, text="Cuotas cobradas", command=self._accion_cuotas_cobradas,
                       height=31, corner_radius=8, font=UIM.fuente(10),
                       **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
         ctk.CTkButton(nav, text="Abrir salidas", command=self._abrir_salidas, height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs()).pack(fill="x", padx=12)
@@ -249,6 +263,17 @@ class AppGestionFincas(ctk.CTk):
         self.workspace_primary = ctk.CTkButton(work, text="Crear expediente", command=self._accion_crear_expediente, height=44, corner_radius=10, font=UIM.fuente(13, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"])
         self.workspace_primary.pack(anchor="w", padx=24, pady=(18, 16))
         self.botones["Crear expediente · principal"] = self.workspace_primary
+        self.workspace_repeat_actions = ctk.CTkFrame(work, fg_color="transparent")
+        for text, command in (
+            ("Regenerar Excel", self._accion_generar_excel_expediente),
+            ("Recalcular reparto", self._accion_calcular_reparto_expediente),
+            ("Repetir cartas", self._accion_generar_cartas_expediente),
+        ):
+            ctk.CTkButton(
+                self.workspace_repeat_actions, text=text, command=command,
+                height=34, corner_radius=8, font=UIM.fuente(10, "bold"),
+                **UIM.secondary_button_kwargs(),
+            ).pack(side="left", padx=(0, 7))
         panel = ctk.CTkFrame(work, fg_color=C["panel_2"], corner_radius=11)
         panel.pack(fill="both", expand=True, padx=24, pady=(0, 20))
         self.lbl_incidencias_bandeja = ctk.CTkLabel(panel, text="Validación del expediente", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"])
@@ -356,7 +381,7 @@ class AppGestionFincas(ctk.CTk):
             self.botones[name] = row
         ctk.CTkFrame(nav, fg_color=C["borde"], height=1).pack(fill="x", padx=16, pady=16)
         ctk.CTkLabel(nav, text="OTRAS ACCIONES", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(0, 7))
-        for name, command in (("Regularización guiada", self._accion_regularizacion_guiada), ("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
+        for name, command in (("Regularización guiada", self._accion_regularizacion_guiada), ("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Historial del período", self._accion_ver_historial_periodo), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
             button = ctk.CTkButton(nav, text=name, command=command, height=32, corner_radius=8, anchor="w", font=UIM.fuente(11), fg_color="transparent", hover_color=C["acento_suave"], text_color=C["texto_sec"])
             button.pack(fill="x", padx=12, pady=1)
             self.botones[name] = button
@@ -975,6 +1000,13 @@ class AppGestionFincas(ctk.CTk):
             self.log(f"📛 Error inesperado: {type(e).__name__} — {e}", "error")
             self.log("   👉 Si se repite, copia el detalle técnico de abajo y pide ayuda.", "aviso")
             self.log(traceback.format_exc().strip(), "detalle")
+            detail = f"{e}\n\nNo se ha modificado ningún archivo oficial."
+            self.after(
+                0,
+                lambda detail=detail: messagebox.showerror(
+                    "No se pudo completar", detail, parent=self,
+                ),
+            )
         finally:
             self._procesando = False
             self.after(0, self._habilitar_botones)
@@ -1042,6 +1074,19 @@ class AppGestionFincas(ctk.CTk):
         if self._validar_expediente_activo():
             self._en_hilo(self._generar_excel_expediente_impl)
 
+    def _accion_siguiente_paso(self):
+        """Ejecuta la acción segura mostrada en el panel principal.
+
+        El acceso lateral de reparto no debe saltarse la confirmación de
+        fuentes ni intentar crear un Excel cuando el expediente aún no está
+        preparado. La ruta se actualiza al refrescar el expediente.
+        """
+        command = getattr(self, "_workspace_command", None)
+        if command is None:
+            self.log("Selecciona un expediente para continuar con el reparto.", "aviso")
+            return
+        command()
+
     def _accion_calcular_reparto_expediente(self):
         if self._validar_expediente_activo():
             self._en_hilo(self._calcular_reparto_expediente_impl)
@@ -1078,6 +1123,12 @@ class AppGestionFincas(ctk.CTk):
         if not expedient_ui or not ingestion or not database:
             self.log("No está disponible la interfaz para añadir fuentes.", "error")
             return
+        if not self.id_expediente:
+            # No se reutiliza una comunidad abierta como destino implícito:
+            # una carpeta de correo puede reunir distintos ejercicios y
+            # comunidades. La bandeja clasifica antes de pedir un expediente.
+            self._accion_bandeja_global()
+            return
         if self.id_expediente:
             connection = database.conectar(str(self.ruta_bd_expedientes))
             try:
@@ -1092,6 +1143,14 @@ class AppGestionFincas(ctk.CTk):
             finally:
                 connection.close()
         expedient_ui.open_add_sources_dialog(self, self.id_expediente)
+
+    def _accion_bandeja_global(self):
+        """Clasifica una carpeta mixta sin reutilizar el contexto activo."""
+        ui = MOD.get("expedient_ui")
+        if ui is None:
+            self.log("No está disponible la bandeja global de fuentes.", "error")
+            return
+        ui.open_detect_communities_dialog(self)
 
     def _accion_confirmar_fuentes(self):
         if self._procesando or not self._validar_expediente_activo():
@@ -1130,11 +1189,26 @@ class AppGestionFincas(ctk.CTk):
         self._estado("Reanalizando fuentes", procesando=True)
         self._en_hilo(work)
 
+
+    def _accion_cuotas_cobradas(self):
+        ui = MOD.get("expedient_ui")
+        if not ui:
+            self.log("No está disponible la gestión de cuotas.", "error")
+            return
+        ui.open_service_fees_dialog(self, "ACS")
+    def _accion_resolver_copias_archivadas(self):
+        if self._procesando or not self._validar_expediente_activo():
+            return
+        ui = MOD.get("expedient_ui")
+        if ui:
+            ui.open_archived_path_resolution_dialog(self, self.id_expediente)
+
     def _accion_resolver_incidencias(self):
         review = MOD.get("document_review")
         ingestion = MOD.get("case_ingestion")
         database = MOD.get("gestor_bd")
-        if not review or not ingestion or not database:
+        ui = MOD.get("expedient_ui")
+        if not review or not ingestion or not database or not ui:
             self.log("No está disponible la revisión de incidencias.", "error")
             return
         if not self.id_expediente:
@@ -1156,11 +1230,21 @@ class AppGestionFincas(ctk.CTk):
         if not issues:
             self._accion_confirmar_fuentes()
             return
+        if any(issue.code in {"COUNTER_RESET", "READING_ZERO_REVIEW"} for issue in issues):
+            ui.open_confirm_sources_dialog(self, self.id_expediente)
+            return
         self._refrescar_bandeja_incidencias(issues)
-        self.log(
-            "Elige Resolver en la incidencia concreta de la bandeja.",
-            "info",
-        )
+        ui.open_issue_dialog(self, issues[0])
+
+    def _accion_ver_historial_periodo(self):
+        if not self.id_expediente:
+            self.log("Selecciona un expediente para consultar su historial.", "aviso")
+            return
+        ui = MOD.get("expedient_ui")
+        if ui is None:
+            self.log("No está disponible el historial del expediente.", "error")
+            return
+        ui.open_case_history_dialog(self, self.id_expediente)
 
     def _refrescar_expediente(self):
         service = MOD.get("expedient_service")
@@ -1183,8 +1267,24 @@ class AppGestionFincas(ctk.CTk):
                 connection, self.id_expediente
             )
             issues = review.list_open_issues(connection, self.id_expediente)
-            open_count = len(issues)
+            review_summary = MOD.get("expedient_ui").review_summary(issues)
+            open_count = review_summary.actionable_count
+            technical_issue_count = review_summary.technical_count
             workflow = MOD.get("case_workflow_actions")
+            template_row = connection.execute(
+                """SELECT template_relative_path FROM excel_template_profiles
+                   WHERE id_comunidad=? AND status='active'
+                   ORDER BY id_template_profile DESC LIMIT 1""",
+                (self.id_comunidad,),
+            ).fetchone()
+            has_registered_template = False
+            if template_row is not None:
+                try:
+                    template_path = (BASE_DIR / template_row["template_relative_path"]).resolve()
+                    template_path.relative_to(BASE_DIR.resolve())
+                    has_registered_template = template_path.is_file()
+                except (TypeError, ValueError):
+                    has_registered_template = False
             if workflow:
                 try:
                     profile = workflow.resolve_case_profile(
@@ -1222,7 +1322,8 @@ class AppGestionFincas(ctk.CTk):
         status_label = status_labels.get(case.status, case.status)
         summary = (
             f"{case.name}\n{date_range}\n{document_count} fuente(s) · "
-            f"Perfil: {profile_label}\n{open_count} incidencia(s) abierta(s)\n"
+            f"Perfil: {profile_label}\n{open_count} decisión(es) pendiente(s)"
+            f" · {technical_issue_count} comprobación(es) registrada(s)\n"
             f"Estado: {status_label}"
         )
         self._resumen_ejercicio(summary)
@@ -1230,6 +1331,7 @@ class AppGestionFincas(ctk.CTk):
         workspace = MOD.get("expedient_ui").guided_workspace_state(
             has_case=True, document_count=document_count,
             open_issue_count=open_count, case_status=case.status,
+            has_registered_template=has_registered_template,
         )
         self.after(0, lambda: self._actualizar_workspace(workspace))
 
@@ -1240,7 +1342,7 @@ class AppGestionFincas(ctk.CTk):
                 "perfil": profile_label,
                 "fuentes": str(document_count),
                 "estado": status_label,
-                "incidencias": f"{open_count} abiertas",
+                "incidencias": f"{open_count} decisión(es)",
             }
             for key, value in values.items():
                 if key in metrics:
@@ -1257,12 +1359,17 @@ class AppGestionFincas(ctk.CTk):
         self.after(0, update_metrics)
         self.log(
             f"{case.name} · {date_range} · {document_count} fuente(s) · "
-            f"estado {case.status} · {open_count} incidencia(s) abierta(s)",
+            f"estado {case.status} · {open_count} decisión(es) pendiente(s) · "
+            f"{technical_issue_count} comprobación(es) registrada(s)",
             "info",
         )
         if open_count:
             self._actualizar_etapa("validacion")
-            self.log(f"{open_count} incidencia(s) por resolver antes de generar el Excel oficial", "aviso")
+            self.log(
+                f"{open_count} decisión(es) por resolver antes de generar el Excel oficial "
+                f"({technical_issue_count} comprobación(es) agrupada(s))",
+                "aviso",
+            )
         elif case.status == "ready_for_calculation":
             self._actualizar_etapa("calculo")
             self.log("Listo para generar el Excel oficial", "ok")
@@ -1285,16 +1392,27 @@ class AppGestionFincas(ctk.CTk):
         action_map = {
             "crear_expediente": ("Crear expediente", self._accion_crear_expediente),
             "anadir_fuentes": ("Añadir fuentes", self._accion_anadir_fuentes),
+            "importar_modelo": ("Importar modelo inicial", self._accion_importar_modelo_inicial),
             "resolver_incidencias": ("Resolver incidencias", self._accion_resolver_incidencias),
+            "confirmar_fuentes": ("Confirmar fuentes", self._accion_confirmar_fuentes),
             "generar_excel": ("Generar Excel oficial", self._accion_generar_excel_expediente),
             "calcular_reparto": ("Calcular reparto", self._accion_calcular_reparto_expediente),
             "generar_cartas": ("Generar cartas", self._accion_generar_cartas_expediente),
             "abrir_salidas": ("Abrir salidas", self._abrir_salidas),
         }
         label, command = action_map[workspace.next_action]
+        self._workspace_command = command
+        self._workspace_action_label = label
         self.workspace_headline.configure(text=workspace.headline)
         self.workspace_detail.configure(text=workspace.detail)
         self.workspace_primary.configure(text=label, command=command)
+        if workspace.next_action == "abrir_salidas":
+            if not self.workspace_repeat_actions.winfo_manager():
+                self.workspace_repeat_actions.pack(
+                    anchor="w", padx=24, pady=(0, 14), after=self.workspace_primary,
+                )
+        else:
+            self.workspace_repeat_actions.pack_forget()
         for step in workspace.steps:
             row = self.workflow_step_rows.get(step.key)
             if row is not None:
@@ -1302,6 +1420,10 @@ class AppGestionFincas(ctk.CTk):
 
     def _refrescar_bandeja_incidencias(self, issues=()):
         issues = tuple(issues)
+        self._issues_current = issues
+        if self._issues_case_id != self.id_expediente:
+            self._issues_case_id = self.id_expediente
+            self._issues_page = 1
 
         def update_tray():
             tray = getattr(self, "bandeja_incidencias", None)
@@ -1309,7 +1431,10 @@ class AppGestionFincas(ctk.CTk):
                 return
             for child in tray.winfo_children():
                 child.destroy()
-            self.lbl_incidencias_bandeja.configure(text=str(len(issues)))
+            expedient_ui = MOD.get("expedient_ui")
+            summary = expedient_ui.review_summary(issues)
+            groups = summary.groups
+            self.lbl_incidencias_bandeja.configure(text=str(summary.actionable_count))
 
             if not self.id_expediente:
                 ctk.CTkLabel(
@@ -1331,8 +1456,44 @@ class AppGestionFincas(ctk.CTk):
                 ).pack(anchor="w", padx=9, pady=12)
                 return
 
-            expedient_ui = MOD.get("expedient_ui")
-            for issue in issues:
+            visible_groups, current_page, total_pages = expedient_ui.issue_page(
+                groups, self._issues_page,
+            )
+            self._issues_page = current_page
+            controls = ctk.CTkFrame(tray, fg_color="transparent")
+            controls.pack(fill="x", padx=4, pady=(2, 6))
+            ctk.CTkLabel(
+                controls,
+                text=(
+                    f"{summary.actionable_count} decisión(es) · "
+                    f"{summary.technical_count} comprobación(es) · "
+                    f"Página {current_page}/{total_pages}"
+                ),
+                font=UIM.fuente(10), text_color=C["texto_sec"],
+            ).pack(side="left")
+            if total_pages > 1:
+                def change_page(target_page):
+                    self._issues_page = target_page
+                    self._refrescar_bandeja_incidencias(self._issues_current)
+
+                ctk.CTkButton(
+                    controls, text="Anterior", width=72, height=26,
+                    corner_radius=7, command=lambda: change_page(current_page - 1),
+                    **UIM.secondary_button_kwargs(),
+                ).pack(side="right", padx=(5, 0))
+                ctk.CTkButton(
+                    controls, text="Siguiente", width=72, height=26,
+                    corner_radius=7, command=lambda: change_page(current_page + 1),
+                    **UIM.secondary_button_kwargs(),
+                ).pack(side="right")
+
+            for grouped in visible_groups:
+                issue = grouped["representative"]
+                reset_count = int(grouped["count"])
+                is_reset_group = issue.code == "COUNTER_RESET" and reset_count > 1
+                # Un único cero necesita el mismo diálogo que un grupo: el
+                # genérico no escribe la lectura y parecía no guardar nada.
+                is_zero_group = issue.code == "READING_ZERO_REVIEW"
                 row = ctk.CTkFrame(
                     tray,
                     fg_color=C["panel"],
@@ -1350,14 +1511,27 @@ class AppGestionFincas(ctk.CTk):
                 detail.pack(side="left", fill="both", expand=True, pady=7)
                 ctk.CTkLabel(
                     detail,
-                    text=issue.field_name,
+                    text=(
+                        f"{reset_count} reinicios de contador por revisar"
+                        if is_reset_group else
+                        f"{reset_count} lecturas a 0 por revisar" if is_zero_group else
+                        issue.field_name
+                    ),
                     font=UIM.fuente(11, "bold"),
                     text_color=C["texto"],
                     anchor="w",
                 ).pack(fill="x")
                 ctk.CTkLabel(
                     detail,
-                    text=f"{issue.archived_path.name} · {issue.message}",
+                    text=(
+                        f"{issue.archived_path.name} · Se aplica un único criterio temporal "
+                        "a todas las viviendas de este informe; las lecturas originales "
+                        "y la decisión se conservan en el histórico."
+                        if is_reset_group else
+                        (f"{issue.archived_path.name} · Aplica un único criterio: se conserva la lectura "
+                         "canónica si existe; si no, el cero queda como lectura inicial auditada.")
+                        if is_zero_group else f"{issue.archived_path.name} · {issue.message}"
+                    ),
                     font=UIM.fuente(10),
                     text_color=C["texto_sec"],
                     anchor="w",
@@ -1366,6 +1540,20 @@ class AppGestionFincas(ctk.CTk):
                 ).pack(fill="x", pady=(2, 0))
                 actions = ctk.CTkFrame(row, fg_color="transparent")
                 actions.pack(side="right", padx=8, pady=7)
+                if is_reset_group:
+                    resolve_command = lambda current=issue, count=reset_count: expedient_ui.open_counter_reset_carry_forward_dialog(
+                        self, current.id_case, current.id_document, count,
+                        current.archived_path.name,
+                    )
+                elif is_zero_group:
+                    resolve_command = lambda current=issue, count=reset_count: expedient_ui.open_initial_zero_confirmation_dialog(
+                        self, current.id_case, current.id_document, count,
+                        current.archived_path.name,
+                    )
+                else:
+                    resolve_command = lambda current=issue: expedient_ui.open_issue_dialog(
+                        self, current
+                    )
                 ctk.CTkButton(
                     actions,
                     text="Abrir archivo",
@@ -1383,21 +1571,39 @@ class AppGestionFincas(ctk.CTk):
                 ).pack(pady=(0, 4))
                 ctk.CTkButton(
                     actions,
-                    text="Resolver",
+                    text="Revisar grupo" if (is_reset_group or is_zero_group) else "Resolver",
                     width=86,
                     height=28,
                     corner_radius=7,
                     fg_color=C["primario"],
                     hover_color=C["primario_hover"],
-                    command=lambda current=issue: expedient_ui.open_issue_dialog(
+                    command=resolve_command,
+                ).pack()
+                # Salida para las fuentes que no deben entrar en el expediente:
+                # sin ella, una sola incidencia irresoluble lo bloquea entero.
+                ctk.CTkButton(
+                    actions,
+                    text="Omitir",
+                    width=86,
+                    height=28,
+                    corner_radius=7,
+                    fg_color="transparent",
+                    border_width=1,
+                    border_color=C["borde"],
+                    text_color=C["texto_sec"],
+                    hover_color=C["acento_suave"],
+                    command=lambda current=issue: expedient_ui.open_skip_source_dialog(
                         self, current
                     ),
-                ).pack()
+                ).pack(pady=(4, 0))
 
         self.after(0, update_tray)
 
     def _limpiar_contexto_expediente(self):
         self.id_expediente = None
+        self._issues_page = 1
+        self._issues_case_id = None
+        self._issues_current = ()
         self.expediente_actual.set("")
         self.expediente_seleccionado.set("")
         self._ids_expediente = {}
@@ -2952,10 +3158,15 @@ class AppGestionFincas(ctk.CTk):
 
         expedient_ui = MOD.get("expedient_ui")
         option(
+            "Detectar desde carpeta",
+            "Analiza una carpeta mixta y propone crear automáticamente las comunidades nuevas.",
+            lambda: expedient_ui.open_detect_communities_dialog(self),
+            primary=True,
+        )
+        option(
             "Alta guiada desde fuentes",
             "Analiza propietarios, lecturas y facturas antes de crear el perfil.",
             lambda: expedient_ui.open_community_onboarding_dialog(self),
-            primary=True,
         )
         option(
             "Registro rápido",
