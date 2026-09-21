@@ -834,7 +834,7 @@ Usar `subTest(provider_key=...)` y verificar como mínimo: alias + estructura de
 Run:
 
 ```powershell
-.\.venv-fase1\Scripts\python.exe scripts\audit_provider_catalog.py --root "C:\Users\Jose\Proyectos\Soporte" --database data\gestion.db --output .private-audit\provider-catalog.json
+.\.venv-fase1\Scripts\python.exe scripts\audit_provider_catalog.py --root "$env:REGULARIZACIONES_SOURCE_ROOT" --database data\gestion.db --output .private-audit\provider-catalog.json
 ```
 
 Expected en el resumen de consola:
@@ -1013,7 +1013,7 @@ Expected: `compileall` y `git diff --check` devuelven código `0`; `data/gestion
 Run:
 
 ```powershell
-.\.venv-fase1\Scripts\python.exe scripts\audit_provider_catalog.py --root "C:\Users\Jose\Proyectos\Soporte" --database data\gestion.db --output .private-audit\provider-catalog.json
+.\.venv-fase1\Scripts\python.exe scripts\audit_provider_catalog.py --root "$env:REGULARIZACIONES_SOURCE_ROOT" --database data\gestion.db --output .private-audit\provider-catalog.json
 ```
 
 Expected: reconocimiento ≥90 %, menos de 60 decisiones de proveedor, cero falsos positivos no-factura y ningún bloqueo del lote.
