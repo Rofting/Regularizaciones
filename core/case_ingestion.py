@@ -1,5 +1,6 @@
 import sqlite3
 import json
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -10,12 +11,94 @@ from typing import Callable, Collection, Iterator, Mapping
 import document_review
 import expedient_service
 import gestor_bd
+from excel_profiles import configured_profile_paths, load_profile
 from importar_lecturas_metrigest import apply_confirmed_readings
 from expedient_models import RegularizationCase, SourceDocument, document_from_row
 from source_analysis import SourceAnalysis, analyse_source
+from source_eligibility import evaluate_invoice_eligibility
 
 
 _savepoint_counter = count()
+
+
+def _active_modules_for_case(
+    connection: sqlite3.Connection,
+    case_id: int,
+) -> tuple[str, ...] | None:
+    """Return configured modules, or None when no unique profile exists."""
+    rows = connection.execute(
+        """SELECT cases.id_comunidad,communities.codigo,profiles.profile_key
+             FROM regularization_cases cases
+             JOIN comunidades communities
+               ON communities.id_comunidad=cases.id_comunidad
+             LEFT JOIN excel_template_profiles profiles
+               ON profiles.id_comunidad=cases.id_comunidad
+              AND profiles.status='active'
+            WHERE cases.id_case=?
+            ORDER BY profiles.id_template_profile""",
+        (case_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    project_root = Path(__file__).resolve().parents[1]
+    profile_keys = tuple(
+        str(item["profile_key"]) for item in rows if item["profile_key"]
+    )
+    try:
+        if len(profile_keys) == 1:
+            return tuple(load_profile(profile_keys[0], project_root).active_modules)
+        if profile_keys:
+            return None
+        matching = []
+        for path in configured_profile_paths(project_root):
+            profile = load_profile(path.stem, project_root)
+            if profile.community_code == str(rows[0]["codigo"]):
+                matching.append(profile)
+    except (LookupError, ValueError, OSError):
+        return None
+    if len(matching) != 1:
+        return None
+    return tuple(matching[0].active_modules)
+
+
+def _invoice_eligibility_for_case(
+    connection: sqlite3.Connection,
+    case_id: int,
+    candidates: Mapping[str, str | None],
+) -> tuple[str, str | None] | None:
+    modules = _active_modules_for_case(connection, case_id)
+    service = str(candidates.get("tipo_suministro") or "").strip()
+    start_value = str(candidates.get("fecha_inicio") or "").strip()
+    end_value = str(candidates.get("fecha_fin") or "").strip()
+    if modules is None or not service or not start_value or not end_value:
+        return None
+    try:
+        period_start = date.fromisoformat(start_value)
+        period_end = date.fromisoformat(end_value)
+    except ValueError:
+        return None
+    case = connection.execute(
+        """SELECT communities.codigo,cases.fecha_inicio,cases.fecha_fin
+             FROM regularization_cases cases
+             JOIN comunidades communities
+               ON communities.id_comunidad=cases.id_comunidad
+            WHERE cases.id_case=?""",
+        (case_id,),
+    ).fetchone()
+    if case is None:
+        return None
+    decision = evaluate_invoice_eligibility(
+        community_code=str(case["codigo"]),
+        case_start=date.fromisoformat(str(case["fecha_inicio"])),
+        case_end=date.fromisoformat(str(case["fecha_fin"])),
+        active_modules=modules,
+        document_kind="invoice",
+        service_family=service,
+        period_start=period_start,
+        period_end=period_end,
+        community_confidence="high",
+    )
+    return decision.status, decision.reason
 
 
 @contextmanager
@@ -169,6 +252,12 @@ def _persist_analysis(
         eligibility_status, eligibility_reason = "review_required", "document_unknown"
     elif analysis.kind == "invoice" and analysis.field_evidence and not analysis.provider_key:
         eligibility_status, eligibility_reason = "review_required", "provider_unknown"
+    elif analysis.kind == "invoice":
+        eligibility = _invoice_eligibility_for_case(connection, case_id, candidates)
+        if eligibility is None:
+            eligibility_status, eligibility_reason = "eligible", None
+        else:
+            eligibility_status, eligibility_reason = eligibility
     else:
         # Legacy analyses already validated by their provider-specific parser
         # remain compatible while the new orchestrator is rolled out.
@@ -241,12 +330,18 @@ def _persist_analysis(
             """UPDATE source_documents
                SET document_kind = ?, classification_confidence = ?, source_context = ?,
                    provider_key = ?, analysis_version = ?, eligibility_status = ?,
-                   eligibility_reason = ?
+                   eligibility_reason = ?,
+                   status = CASE
+                       WHEN ? = 'not_applicable' THEN 'not_applicable'
+                       WHEN status = 'not_applicable' THEN 'registered'
+                       ELSE status
+                   END
                WHERE id_document = ? AND id_case = ?""",
             (
                 effective_kind, effective_confidence, effective_context,
                 analysis.provider_key, analysis.analysis_version,
                 eligibility_status, eligibility_reason,
+                eligibility_status,
                 document.id_document, case_id,
             ),
         )
@@ -294,6 +389,36 @@ def _persist_analysis(
                 message=(
                     "No se ha identificado con seguridad el emisor. Confirma el proveedor "
                     "una sola vez; después se reanalizarán sus fechas e importes."
+                ),
+            )
+            return
+        if eligibility_status == "not_applicable":
+            return
+        if (
+            eligibility_status == "review_required"
+            and eligibility_reason not in {"document_unknown", "provider_unknown"}
+            and effective_kind == "invoice"
+        ):
+            messages = {
+                "period_outside_case": (
+                    "La factura pertenece a otro período. Confirma el expediente correcto "
+                    "antes de incorporarla al reparto."
+                ),
+                "service_unknown": (
+                    "El servicio de la factura no coincide con los conceptos configurados "
+                    "para esta comunidad."
+                ),
+            }
+            document_review.create_review_issue(
+                connection,
+                case_id,
+                document.id_document,
+                code="ELIGIBILITY_REVIEW_REQUIRED",
+                field_name="document.eligibility",
+                detected_value=eligibility_reason,
+                message=messages.get(
+                    eligibility_reason,
+                    "La factura necesita una decisión de aplicabilidad antes del reparto.",
                 ),
             )
             return

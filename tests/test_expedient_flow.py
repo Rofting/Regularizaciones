@@ -196,6 +196,52 @@ class ExpedientFlowTest(unittest.TestCase):
         )
         self.assertEqual(("123.45", "high", "synthetic:total:v1"), tuple(stored))
 
+    def test_invoice_for_inactive_module_is_archived_without_affecting_case(self):
+        with patch(
+            "case_ingestion._active_modules_for_case", return_value=("GAS",),
+        ):
+            result = case_ingestion.add_analysed_document_to_case(
+                self.connection,
+                self.case.id_case,
+                source_path=self.source_path,
+                archive_root=self.archive_root,
+                analysis=SourceAnalysis.invoice(
+                    {
+                        "tipo_suministro": "ELECTRICIDAD",
+                        "fecha_inicio": "2026-01-01",
+                        "fecha_fin": "2026-01-31",
+                        "importe_total": "123.45",
+                    },
+                    provider_key="ELECTRICA_GLOBAL",
+                    field_evidence={
+                        "importe_total": FieldEvidence(
+                            value="123.45", confidence="high", source="text",
+                            locator={"fragment": "Total 123,45 EUR"},
+                            rule_id="synthetic:total:v1",
+                        ),
+                    },
+                ),
+            )
+
+        stored = self.connection.execute(
+            """SELECT status,eligibility_status,eligibility_reason
+                 FROM source_documents WHERE id_document=?""",
+            (result.document.id_document,),
+        ).fetchone()
+        self.assertEqual(
+            ("not_applicable", "not_applicable", "service_not_active"),
+            tuple(stored),
+        )
+        self.assertEqual(0, self.connection.execute(
+            "SELECT COUNT(*) FROM facturas",
+        ).fetchone()[0])
+        self.assertFalse(document_review.list_open_issues(
+            self.connection, self.case.id_case,
+        ))
+        self.assertFalse(document_review.case_has_unapplied_sources(
+            self.connection, self.case.id_case,
+        ))
+
     def test_unknown_provider_creates_one_root_issue_before_field_issues(self):
         evidence = FieldEvidence(
             value="2026-01-01", confidence="high", source="text",
