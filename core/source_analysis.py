@@ -320,6 +320,16 @@ def analyse_pdf_pipeline(
     locator = _classification_locator(extraction)
 
     if not extraction.text.strip():
+        # Keep the mature reader as a recovery adapter for formats that the
+        # cached text service cannot decode yet.  This path is exceptional;
+        # normal documents continue through the single-pass global pipeline.
+        fallback = analyse_pdf(
+            path,
+            community_code=community_code,
+            providers=providers,
+        )
+        if fallback.kind != "unknown":
+            return fallback
         detail = str(extraction.diagnostics.get("detail") or "No se obtuvo texto legible.")
         return SourceAnalysis.unknown(detail, locator=locator)
 
