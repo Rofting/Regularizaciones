@@ -681,6 +681,29 @@ class ExcelExportServiceTest(unittest.TestCase):
                 self._expected_totals(), expected_fingerprint=expected,
             )
 
+    def test_validator_accepts_libreoffice_normalization_of_implicit_default_style(self):
+        def normalize_implicit_formula_style(path):
+            workbook = load_workbook(path)
+            cell = workbook["ANALISIS"]["H23"]
+            normalized_font = copy(cell.font)
+            normalized_font.name = "Arial"
+            cell.font = normalized_font
+            cell.number_format = "#,##0.00"
+            workbook.save(path)
+            workbook.close()
+
+        result = generate_official_excel(
+            self.connection, id_case=self.case_id,
+            project_root=self.project_root, output_root=self.output_root,
+            recalculator=DeterministicRecalculator(normalize_implicit_formula_style),
+        )
+
+        self.assertEqual("validated", result.stage)
+        workbook = load_workbook(result.output_path)
+        self.assertEqual("Arial", workbook["ANALISIS"]["H23"].font.name)
+        self.assertEqual("#,##0.00", workbook["ANALISIS"]["H23"].number_format)
+        workbook.close()
+
     def test_missing_libreoffice_has_an_understandable_error(self):
         recalculator = LibreOfficeRecalculator(
             executable=self.root / "programa-inexistente" / "soffice.exe"
