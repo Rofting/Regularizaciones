@@ -35,7 +35,7 @@ class WorkbookFingerprint:
     view_and_print_settings: tuple[tuple[str, str, str, str, str], ...]
     drawings: tuple[tuple[str, int, tuple[str, ...], int, tuple[str, ...]], ...]
     immutable_cells: tuple[tuple[str, str, object, str], ...]
-    immutable_cell_styles: tuple[tuple[str, str, tuple], ...]
+    immutable_cell_styles: tuple[tuple[str, str, bool, tuple], ...]
     mutable_cell_styles: tuple[tuple[str, str, tuple], ...]
     ooxml_design_parts: tuple[tuple[str, str], ...]
 
@@ -159,6 +159,55 @@ def _cell_style_signature(cell) -> tuple:
     )
 
 
+def _implicit_default_style_normalization(expected: tuple, actual: tuple) -> bool:
+    """Admite únicamente normalizaciones inocuas del estilo implícito.
+
+    LibreOffice materializa el resultado de algunas fórmulas que en Excel
+    conservan el estilo 0: sustituye la fuente predeterminada por un
+    equivalente métrico y deduce un formato numérico. El relleno, énfasis,
+    alineación, protección y bordes sí forman parte del diseño y deben seguir
+    siendo idénticos.
+    """
+    if len(expected) != len(actual):
+        return False
+    compatible_fonts = {"Arial", "Aptos", "Calibri", "Carlito", "Liberation Sans"}
+    if expected[0] != actual[0] and {
+        str(expected[0]), str(actual[0]),
+    }.difference(compatible_fonts):
+        return False
+    # Sólo un formato General implícito puede convertirse en la categoría que
+    # LibreOffice deduce del resultado de la fórmula.
+    if expected[7] != actual[7] and expected[7] != "general":
+        return False
+    return all(
+        expected[index] == actual[index]
+        for index in (1, 2, 3, 4, 5, 6, 8, 9)
+    )
+
+
+def _immutable_styles_preserved(expected, actual) -> bool:
+    """Compara estilos fijos sin confundir el estilo 0 con un rediseño."""
+    expected_by_cell = {
+        (sheet, address): (implicit_default, signature)
+        for sheet, address, implicit_default, signature in expected
+    }
+    actual_by_cell = {
+        (sheet, address): (implicit_default, signature)
+        for sheet, address, implicit_default, signature in actual
+    }
+    if expected_by_cell.keys() != actual_by_cell.keys():
+        return False
+    for cell, (implicit_default, expected_signature) in expected_by_cell.items():
+        _, actual_signature = actual_by_cell[cell]
+        if actual_signature == expected_signature:
+            continue
+        if not implicit_default or not _implicit_default_style_normalization(
+            expected_signature, actual_signature,
+        ):
+            return False
+    return True
+
+
 def _design_part_hashes(path: Path) -> tuple[tuple[str, str], ...]:
     """Huella de las partes de diseño: gráficos, imágenes, tema, impresión.
 
@@ -248,7 +297,8 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
                         sheet.title, cell.coordinate, cell.value, cell.data_type,
                     ))
                     immutable_styles.append((
-                        sheet.title, cell.coordinate, _cell_style_signature(cell),
+                        sheet.title, cell.coordinate, cell.style_id == 0,
+                        _cell_style_signature(cell),
                     ))
         return WorkbookFingerprint(
             sheet_names=tuple(workbook.sheetnames),
@@ -439,7 +489,10 @@ def validate_workbook(
             raise WorkbookValidationError("Los gráficos, imágenes o sus anclas cambiaron")
         if actual_fingerprint.immutable_cells != expected_fingerprint.immutable_cells:
             raise WorkbookValidationError("Una celda o estilo fuera de las entradas cambió")
-        if actual_fingerprint.immutable_cell_styles != expected_fingerprint.immutable_cell_styles:
+        if not _immutable_styles_preserved(
+            expected_fingerprint.immutable_cell_styles,
+            actual_fingerprint.immutable_cell_styles,
+        ):
             raise WorkbookValidationError("Las partes OOXML de diseño cambiaron")
         if actual_fingerprint.mutable_cell_styles != expected_fingerprint.mutable_cell_styles:
             raise WorkbookValidationError("El estilo de una entrada o fórmula mutable cambió")
