@@ -1159,6 +1159,47 @@ class AppGestionFincas(ctk.CTk):
         if ui:
             ui.open_confirm_sources_dialog(self, self.id_expediente)
 
+    def _accion_revalidar_perfil(self):
+        if self._procesando or not self._validar_expediente_activo():
+            return
+        workflow = MOD.get("case_workflow_actions")
+        database = MOD.get("gestor_bd")
+        if not workflow or not database:
+            self.log("No está disponible la revalidación del perfil Excel.", "error")
+            return
+        case_id, community_id = self.id_expediente, self.id_comunidad
+
+        def work():
+            connection = database.conectar(str(self.ruta_bd_expedientes))
+            try:
+                profile = workflow.revalidate_case_profile_registration(
+                    connection,
+                    id_case=case_id,
+                    active_community_id=community_id,
+                    project_root=BASE_DIR,
+                )
+            finally:
+                connection.close()
+
+            def completed():
+                self._refrescar_lista_expedientes(select_case_id=case_id)
+                self._refrescar_expediente()
+                self.log(
+                    f"Perfil {profile.key} revalidado. Genera de nuevo el Excel oficial.",
+                    "ok",
+                )
+                messagebox.showinfo(
+                    "Perfil revalidado",
+                    "La configuración y la plantilla coinciden. "
+                    "El expediente está listo para generar de nuevo el Excel oficial.",
+                    parent=self,
+                )
+
+            self.after(0, completed)
+
+        self._estado("Revalidando configuración del Excel", procesando=True)
+        self._en_hilo(work)
+
     def _accion_reanalizar_fuentes(self):
         if self._procesando or not self._validar_expediente_activo():
             return
@@ -1285,6 +1326,7 @@ class AppGestionFincas(ctk.CTk):
                     has_registered_template = template_path.is_file()
                 except (TypeError, ValueError):
                     has_registered_template = False
+            profile_issue = None
             if workflow:
                 try:
                     profile = workflow.resolve_case_profile(
@@ -1293,6 +1335,7 @@ class AppGestionFincas(ctk.CTk):
                     )
                     profile_label = profile.key
                 except workflow.WorkflowBlockedError as error:
+                    profile_issue = str(error)
                     profile_label = f"Perfil pendiente: {error}"
             else:
                 profile_label = "Perfil no disponible"
@@ -1332,6 +1375,7 @@ class AppGestionFincas(ctk.CTk):
             has_case=True, document_count=document_count,
             open_issue_count=open_count, case_status=case.status,
             has_registered_template=has_registered_template,
+            profile_issue=profile_issue,
         )
         self.after(0, lambda: self._actualizar_workspace(workspace))
 
@@ -1395,6 +1439,7 @@ class AppGestionFincas(ctk.CTk):
             "importar_modelo": ("Importar modelo inicial", self._accion_importar_modelo_inicial),
             "resolver_incidencias": ("Resolver incidencias", self._accion_resolver_incidencias),
             "confirmar_fuentes": ("Confirmar fuentes", self._accion_confirmar_fuentes),
+            "revalidar_perfil": ("Revalidar perfil Excel", self._accion_revalidar_perfil),
             "generar_excel": ("Generar Excel oficial", self._accion_generar_excel_expediente),
             "calcular_reparto": ("Calcular reparto", self._accion_calcular_reparto_expediente),
             "generar_cartas": ("Generar cartas", self._accion_generar_cartas_expediente),

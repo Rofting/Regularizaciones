@@ -615,6 +615,31 @@ def auto_apply_case_sources(connection: sqlite3.Connection, case_id: int) -> tup
     return applied, pending
 
 
+def finalize_case_source_intake(
+    connection: sqlite3.Connection, case_id: int,
+) -> tuple[int, bool]:
+    """Aplica un lote limpio y avanza sin exigir abrir un diálogo vacío."""
+    automatic, _pending = auto_apply_case_sources(connection, case_id)
+    operational_count = connection.execute(
+        """SELECT COUNT(*) FROM source_documents
+            WHERE id_case=? AND document_kind<>'other' AND status<>'not_applicable'""",
+        (case_id,),
+    ).fetchone()[0]
+    if not operational_count:
+        return automatic, False
+    ensure_pending_source_issues(connection, case_id)
+    issues = document_review.list_open_issues(connection, case_id)
+    issue_document_ids = {issue.id_document for issue in issues}
+    pending_sources = tuple(
+        source for source in list_pending_sources(connection, case_id)
+        if source.id_document not in issue_document_ids
+    )
+    if issues or pending_sources:
+        return automatic, False
+    document_review.validate_case_ready(connection, case_id)
+    return automatic, True
+
+
 def list_pending_sources(
     connection: sqlite3.Connection, case_id: int,
 ) -> tuple[SourceDocument, ...]:

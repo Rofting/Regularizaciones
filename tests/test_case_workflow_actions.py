@@ -119,6 +119,74 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                     project_root=root,
                 )
 
+    def test_revalidates_a_changed_profile_and_returns_case_to_excel_generation(self):
+        from case_workflow_actions import revalidate_case_profile_registration
+
+        template = PROJECT_ROOT / "plantillas" / "comunidades" / "658" / "658_acs_v1.xlsx"
+        template_hash = hashlib.sha256(template.read_bytes()).hexdigest()
+        self.connection.execute(
+            """UPDATE excel_template_profiles
+                  SET template_sha256=?, profile_sha256=?
+                WHERE id_comunidad=?""",
+            (template_hash, "0" * 64, self.community_id),
+        )
+        self.connection.execute(
+            "UPDATE regularization_cases SET estado='reconciled' WHERE id_case=?",
+            (self.case_id,),
+        )
+        self.connection.commit()
+
+        profile = revalidate_case_profile_registration(
+            self.connection,
+            id_case=self.case_id,
+            active_community_id=self.community_id,
+            project_root=PROJECT_ROOT,
+        )
+
+        registered = self.connection.execute(
+            """SELECT profile_sha256 FROM excel_template_profiles
+                 WHERE id_comunidad=? AND status='active'""",
+            (self.community_id,),
+        ).fetchone()[0]
+        status = self.connection.execute(
+            "SELECT estado FROM regularization_cases WHERE id_case=?",
+            (self.case_id,),
+        ).fetchone()[0]
+        self.assertEqual("658_acs_v1", profile.key)
+        self.assertEqual(
+            hashlib.sha256(
+                (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+            ).hexdigest(),
+            registered,
+        )
+        self.assertEqual("ready_for_calculation", status)
+
+    def test_revalidation_does_not_accept_a_changed_template(self):
+        from case_workflow_actions import (
+            WorkflowBlockedError,
+            revalidate_case_profile_registration,
+        )
+
+        self.connection.execute(
+            "UPDATE excel_template_profiles SET profile_sha256=?, template_sha256=? WHERE id_comunidad=?",
+            ("0" * 64, "1" * 64, self.community_id),
+        )
+        self.connection.commit()
+
+        with self.assertRaisesRegex(WorkflowBlockedError, "plantilla"):
+            revalidate_case_profile_registration(
+                self.connection,
+                id_case=self.case_id,
+                active_community_id=self.community_id,
+                project_root=PROJECT_ROOT,
+            )
+
+        registered = self.connection.execute(
+            "SELECT profile_sha256 FROM excel_template_profiles WHERE id_comunidad=?",
+            (self.community_id,),
+        ).fetchone()[0]
+        self.assertEqual("0" * 64, registered)
+
     def test_resolves_single_json_profile_before_first_export_registration(self):
         from case_workflow_actions import resolve_case_profile
 

@@ -318,6 +318,40 @@ class SourceActionsTest(unittest.TestCase):
         self.assertEqual(["fecha_inicio", "fecha_fin", "document_kind"], [issue.field_name for issue in issues])
         self.assertIn("1 factura detectada · 1 lectura · 1 documento por revisar", self.messages.showinfo.call_args.args[1])
 
+    def test_clean_folder_intake_advances_without_opening_confirmation_dialog(self):
+        """Un lote limpio debe dejar visible el siguiente paso al terminar."""
+        from source_analysis import SourceAnalysis
+
+        source = self.root / "TEST_factura.pdf"
+        source.write_text("pdf fixture", encoding="utf-8")
+        analysis = SourceAnalysis.invoice(
+            {
+                "proveedor": "Naturgy Clientes S.A.U.",
+                "tipo_suministro": "GAS",
+                "fecha_inicio": "2026-01-01",
+                "fecha_fin": "2026-01-31",
+                "importe_total": "123.00",
+            },
+            provider_key="NATURGY_CLIENTES_GAS",
+        )
+
+        expedient_ui.open_add_sources_dialog(self.app, self.case.id_case)
+        with patch(
+            "expedient_ui.filedialog.askdirectory", return_value=str(self.root),
+        ), patch("source_analysis.analyse_pdf", return_value=analysis):
+            self.click("Añadir carpeta")
+            self.complete()
+
+        status = self.connection.execute(
+            "SELECT estado FROM regularization_cases WHERE id_case=?",
+            (self.case.id_case,),
+        ).fetchone()[0]
+        self.assertEqual("ready_for_calculation", status)
+        self.assertIn(
+            "listo para generar el Excel oficial",
+            self.messages.showinfo.call_args.args[1],
+        )
+
     def test_classification_override_only_appears_for_unknown_and_creates_invoice_fields(self):
         self.ingest()
         issue = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)[-1]
@@ -548,6 +582,19 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
 
         self.assertEqual("confirmar_fuentes", state.next_action)
         self.assertEqual("Confirmar fuentes", state.headline)
+
+    def test_profile_mismatch_routes_to_an_actionable_revalidation(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True,
+            document_count=3,
+            open_issue_count=0,
+            case_status="reconciled",
+            profile_issue="La huella del perfil Excel activo no coincide con su registro",
+        )
+
+        self.assertEqual(("validar", "revalidar_perfil"), (state.active_step, state.next_action))
+        self.assertEqual("Revalidar configuración del Excel", state.headline)
+        self.assertIn("huella", state.detail)
 
     def test_no_case_prompts_case_creation(self):
         state = expedient_ui.guided_workspace_state(

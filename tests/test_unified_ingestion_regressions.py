@@ -58,6 +58,18 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         ).status)
         self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
 
+    def test_empty_intake_does_not_advance_an_expedient_without_sources(self):
+        automatic, ready = case_ingestion.finalize_case_source_intake(
+            self.connection, self.case.id_case,
+        )
+
+        self.assertEqual(0, automatic)
+        self.assertFalse(ready)
+        self.assertEqual(
+            "draft",
+            expedient_service.get_case(self.connection, self.case.id_case).status,
+        )
+
     def test_invoice_outside_case_uses_the_dedicated_dismissal_issue(self):
         self.connection.execute(
             """INSERT INTO excel_template_profiles

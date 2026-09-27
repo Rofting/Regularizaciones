@@ -7,6 +7,7 @@ los eventos recibidos; no contiene reglas de negocio ni rutas implícitas.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +26,7 @@ from excel_profiles import (
     configured_profile_paths,
     load_profile,
 )
+from excel_validation import workbook_fingerprint
 
 
 class WorkflowBlockedError(ValueError):
@@ -108,6 +110,85 @@ def resolve_case_profile(
         raise WorkflowBlockedError(
             "La huella del perfil Excel activo no coincide con su registro; reimporte y revalide"
         )
+    return profile
+
+
+def revalidate_case_profile_registration(
+    connection: sqlite3.Connection,
+    *,
+    id_case: int,
+    active_community_id: int,
+    project_root: Path,
+) -> ExcelProfile:
+    """Acepta un JSON actualizado sólo si la plantilla registrada no cambió."""
+    case = case_ingestion.assert_case_belongs_to_community(
+        connection, id_case, active_community_id,
+    )
+    community = connection.execute(
+        "SELECT codigo FROM comunidades WHERE id_comunidad=?", (case.community_id,)
+    ).fetchone()
+    rows = connection.execute(
+        """SELECT id_template_profile,profile_key,profile_version,
+                  template_relative_path,template_sha256,profile_sha256
+             FROM excel_template_profiles
+            WHERE id_comunidad=? AND status='active'
+            ORDER BY id_template_profile""",
+        (case.community_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        raise WorkflowBlockedError(
+            "La comunidad debe tener exactamente un perfil Excel activo para revalidarlo"
+        )
+    row = rows[0]
+    root = Path(project_root).resolve()
+    try:
+        profile = load_profile(str(row["profile_key"]), root)
+    except (LookupError, ValueError) as error:
+        raise WorkflowBlockedError(f"No se puede cargar el perfil Excel activo: {error}") from error
+    if community is None or profile.community_code != str(community[0]):
+        raise WorkflowBlockedError("El perfil Excel activo no corresponde a la comunidad")
+    if profile.version != str(row["profile_version"]):
+        raise WorkflowBlockedError(
+            "La versión del perfil cambió; debe registrarse como una versión nueva"
+        )
+    if profile.template_relative_path != str(row["template_relative_path"]):
+        raise WorkflowBlockedError("La ruta de la plantilla cambió respecto del registro")
+
+    template = (root / profile.template_relative_path).resolve()
+    try:
+        template.relative_to(root)
+    except ValueError:
+        raise WorkflowBlockedError("La plantilla queda fuera del proyecto") from None
+    if not template.is_file():
+        raise WorkflowBlockedError("No existe la plantilla Excel registrada")
+    template_hash = hashlib.sha256(template.read_bytes()).hexdigest()
+    if template_hash != str(row["template_sha256"]):
+        raise WorkflowBlockedError(
+            "La plantilla Excel cambió y no puede revalidarse como si fuera la misma"
+        )
+    try:
+        workbook_fingerprint(template, profile)
+    except Exception as error:
+        raise WorkflowBlockedError(
+            f"La plantilla no es compatible con el perfil actualizado: {error}"
+        ) from error
+
+    current_profile_hash = calculate_profile_sha256(profile, root)
+    cursor = connection.execute(
+        """UPDATE excel_template_profiles
+              SET profile_sha256=?
+            WHERE id_template_profile=? AND profile_sha256=?""",
+        (current_profile_hash, row["id_template_profile"], row["profile_sha256"]),
+    )
+    if cursor.rowcount != 1:
+        connection.rollback()
+        raise WorkflowBlockedError("El perfil cambió mientras se estaba revalidando")
+    connection.commit()
+
+    current = expedient_service.get_case(connection, id_case)
+    if current.status not in {"draft", "gathering_sources", "under_review"}:
+        expedient_service.set_case_status(connection, id_case, "under_review")
+    document_review.validate_case_ready(connection, id_case)
     return profile
 
 
