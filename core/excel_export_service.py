@@ -706,6 +706,17 @@ def _write_invoice_table(
                 f"={columns['consumption']}{row_number}",
             )
             _set_cell_value(sheet[f"{otra}{row_number}"], None)
+    period_span_days_cell = table.get("period_span_days_cell")
+    if period_span_days_cell:
+        if invoices and columns.get("start_date") and columns.get("end_date"):
+            first_row = available_rows[0]
+            last_row = available_rows[len(invoices) - 1]
+            _set_cell_value(
+                sheet[str(period_span_days_cell)],
+                f"={columns['end_date']}{last_row}-{columns['start_date']}{first_row}",
+            )
+        else:
+            _set_cell_value(sheet[str(period_span_days_cell)], None)
 
 
 def _write_other_expenses(connection, workbook, case, table) -> None:
@@ -770,6 +781,32 @@ def _boundary_reading_dates(
     return inicial, final
 
 
+_CARRY_FORWARD_METHODS = {
+    "carry_forward_zero", "carry_forward_decrease", "counter_reset_carry_forward",
+}
+
+
+def _effective_meter_value(values: Mapping[str, sqlite3.Row], reading_date: str) -> float:
+    """Devuelve el acumulado utilizable de una lectura estimada por arrastre.
+
+    Expedientes antiguos podían guardar el valor inicial del propio fichero
+    como arrastre, aunque existiera una lectura fiable posterior. Para un cero
+    o reinicio debe prevalecer siempre la última lectura canónica anterior.
+    """
+    reading = values[reading_date]
+    value = float(reading["valor_acumulado"])
+    if reading["metodo_estimacion"] not in _CARRY_FORWARD_METHODS:
+        return value
+    previous_values = [
+        float(item["valor_acumulado"])
+        for day, item in values.items()
+        if day < reading_date
+    ]
+    if not previous_values:
+        return value
+    return max([value, *previous_values])
+
+
 
 def _write_meter_readings(
     connection,
@@ -784,18 +821,19 @@ def _write_meter_readings(
     available_rows = _available_table_rows(sheet, table)
     _clear_table(sheet, table)
     readings = connection.execute(
-        """SELECT p.codigo_vivienda,l.fecha_lectura,l.valor_acumulado
+        """SELECT p.codigo_vivienda,l.fecha_lectura,l.valor_acumulado,
+                  l.estado,l.metodo_estimacion
            FROM period_readings l JOIN propietarios p ON p.id_propietario=l.id_propietario
            WHERE p.id_comunidad=? AND p.activo=1 AND p.tipo_unidad='vivienda'
              AND l.id_periodo=? AND l.tipo=?
            ORDER BY p.codigo_vivienda,l.fecha_lectura""",
         (case["id_comunidad"], case["id_periodo"], module),
     ).fetchall()
-    by_owner: dict[str, dict[str, float]] = {}
+    by_owner: dict[str, dict[str, sqlite3.Row]] = {}
     for reading in readings:
-        by_owner.setdefault(reading["codigo_vivienda"], {})[reading["fecha_lectura"]] = float(
-            reading["valor_acumulado"]
-        )
+        by_owner.setdefault(reading["codigo_vivienda"], {})[
+            reading["fecha_lectura"]
+        ] = reading
     fecha_inicial, fecha_final = _boundary_reading_dates(connection, case, module)
     sin_lectura = sorted(
         vivienda for vivienda, values in by_owner.items()
@@ -832,8 +870,8 @@ def _write_meter_readings(
             + ", ".join(missing)
         )
 
-    initial = sum(values[fecha_inicial] for values in by_owner.values())
-    final = sum(values[fecha_final] for values in by_owner.values())
+    initial = sum(_effective_meter_value(values, fecha_inicial) for values in by_owner.values())
+    final = sum(_effective_meter_value(values, fecha_final) for values in by_owner.values())
 
     # La hoja de cobros lleva dos clases de apunte, como en el libro del
     # despacho: una fila por cada cuota fija mensual y una fila por cada
@@ -947,7 +985,15 @@ def _write_workbook(
 ) -> None:
     workbook = load_workbook(path)
     try:
-        metadata = profile.workbook_layout["metadata_cells"]
+        metadata = dict(profile.workbook_layout["metadata_cells"])
+        # Compatibilidad del perfil 658 ya registrado en instalaciones reales.
+        # Estas celdas eran textos/formulas fijos de la plantilla v1 y no
+        # estaban declaradas en el JSON cuya huella conserva la base. Las
+        # tratamos como enlaces históricos sin alterar ese perfil ni obligar
+        # al despacho a reimportar su Excel perfecto.
+        if profile.key == "658_acs_v1":
+            metadata.setdefault("meter_period_label", ("LECTURAS ACS M3", "P6"))
+            metadata.setdefault("meter_period_days", ("LECTURAS ACS M3", "P7"))
         metadata_values = {
             "community_name": case["comunidad_nombre"],
             "period_label": (
@@ -963,6 +1009,13 @@ def _write_workbook(
                    WHERE id_comunidad=? AND activo=1 AND tipo_unidad='vivienda'""",
                 (case["id_comunidad"],),
             ).fetchone()[0],
+            "meter_period_label": (
+                f"{_safe_date(case['fecha_inicio']):%d/%m/%Y} a "
+                f"{_safe_date(case['fecha_fin']):%d/%m/%Y}"
+            ),
+            "meter_period_days": (
+                _safe_date(case["fecha_fin"]) - _safe_date(case["fecha_inicio"])
+            ).days + 1,
         }
         for key, value in metadata_values.items():
             if key in metadata:
@@ -975,6 +1028,9 @@ def _write_workbook(
             table = tables.get(module)
             if table is None:
                 raise ExportBlockedError(f"El perfil no declara la tabla de {module}")
+            if profile.key == "658_acs_v1" and module == "AGUA":
+                table = dict(table)
+                table.setdefault("period_span_days_cell", "D23")
             if module in ("GAS", "ELECTRICIDAD", "AGUA"):
                 _write_invoice_table(connection, workbook, case, module, table)
             elif module == "OTROS_GASTOS":
@@ -1113,19 +1169,25 @@ def _merged_content_types(plantilla: bytes | None, generado: bytes | None) -> by
 
 
 def _expected_totals(connection, case, profile) -> dict[str, int]:
-    calculados_por_el_libro = {
-        clave
-        for servicio, prefijo in (("ACS", "acs"), ("CALEFACCION", "heating"))
-        if servicio in profile.active_modules
-        and cuotas_servicio.resumen(
+    calculados_por_el_libro: set[str] = set()
+    for servicio, prefijo in (("ACS", "acs"), ("CALEFACCION", "heating")):
+        if servicio not in profile.active_modules:
+            continue
+        # El coste real siempre es una salida del análisis: nace de las
+        # facturas vigentes. Un valor guardado por una exportación anterior no
+        # puede bloquear la siguiente cuando se corrige una factura.
+        calculados_por_el_libro.update({
+            f"{prefijo}_fixed_actual", f"{prefijo}_variable_actual",
+        })
+        # Lo cobrado sólo lo calcula el libro cuando existen apuntes canónicos;
+        # en modelos antiguos puede seguir siendo un dato manual del período.
+        if cuotas_servicio.resumen(
             connection, community_id=case["id_comunidad"],
             period_id=case["id_periodo"], servicio=servicio,
-        ).apuntes
-        for clave in (
-            f"{prefijo}_fixed_actual", f"{prefijo}_variable_actual",
-            f"{prefijo}_fixed_billed", f"{prefijo}_variable_billed",
-        )
-    }
+        ).apuntes:
+            calculados_por_el_libro.update({
+                f"{prefijo}_fixed_billed", f"{prefijo}_variable_billed",
+            })
     result: dict[str, int] = {}
     required_parameters = _required_parameter_keys(profile)
     for key in profile.workbook_layout["total_checks"]:
@@ -1148,6 +1210,8 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
             ).fetchone()[0]
         elif key.startswith("parameter:"):
             parameter_key = key.split(":", 1)[1]
+            if parameter_key in calculados_por_el_libro:
+                continue
             row = connection.execute(
                 """SELECT numeric_value FROM period_parameters
                    WHERE id_comunidad=? AND id_periodo=? AND parameter_key=?""",
@@ -1158,8 +1222,6 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
                 # concilian contra la base: no hay nada con lo que compararlos,
                 # son su resultado. Se comprueban las entradas que los
                 # alimentan (facturas, lecturas y cuotas cobradas).
-                if parameter_key in calculados_por_el_libro:
-                    continue
                 if parameter_key in required_parameters:
                     raise ExportBlockedError(
                         f"Falta el parámetro de conciliación {parameter_key}"
@@ -1181,25 +1243,27 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
                 connection, case, reading_type,
             )
             rows = connection.execute(
-                """SELECT p.id_propietario,l.fecha_lectura,l.valor_acumulado
+                """SELECT p.id_propietario,l.fecha_lectura,l.valor_acumulado,
+                          l.estado,l.metodo_estimacion
                    FROM propietarios p JOIN period_readings l
                      ON l.id_propietario=p.id_propietario
                    WHERE p.id_comunidad=? AND p.activo=1 AND p.tipo_unidad='vivienda'
                      AND l.id_periodo=? AND l.tipo=?
-                     AND l.fecha_lectura IN (?,?)
+                     AND l.fecha_lectura<=?
                    ORDER BY p.id_propietario,l.fecha_lectura""",
                 (
                     case["id_comunidad"], case["id_periodo"], reading_type,
-                    fecha_inicial, fecha_final,
+                    fecha_final,
                 ),
             ).fetchall()
-            values_by_owner: dict[int, dict[str, float]] = {}
+            values_by_owner: dict[int, dict[str, sqlite3.Row]] = {}
             for row in rows:
                 values_by_owner.setdefault(int(row["id_propietario"]), {})[
                     row["fecha_lectura"]
-                ] = float(row["valor_acumulado"])
+                ] = row
             value = sum(
-                readings[fecha_final] - readings[fecha_inicial]
+                _effective_meter_value(readings, fecha_final)
+                - _effective_meter_value(readings, fecha_inicial)
                 for readings in values_by_owner.values()
                 if fecha_inicial in readings and fecha_final in readings
             )

@@ -50,6 +50,16 @@ class DocumentClassifierTest(unittest.TestCase):
         )
         self.assertEqual("reading", result.kind)
 
+    def test_invoice_structure_wins_when_utility_invoice_contains_meter_readings(self):
+        result = classify_document(
+            "FACTURA Nº 00568008 Fecha de factura 27/10/2025 "
+            "Lectura anterior 120 Lectura actual 164 Consumo 44 m3 "
+            "Base imponible 159,21 IVA 15,93 Total a pagar 175,14 €",
+            "00568008.pdf",
+        )
+
+        self.assertEqual(("invoice", "high"), (result.kind, result.confidence))
+
     def test_credit_note_owners_and_report_have_explicit_kinds(self):
         fixtures = (
             (

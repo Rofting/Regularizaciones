@@ -58,6 +58,89 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         ).status)
         self.assertEqual(1, self.connection.execute("SELECT COUNT(*) FROM facturas").fetchone()[0])
 
+    def test_invoice_outside_case_uses_the_dedicated_dismissal_issue(self):
+        self.connection.execute(
+            """INSERT INTO excel_template_profiles
+               (id_comunidad,profile_key,profile_version,template_relative_path,
+                template_sha256,profile_sha256,status)
+               VALUES (?,'658_acs_v1','1','plantillas/comunidades/658/658_acs_v1.xlsx',
+                       'template','profile','active')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        document = self.ingest(SourceAnalysis.invoice({
+            "proveedor": "Naturgy Clientes S.A.U.",
+            "tipo_suministro": "GAS",
+            "fecha_inicio": "2024-01-01",
+            "fecha_fin": "2024-01-31",
+            "importe_total": "31.77",
+        }, confidence="high"))
+
+        issue = document_review.list_open_issues(
+            self.connection, self.case.id_case,
+        )[0]
+        self.assertEqual("INVOICE_OUTSIDE_PERIOD", issue.code)
+        self.assertEqual("document.eligibility", issue.field_name)
+        self.assertEqual(0, self.connection.execute(
+            "SELECT COUNT(*) FROM facturas WHERE archivo_origen=?",
+            (str(document.archived_path),),
+        ).fetchone()[0])
+
+    def test_reanalysis_replaces_legacy_eligibility_issue_and_can_be_dismissed(self):
+        self.connection.execute(
+            """INSERT INTO excel_template_profiles
+               (id_comunidad,profile_key,profile_version,template_relative_path,
+                template_sha256,profile_sha256,status)
+               VALUES (?,'658_acs_v1','1','plantillas/comunidades/658/658_acs_v1.xlsx',
+                       'template','profile','active')""",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        analysis = SourceAnalysis.invoice({
+            "proveedor": "Naturgy Clientes S.A.U.",
+            "tipo_suministro": "GAS",
+            "fecha_inicio": "2024-01-01",
+            "fecha_fin": "2024-01-31",
+            "importe_total": "31.77",
+        }, confidence="high")
+        document = self.ingest(analysis)
+        self.connection.execute(
+            "DELETE FROM review_issues WHERE id_document=?",
+            (document.id_document,),
+        )
+        document_review.create_review_issue(
+            self.connection,
+            self.case.id_case,
+            document.id_document,
+            code="ELIGIBILITY_REVIEW_REQUIRED",
+            field_name="document.eligibility",
+            detected_value="period_outside_case",
+            message="Incidencia heredada de una versión anterior",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            analyser=lambda _path: analysis,
+        )
+
+        issues = document_review.list_open_issues(
+            self.connection, self.case.id_case,
+        )
+        self.assertEqual(["INVOICE_OUTSIDE_PERIOD"], [issue.code for issue in issues])
+        document_review.dismiss_invoice_outside_period(
+            self.connection,
+            issues[0].id_issue,
+            reason="Pertenece a otro ejercicio",
+            dismissed_by="gestora",
+        )
+        self.assertEqual(
+            "ready_for_calculation",
+            document_review.validate_case_ready(
+                self.connection, self.case.id_case,
+            ).status,
+        )
+
     def test_confirmation_applies_invoice_and_export_input_changes_after_correction(self):
         document = self.ingest(self.invoice_analysis())
         self.assertTrue(callable(getattr(case_ingestion, "confirm_source_candidates", None)),
@@ -219,6 +302,54 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             (document.id_document,),
         ).fetchone()
         self.assertEqual(("12123", "ACS", "deteccion_automatica"), tuple(audit))
+
+    def test_reanalysis_recovers_a_manual_invoice_date_far_outside_service_period(self):
+        document = self.ingest(SourceAnalysis.invoice({
+            "proveedor": "Naturgy Clientes S.A.U.",
+            "tipo_suministro": "GAS",
+            "fecha_factura": "2021-11-20",
+            "fecha_inicio": "2026-01-23",
+            "fecha_fin": "2026-02-25",
+            "importe_total": "6279.49",
+        }, confidence="medium"))
+        document_review.record_candidates(
+            self.connection,
+            document.id_document,
+            {"fecha_factura": "2021-11-20"},
+            source="manual",
+            validation_status="validated",
+        )
+
+        case_ingestion.reanalyze_case_documents(
+            self.connection,
+            self.case.id_case,
+            analyser=lambda _: SourceAnalysis.invoice({
+                "proveedor": "Naturgy Clientes S.A.U.",
+                "tipo_suministro": "GAS",
+                "fecha_factura": "2026-03-02",
+                "fecha_inicio": "2026-01-23",
+                "fecha_fin": "2026-02-25",
+                "importe_total": "6279.49",
+            }, confidence="high"),
+        )
+
+        stored = self.connection.execute(
+            """SELECT value,source FROM extraction_candidates
+               WHERE id_document=? AND field_name='fecha_factura'""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual(("2026-03-02", "analysis_recovery"), tuple(stored))
+        audit = self.connection.execute(
+            """SELECT original_value,corrected_value,resolved_by
+               FROM manual_corrections AS correction
+               JOIN review_issues AS issue ON issue.id_issue=correction.id_issue
+               WHERE issue.id_document=? AND issue.field_name='fecha_factura'
+               ORDER BY correction.id_correction DESC LIMIT 1""",
+            (document.id_document,),
+        ).fetchone()
+        self.assertEqual(
+            ("2021-11-20", "2026-03-02", "deteccion_automatica"), tuple(audit),
+        )
 
     def test_resolving_classification_updates_effective_document_kind_immediately(self):
         document = self.ingest(SourceAnalysis.unknown())
@@ -835,6 +966,60 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual((100, "estimado", "carry_forward_decrease"), tuple(effective))
         self.assertEqual((16, "carried_forward"), tuple(observation))
+        self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
+
+    def test_decrease_in_both_source_endpoints_uses_the_latest_reliable_history(self):
+        self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario)
+               VALUES (?,'A','Vecino A')""",
+            (self.community_id,),
+        )
+        owner_id = self.connection.execute(
+            "SELECT id_propietario FROM propietarios WHERE id_comunidad=? AND codigo_vivienda='A'",
+            (self.community_id,),
+        ).fetchone()[0]
+        period_id = expedient_service.link_case_to_period(
+            self.connection, self.case.id_case,
+        )
+        self.connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente)
+               VALUES (?,?,'ACS','2025-12-31',599,'real','histórico')""",
+            (owner_id, period_id),
+        )
+        self.connection.commit()
+        document = case_ingestion.add_document_to_case(
+            self.connection,
+            self.case.id_case,
+            source_path=self.reading_file,
+            archive_root=self.archive_root,
+            document_kind="reading",
+            candidates={"vecinos": json.dumps([{
+                "vivienda": "A", "tipo": "ACS",
+                "fecha_ant": "2026-01-01", "val_ant": 579,
+                "fecha_act": "2026-01-31", "val_act": 16,
+            }])},
+            required_fields=(),
+        ).document
+
+        case_ingestion.apply_confirmed_source(
+            self.connection, self.case.id_case, document.id_document,
+        )
+
+        readings = self.connection.execute(
+            """SELECT fecha_lectura,valor_acumulado,estado,metodo_estimacion
+               FROM lecturas_vecino WHERE id_propietario=? ORDER BY fecha_lectura""",
+            (owner_id,),
+        ).fetchall()
+        self.assertEqual(
+            [
+                ("2025-12-31", 599, "real", None),
+                ("2026-01-01", 599, "estimado", "carry_forward_decrease"),
+                ("2026-01-31", 599, "estimado", "carry_forward_decrease"),
+            ],
+            [tuple(row) for row in readings],
+        )
         self.assertFalse(document_review.list_open_issues(self.connection, self.case.id_case))
 
     def test_resolving_reading_conflict_updates_source_and_canonical_reading(self):

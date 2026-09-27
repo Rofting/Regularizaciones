@@ -260,7 +260,9 @@ def record_candidates(
                        validation_status = excluded.validation_status,
                        source_context = excluded.source_context
                    WHERE ? = 0
-                      OR extraction_candidates.validation_status NOT IN ('validated', 'rejected')""",
+                      OR (extraction_candidates.source <> 'analysis_recovery'
+                          AND (extraction_candidates.validation_status NOT IN ('validated', 'rejected')
+                               OR extraction_candidates.source NOT LIKE 'manual%'))""",
                 (
                     document_id, field_name, normalized_value, normalized_source, candidate_status,
                     source_context, int(preserve_validated),
@@ -1220,6 +1222,26 @@ def dismiss_invoice_outside_period(
             """UPDATE review_issues SET status='dismissed',resolved_at=datetime('now')
                WHERE id_issue=?""",
             (issue_id,),
+        )
+        marker = connection.execute(
+            """SELECT processed.id_factura,cases.id_periodo
+               FROM archivos_procesados AS processed
+               JOIN regularization_cases AS cases ON cases.id_case=?
+               WHERE processed.nombre_archivo=?""",
+            (issue["id_case"], f"source_document:{issue['id_document']}"),
+        ).fetchone()
+        if marker is not None and marker["id_factura"] is not None:
+            # Conservamos la factura y su auditoría para poder asignarla al
+            # ejercicio correcto más adelante, pero deja de alimentar el
+            # período del que el gestor acaba de excluirla.
+            connection.execute(
+                """UPDATE facturas SET id_periodo=NULL
+                   WHERE id_factura=? AND id_periodo=?""",
+                (marker["id_factura"], marker["id_periodo"]),
+            )
+        connection.execute(
+            "UPDATE source_documents SET status='not_applicable' WHERE id_document=?",
+            (issue["id_document"],),
         )
         dismissed = _issue_row(connection, issue_id)
     return review_issue_from_row(dismissed)

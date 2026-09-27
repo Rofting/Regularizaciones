@@ -210,25 +210,45 @@ def _recover_invalid_confirmed_candidates(
         replacement = candidates.get(field_name)
         if replacement is None or not str(replacement).strip():
             continue
+        recovery_reason = None
         try:
             document_review.validate_candidate_value(field_name, str(row["value"] or ""))
         except ValueError:
-            try:
-                document_review.validate_candidate_value(field_name, str(replacement))
-            except ValueError:
-                continue
-            document_review.record_automatic_candidate_recovery(
-                connection,
-                case_id,
-                document_id,
-                field_name=field_name,
-                original_value=row["value"],
-                corrected_value=str(replacement),
-                reason=(
-                    "El valor confirmado no supera la validación semántica y "
-                    "se recupera desde un análisis de confianza alta."
-                ),
+            recovery_reason = (
+                "El valor confirmado no supera la validación semántica y "
+                "se recupera desde un análisis de confianza alta."
             )
+        if field_name == "fecha_factura" and recovery_reason is None:
+            try:
+                confirmed_date = date.fromisoformat(str(row["value"]))
+                service_start = date.fromisoformat(str(candidates.get("fecha_inicio")))
+                service_end = date.fromisoformat(str(candidates.get("fecha_fin")))
+            except (TypeError, ValueError):
+                pass
+            else:
+                if (
+                    (confirmed_date < service_start and (service_start - confirmed_date).days > 366)
+                    or (confirmed_date > service_end and (confirmed_date - service_end).days > 366)
+                ):
+                    recovery_reason = (
+                        "La fecha confirmada queda a más de un año del período de suministro; "
+                        "se recupera la fecha de factura del análisis de confianza alta."
+                    )
+        if recovery_reason is None:
+            continue
+        try:
+            document_review.validate_candidate_value(field_name, str(replacement))
+        except ValueError:
+            continue
+        document_review.record_automatic_candidate_recovery(
+            connection,
+            case_id,
+            document_id,
+            field_name=field_name,
+            original_value=row["value"],
+            corrected_value=str(replacement),
+            reason=recovery_reason,
+        )
 
 
 def _persist_analysis(
@@ -378,6 +398,21 @@ def _persist_analysis(
             document_review.clear_open_automatic_issues(
                 connection, case_id, document.id_document,
             )
+            # Las primeras versiones registraban las decisiones de
+            # aplicabilidad con ``origin='manual'`` aunque las hubiera creado
+            # el analizador. Al reanalizar debemos reemplazar ese diagnóstico
+            # abierto (por ejemplo, migrar una factura fuera de período al
+            # flujo específico) o la incidencia antigua seguirá bloqueando el
+            # expediente y además impedirá crear la nueva por la unicidad de
+            # documento/campo abierto.
+            connection.execute(
+                """DELETE FROM review_issues
+                   WHERE id_case=? AND id_document=? AND status='open'
+                     AND field_name='document.eligibility'
+                     AND code IN ('ELIGIBILITY_REVIEW_REQUIRED',
+                                  'INVOICE_OUTSIDE_PERIOD')""",
+                (case_id, document.id_document),
+            )
         if eligibility_reason == "provider_unknown":
             document_review.create_review_issue(
                 connection,
@@ -413,7 +448,11 @@ def _persist_analysis(
                 connection,
                 case_id,
                 document.id_document,
-                code="ELIGIBILITY_REVIEW_REQUIRED",
+                code=(
+                    "INVOICE_OUTSIDE_PERIOD"
+                    if eligibility_reason == "period_outside_case"
+                    else "ELIGIBILITY_REVIEW_REQUIRED"
+                ),
                 field_name="document.eligibility",
                 detected_value=eligibility_reason,
                 message=messages.get(

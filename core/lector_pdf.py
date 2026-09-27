@@ -749,6 +749,33 @@ def extraer_texto_ocr(ruta_archivo: str) -> str:
     return extraer_texto_ocr_con_diagnostico(ruta_archivo).text
 
 
+def extraer_texto_paginas_ocr(
+    ruta_archivo: str, first_page: int, last_page: int, *, dpi: int = 300,
+) -> str:
+    """OCR dirigido para anexos con el detalle contable de una factura.
+
+    La portada sigue siendo el camino rápido. Algunos proveedores reservan
+    el consumo y el desglose fijo/variable para la segunda página. Este lector
+    sólo se activa desde esos perfiles y su resultado se cachea después.
+    """
+    if Path(ruta_archivo).suffix.lower() != ".pdf":
+        return ""
+    try:
+        from pdf2image import convert_from_path
+
+        images = convert_from_path(
+            ruta_archivo,
+            dpi=dpi,
+            poppler_path=_poppler_path(),
+            first_page=first_page,
+            last_page=last_page,
+        )
+    except Exception:
+        return ""
+    parts = [_rapidocr_text(ruta_archivo, image) for image in images]
+    return _normalizar_decimales_ocr("\n".join(part for part in parts if part.strip()))
+
+
 def _extraer_texto_contador_agua_ocr(ruta_archivo: str) -> str:
     """Relee a mayor resolución la franja del contador de un recibo de agua.
 
@@ -1157,7 +1184,9 @@ def extraer_datos_rios(texto: str, config: dict) -> dict:
 # variable e IVA. Un regex de un solo match solo capturaba el primer bloque
 # (abastecimiento) y perdía saneamiento por completo. Aquí se suman ambos.
 _PAT_AGUA_ZGZ_CUOTA_FIJA = re.compile(
-    r"(?i)cuota\s+fija.*?Importe\s*\(.\).*?\n(?P<dias>\d+)\s+[\d,]+\s+(?P<valor>[\d,]+)\s*\n",
+    r"(?is)cuota\s+fija(?:\s+ecociudad\s+zaragoza)?"
+    r"(?:(?!cuota\s+variable).){0,350}?Importe\s*\([^)]*\)\s*"
+    r"(?P<dias>\d+)\s+[\d.,]+\s+(?P<valor>[\d.,]+)",
     re.DOTALL,
 )
 _PAT_AGUA_ZGZ_CUOTA_VARIABLE = re.compile(r"(?i)Total\s+cuota\s+variable\s+(?P<valor>[\d.,]+)")
@@ -1180,6 +1209,52 @@ def extraer_datos_agua_zaragoza(texto: str, config: dict) -> dict:
     if ivas:
         datos["iva"] = sum(ivas)
 
+    # El libro reparte importes con IVA incluido. El recibo imprime las cuotas
+    # de Ayuntamiento y Ecociudad antes de IVA, de modo que ambas se escalan
+    # con el total realmente cobrado para que reconcilien hasta el céntimo.
+    base = float(datos.get("termino_fijo") or 0) + float(
+        datos.get("termino_variable") or 0
+    )
+    total = float(datos.get("importe_total") or 0)
+    if base > 0 and total > 0:
+        factor = total / base
+        datos["termino_fijo"] = round(float(datos["termino_fijo"]) * factor, 2)
+        datos["termino_variable"] = round(total - float(datos["termino_fijo"]), 2)
+
+    return datos
+
+
+_PAT_NATURGY_TOTAL_GAS = re.compile(
+    r"(?i)Total\s+gas\s+(?P<valor>[\d.]+,[\d]{2})\s*(?:€|�)"
+)
+_PAT_NATURGY_FIXED = re.compile(
+    r"(?is)T[\xe9e]rmino\s+fijo.{0,160}?(?:€|�)\s*/\s*d[ií]a\s+"
+    r"(?P<valor>[\d.]+,[\d]{2})\s*(?:€|�)"
+)
+_PAT_NATURGY_RENTAL = re.compile(
+    r"(?is)Alquiler\s+de\s+contador.{0,160}?(?:€|�)\s*/\s*d[ií]a\s+"
+    r"(?P<valor>[\d.]+,[\d]{2})\s*(?:€|�)"
+)
+
+
+def extraer_datos_naturgy(texto: str, config: dict) -> dict:
+    """Extrae Naturgy incluyendo el detalle que aparece en la página 2."""
+    datos = extraer_datos_factura(texto, config)
+    total_match = _PAT_NATURGY_TOTAL_GAS.search(texto)
+    fixed_match = _PAT_NATURGY_FIXED.search(texto)
+    rental_match = _PAT_NATURGY_RENTAL.search(texto)
+    if total_match and fixed_match:
+        base_total = _limpiar_numero(total_match.group("valor"))
+        fixed_base = _limpiar_numero(fixed_match.group("valor"))
+        rental_base = (
+            _limpiar_numero(rental_match.group("valor")) if rental_match else 0.0
+        )
+        charged_total = float(datos.get("importe_total") or 0)
+        if base_total > 0 and charged_total > 0:
+            factor = charged_total / base_total
+            fixed_with_tax = round((fixed_base + rental_base) * factor, 2)
+            datos["termino_fijo"] = fixed_with_tax
+            datos["termino_variable"] = round(charged_total - fixed_with_tax, 2)
     return datos
 
 
@@ -1316,6 +1391,20 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
                 "detalle": f"Ningún proveedor reconocido en {nombre}",
                 "fragment": re.sub(r"\s+", " ", texto).strip()[:1000],
                 "nombre_archivo": nombre, "hash_md5": hash_md5}
+
+    # Algunos proveedores colocan el consumo y el desglose económico en una
+    # página posterior. La ruta histórica de procesamiento debe respetar la
+    # misma configuración que el analizador conectado; de lo contrario una
+    # factura podía verse bien en la bandeja global y perder sus datos al
+    # procesarla desde el flujo clásico.
+    detail_last_page = int(config_prov.get("ocr_detail_last_page") or 1)
+    if detail_last_page > 1:
+        detail_first_page = int(config_prov.get("ocr_detail_first_page") or 2)
+        detail_text = extraer_texto_paginas_ocr(
+            ruta_archivo, detail_first_page, detail_last_page,
+        )
+        if detail_text.strip():
+            texto = f"{texto}\n{detail_text}"
 
     # Algunos proveedores declaran de forma inequívoca el código interno de
     # la comunidad. Es una regla del proveedor, no una suposición global sobre
@@ -1519,6 +1608,8 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
                 datos["fecha_fin"] = datos.get("fecha_fin") or recovered.get("fecha_fin")
                 datos["lec_ini"] = datos.get("lec_ini") or recovered.get("lec_ini")
                 datos["lec_fin"] = datos.get("lec_fin") or recovered.get("lec_fin")
+    elif clave_prov == "NATURGY_CLIENTES_GAS":
+        datos = extraer_datos_naturgy(texto, config_prov)
     else:
         datos = extraer_datos_factura(texto, config_prov)
 

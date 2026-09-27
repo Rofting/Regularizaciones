@@ -548,6 +548,175 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertEqual("2025-11-15", result["datos"]["fecha_fin"])
         counter_ocr.assert_called_once_with(str(path))
 
+    def test_zaragoza_water_detail_page_recovers_real_invoice_values(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["AGUA_ZARAGOZA"]
+        text = (
+            "TOTAL A PAGAR 175,14 Consumo (m³) 44 "
+            "Lectura anterior (m³) 1.401 20-08-25 "
+            "Última lectura (m³) 1.445 21-09-25\n"
+            "Fecha de emisión 27/10/25 Fecha de vencimiento 15/12/25\n"
+            "Detalle abastecimiento Cuota fija Periodo facturado del 20-08-25 al 21-09-25 "
+            "Días €/día Colectivo Tarifa bonif. Importe (€) 32 1,744129 55,81 "
+            "Total cuota variable 29,44 Total abastecimiento 85,25\n"
+            "CUOTA FIJA ECOCIUDAD ZARAGOZA Periodo facturado del 20-08-25 al 21-09-25 "
+            "Días €/día Colectivo Tarifa bonif. Importe (€) 32 1,228943 39,33 "
+            "Total cuota variable 34,63 Total saneamiento 73,96"
+        )
+
+        result = lector_pdf.extraer_datos_agua_zaragoza(text, config)
+
+        self.assertEqual("2025-10-27", result["fecha_factura"])
+        self.assertEqual("2025-08-20", result["fecha_inicio"])
+        self.assertEqual("2025-09-21", result["fecha_fin"])
+        self.assertEqual(44.0, result["consumo_total"])
+        self.assertEqual(104.66, result["termino_fijo"])
+        self.assertEqual(70.48, result["termino_variable"])
+        self.assertEqual(175.14, result["importe_total"])
+
+    def test_naturgy_detail_page_recovers_consumption_and_tax_included_components(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        config = providers["proveedores"]["NATURGY_CLIENTES_GAS"]
+        text = (
+            "N.º de factura: FE26390008723694 Fecha de emisión: 02/03/2026 "
+            "Período gas: del 23/01/2026 al 25/02/2026 Total a pagar 6.279,49 €\n"
+            "Consumo gas 67.785 kWh x 0,070234 €/kWh 4.760,81 € "
+            "Impuesto Especial sobre hidrocarburos 158,62 € "
+            "Término fijo 34 días x 7,638503 €/día 259,71 € "
+            "Alquiler de contador 34 días x 0,309370 €/día 10,52 € "
+            "Total gas 5.189,66 € IVA (21%) 1.089,83 € Total a pagar 6.279,49 €"
+        )
+
+        result = lector_pdf.extraer_datos_naturgy(text, config)
+
+        self.assertEqual("FE26390008723694", result["num_factura"])
+        self.assertEqual("2026-03-02", result["fecha_factura"])
+        self.assertEqual(67785.0, result["consumo_total"])
+        self.assertEqual(326.98, result["termino_fijo"])
+        self.assertEqual(5952.51, result["termino_variable"])
+        self.assertEqual(6279.49, result["importe_total"])
+
+    def test_legacy_naturgy_processor_reads_its_configured_detail_page(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        cover = (
+            "Naturgy Clientes S.A.U. Aqui tienes tu factura de gas "
+            "N.º de factura: FE26390008723694 "
+            "Fecha de emisión: 02/03/2026 Período gas: del 23/01/2026 al 25/02/2026 "
+            "Total a pagar 6.279,49 €"
+        )
+        detail = (
+            "Consumo gas 67.785 kWh x 0,070234 €/kWh 4.760,81 € "
+            "Término fijo 34 días x 7,638503 €/día 259,71 € "
+            "Alquiler de contador 34 días x 0,309370 €/día 10,52 € "
+            "Total gas 5.189,66 € IVA (21%) 1.089,83 € Total a pagar 6.279,49 €"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "naturgy.pdf"
+            path.touch()
+            with (
+                mock.patch("lector_pdf.extraer_texto", return_value=cover),
+                mock.patch("lector_pdf.extraer_texto_paginas_ocr", return_value=detail) as detail_ocr,
+            ):
+                result = lector_pdf.procesar_archivo(
+                    str(path), "658", proveedores=providers,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(67785.0, result["datos"]["consumo_total"])
+        self.assertEqual(326.98, result["datos"]["termino_fijo"])
+        detail_ocr.assert_called_once_with(str(path), 2, 2)
+
+    def test_connected_water_pipeline_uses_cached_provider_detail_ocr(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        registry = provider_registry_from_payload(providers)
+        cover = (
+            "OFICINA MUNICIPAL DEL AGUA Ayuntamiento de Zaragoza FACTURA Nº 0001 "
+            "TOTAL A PAGAR 175,14 Consumo (m³) 44"
+        )
+        detail = (
+            "Fecha de emisión 27/10/25 Periodo facturado del 20-08-25 al 21-09-25 "
+            "Cuota fija Importe (€) 32 1,744129 55,81 Total cuota variable 29,44 "
+            "CUOTA FIJA ECOCIUDAD Importe (€) 32 1,228943 39,33 "
+            "Total cuota variable 34,63"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agua.pdf"
+            path.write_bytes(b"synthetic-pdf")
+            result = source_analysis.analyse_pdf_pipeline(
+                path,
+                connection=None,
+                community_code="658",
+                providers=providers,
+                provider_registry=registry,
+                text_extractor=lambda *_: TextExtraction(
+                    cover, "rapidocr", (1,), {}, 1, False,
+                ),
+                provider_detail_extractor=lambda *_: detail,
+            )
+
+        self.assertEqual("AGUA_ZARAGOZA", result.provider_key)
+        self.assertEqual("2025-10-27", result.candidates["fecha_factura"])
+        self.assertEqual("44.0", result.candidates["consumo_total"])
+        self.assertEqual("104.66", result.candidates["termino_fijo"])
+        self.assertEqual("70.48", result.candidates["termino_variable"])
+
+    def test_connected_water_pipeline_persists_and_reuses_provider_detail_ocr(self):
+        providers = lector_pdf.cargar_proveedores(
+            str(PROJECT_ROOT / "config" / "proveedores.json")
+        )
+        registry = provider_registry_from_payload(providers)
+        cover = (
+            "OFICINA MUNICIPAL DEL AGUA Ayuntamiento de Zaragoza FACTURA Nº 0001 "
+            "TOTAL A PAGAR 175,14 Consumo (m³) 44"
+        )
+        detail = (
+            "Fecha de emisión 27/10/25 Periodo facturado del 20-08-25 al 21-09-25 "
+            "Cuota fija Importe (€) 32 1,744129 55,81 Total cuota variable 29,44 "
+            "CUOTA FIJA ECOCIUDAD Importe (€) 32 1,228943 39,33 "
+            "Total cuota variable 34,63"
+        )
+        detail_extractor = mock.Mock(return_value=detail)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "agua.pdf"
+            path.write_bytes(b"synthetic-pdf")
+            connection = sqlite3.connect(":memory:")
+            connection.execute(
+                """CREATE TABLE document_text_cache (
+                    sha256 TEXT NOT NULL, extractor_version TEXT NOT NULL,
+                    text_content TEXT NOT NULL, method TEXT NOT NULL,
+                    pages_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (sha256, extractor_version)
+                )"""
+            )
+            for _ in range(2):
+                source_analysis.analyse_pdf_pipeline(
+                    path,
+                    connection=connection,
+                    community_code="658",
+                    providers=providers,
+                    provider_registry=registry,
+                    text_extractor=lambda *_: TextExtraction(
+                        cover, "rapidocr", (1,), {}, 1, False,
+                    ),
+                    provider_detail_extractor=detail_extractor,
+                )
+            versions = dict(connection.execute(
+                "SELECT extractor_version, COUNT(*) FROM document_text_cache GROUP BY extractor_version"
+            ).fetchall())
+            connection.close()
+
+        detail_extractor.assert_called_once()
+        self.assertEqual(1, versions["provider-detail:AGUA_ZARAGOZA:2-2:v1"])
+
     def test_naturgy_profile_interprets_dotted_kwh_as_thousands(self):
         providers = lector_pdf.cargar_proveedores(
             str(PROJECT_ROOT / "config" / "proveedores.json")
