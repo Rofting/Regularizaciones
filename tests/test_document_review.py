@@ -164,6 +164,31 @@ class DocumentReviewTest(unittest.TestCase):
             ("123.45", "analysis", "candidate", '{"page":2}'), tuple(candidate)
         )
 
+    def test_reanalysis_replaces_an_automatic_validated_candidate_but_not_manual_data(self):
+        document_review.record_candidates(
+            self.connection,
+            self.document.id_document,
+            {"consumo_total": "0"},
+            source="analysis",
+            validation_status="validated",
+        )
+
+        document_review.record_candidates(
+            self.connection,
+            self.document.id_document,
+            {"consumo_total": "44"},
+            source="analysis",
+            validation_status="candidate",
+            preserve_validated=True,
+        )
+
+        candidate = self.connection.execute(
+            """SELECT value,source,validation_status FROM extraction_candidates
+               WHERE id_document=? AND field_name='consumo_total'""",
+            (self.document.id_document,),
+        ).fetchone()
+        self.assertEqual(("44", "analysis", "candidate"), tuple(candidate))
+
     def test_resolving_issue_persists_manual_correction_and_validates_candidate(self):
         issue = self._create_missing_date_issue()
 
@@ -503,6 +528,47 @@ class DocumentReviewTest(unittest.TestCase):
             ("2025-12-31", "no_corresponde_al_periodo", "Corresponde al ejercicio anterior", "gestora"),
             tuple(correction),
         )
+
+    def test_dismissing_an_old_applied_invoice_detaches_it_from_the_case_period(self):
+        period_id = expedient_service.link_case_to_period(
+            self.connection, self.case.id_case,
+        )
+        invoice_id = self.connection.execute(
+            """INSERT INTO facturas
+               (id_comunidad,id_periodo,tipo_suministro,fecha_inicio,fecha_fin,
+                importe_total,archivo_origen)
+               VALUES (?,?, 'GAS','2025-07-01','2025-07-31',31.77,?)""",
+            (
+                self.community_id,
+                period_id,
+                str(self.document.archived_path),
+            ),
+        ).lastrowid
+        self.connection.execute(
+            """INSERT INTO archivos_procesados(nombre_archivo,id_factura)
+               VALUES (?,?)""",
+            (f"source_document:{self.document.id_document}", invoice_id),
+        )
+        issue = document_review.create_review_issue(
+            self.connection,
+            self.case.id_case,
+            self.document.id_document,
+            code="INVOICE_OUTSIDE_PERIOD",
+            field_name="document.eligibility",
+            message="La factura pertenece a otro período",
+            detected_value="period_outside_case",
+        )
+
+        document_review.dismiss_invoice_outside_period(
+            self.connection,
+            issue.id_issue,
+            reason="Corresponde al ejercicio anterior",
+            dismissed_by="gestora",
+        )
+
+        self.assertIsNone(self.connection.execute(
+            "SELECT id_periodo FROM facturas WHERE id_factura=?", (invoice_id,),
+        ).fetchone()[0])
 
     def test_issue_route_selects_specialized_flow_without_creating_a_window(self):
         counter, _owner_id, _period_id = self._create_counter_reset_issue()

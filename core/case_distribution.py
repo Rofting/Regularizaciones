@@ -332,6 +332,26 @@ def _boundary_reading_dates(
     return fila["inicial"], fila["final"]
 
 
+_CARRY_FORWARD_METHODS = {
+    "carry_forward_zero", "carry_forward_decrease", "counter_reset_carry_forward",
+}
+
+
+def _effective_meter_value(
+    readings: Mapping[str, sqlite3.Row], reading_date: str,
+) -> Decimal:
+    reading = readings[reading_date]
+    value = Decimal(str(reading["valor_acumulado"]))
+    if reading["metodo_estimacion"] not in _CARRY_FORWARD_METHODS:
+        return value
+    previous_values = [
+        Decimal(str(item["valor_acumulado"]))
+        for day, item in readings.items()
+        if day < reading_date
+    ]
+    return max([value, *previous_values])
+
+
 
 def _consumption_weights(
     connection: sqlite3.Connection,
@@ -347,9 +367,9 @@ def _consumption_weights(
             """SELECT fecha_lectura,valor_acumulado,estado,metodo_estimacion,approved_by,approved_at
                FROM period_readings
                WHERE id_propietario=? AND id_periodo=? AND tipo=?
-                 AND fecha_lectura IN (?,?)
+                 AND fecha_lectura<=?
                ORDER BY fecha_lectura""",
-            (owner_id, case["id_periodo"], reading_type, fecha_inicial, fecha_final),
+            (owner_id, case["id_periodo"], reading_type, fecha_final),
         ).fetchall()
         by_date = {row["fecha_lectura"]: row for row in rows}
         if fecha_inicial not in by_date or fecha_final not in by_date:
@@ -375,7 +395,10 @@ def _consumption_weights(
                 raise DistributionBlockedError("Hay una estimación de contador sin aprobación explícita")
             if status not in ("real", "estimado"):
                 raise DistributionBlockedError("Hay un estado de lectura no revisable")
-        consumption = Decimal(str(final["valor_acumulado"])) - Decimal(str(initial["valor_acumulado"]))
+        consumption = (
+            _effective_meter_value(by_date, fecha_final)
+            - _effective_meter_value(by_date, fecha_inicial)
+        )
         if consumption < 0:
             raise DistributionBlockedError("El contador se reinició y no tiene una estimación aprobada")
         result[owner_id] = consumption

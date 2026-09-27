@@ -285,9 +285,19 @@ def _legacy_invoice_candidates(
     """Reuse mature provider regexes without reopening or OCRing the PDF."""
     if not isinstance(profile.legacy.get("regex"), Mapping):
         return {}, {}
-    from lector_pdf import extraer_datos_factura
+    from lector_pdf import (
+        extraer_datos_agua_zaragoza,
+        extraer_datos_factura,
+        extraer_datos_naturgy,
+    )
 
-    extracted = extraer_datos_factura(text, dict(profile.legacy))
+    config = dict(profile.legacy)
+    if profile.key == "AGUA_ZARAGOZA":
+        extracted = extraer_datos_agua_zaragoza(text, config)
+    elif profile.key == "NATURGY_CLIENTES_GAS":
+        extracted = extraer_datos_naturgy(text, config)
+    else:
+        extracted = extraer_datos_factura(text, config)
     candidates: dict[str, str | None] = {}
     evidence: dict[str, FieldEvidence] = {}
     for name, value in extracted.items():
@@ -313,6 +323,7 @@ def analyse_pdf_pipeline(
     providers: Mapping[str, object] | None = None,
     provider_registry: Mapping[str, ProviderProfile] | None = None,
     text_extractor: Callable[[Path, int], TextExtraction] | None = None,
+    provider_detail_extractor: Callable[[Path, int, int], str] | None = None,
 ) -> SourceAnalysis:
     """Run the cached global pipeline used by folder and bulk ingestion."""
     extraction = get_document_text(connection, path, extractor=text_extractor)
@@ -384,16 +395,64 @@ def analyse_pdf_pipeline(
         )
 
     profile = provider_registry[match.provider_key]
-    bundle = extract_invoice_fields(profile, extraction.text)
+    provider_text = extraction.text
+    detail_last_page = int(profile.legacy.get("ocr_detail_last_page") or 1)
+    if detail_last_page > 1:
+        detail_first_page = int(profile.legacy.get("ocr_detail_first_page") or 2)
+
+        def extract_detail(document_path: Path, _max_pages: int) -> TextExtraction:
+            import time
+            from lector_pdf import extraer_texto_paginas_ocr
+
+            started = time.monotonic()
+            detail_text = (
+                provider_detail_extractor(
+                    document_path, detail_first_page, detail_last_page,
+                )
+                if provider_detail_extractor is not None
+                else extraer_texto_paginas_ocr(
+                    str(document_path), detail_first_page, detail_last_page,
+                )
+            )
+            return TextExtraction(
+                detail_text,
+                "provider_detail_ocr" if detail_text.strip() else "no_text",
+                tuple(range(detail_first_page, detail_last_page + 1)),
+                {},
+                int((time.monotonic() - started) * 1000),
+                False,
+            )
+
+        detail = get_document_text(
+            connection,
+            path,
+            extractor_version=(
+                f"provider-detail:{profile.key}:"
+                f"{detail_first_page}-{detail_last_page}:v1"
+            ),
+            max_pages=detail_last_page,
+            extractor=extract_detail,
+        )
+        if detail.text.strip():
+            provider_text = f"{provider_text}\n{detail.text}"
+
+    bundle = extract_invoice_fields(profile, provider_text)
     candidates = {name: item.value for name, item in bundle.fields.items()}
     evidence = dict(bundle.fields)
     legacy_candidates, legacy_evidence = _legacy_invoice_candidates(
-        profile, extraction.text, locator,
+        profile, provider_text, locator,
     )
+    specialised = profile.key in {"AGUA_ZARAGOZA", "NATURGY_CLIENTES_GAS"}
     for name, value in legacy_candidates.items():
-        candidates.setdefault(name, value)
+        if specialised and value not in (None, ""):
+            candidates[name] = value
+        else:
+            candidates.setdefault(name, value)
     for name, item in legacy_evidence.items():
-        evidence.setdefault(name, item)
+        if specialised and item.value not in (None, ""):
+            evidence[name] = item
+        else:
+            evidence.setdefault(name, item)
     return SourceAnalysis.invoice(
         candidates,
         locator=locator,

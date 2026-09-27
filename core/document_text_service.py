@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 
-TEXT_EXTRACTOR_VERSION = "document-text-v1"
+# v2 invalidates early cached failures created before the bundled OCR path was
+# available. A document is re-read once and subsequent reanalyses reuse the
+# successful text instead of falling back to the slow legacy reader forever.
+TEXT_EXTRACTOR_VERSION = "document-text-v2"
 
 
 @dataclass(frozen=True)

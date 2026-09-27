@@ -134,13 +134,18 @@ def classify_document(text: str, filename: str) -> DocumentClassification:
         if evidence:
             return _classification(kind, "high", rule_suffix, evidence)
 
-    is_reading, reading_evidence = _looks_like_reading(normalized)
-    if is_reading:
-        return _classification("reading", "high", "reading", reading_evidence)
-
     is_invoice, invoice_evidence = _looks_like_invoice(normalized)
     if is_invoice:
         return _classification("invoice", "high", "invoice", invoice_evidence)
+
+    # Las facturas de suministros reproducen lecturas anterior/actual y datos
+    # del contador. Esa tabla no convierte el documento fiscal en un fichero
+    # de lecturas: la estructura inequívoca de factura debe prevalecer. Los
+    # listados puros de contadores no contienen base imponible, IVA y total,
+    # por lo que siguen llegando a esta regla.
+    is_reading, reading_evidence = _looks_like_reading(normalized)
+    if is_reading:
+        return _classification("reading", "high", "reading", reading_evidence)
 
     probable_invoice = _contains(normalized, r"\bFACTURA\b", r"\bTOTAL\b")
     if len(probable_invoice) == 2:

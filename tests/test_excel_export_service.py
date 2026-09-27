@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from copy import copy
 from contextlib import redirect_stdout
 from datetime import date
@@ -24,7 +25,7 @@ if str(CORE_DIR) not in sys.path:
 import excel_generator
 import gestor_bd
 from excel_export_service import (
-    ExportBlockedError, _case_context, _input_hash, _profile_for_community,
+    ExportBlockedError, _case_context, _expected_totals, _input_hash, _profile_for_community,
     _is_winter, _season_boundary, _validate_normalized_inputs,
     generate_official_excel,
 )
@@ -69,6 +70,8 @@ PROFILE_DATA = {
             "community_name": ["DATOS", "A1"],
             "period_label": ["DATOS", "A3"],
             "owner_count": ["DATOS", "D4"],
+            "meter_period_label": ["LECTURAS ACS M3", "P6"],
+            "meter_period_days": ["LECTURAS ACS M3", "P7"],
         },
         "tables": {
             "GAS": {
@@ -91,10 +94,11 @@ PROFILE_DATA = {
             "AGUA": {
                 "sheet": "AGUA", "start_row": 10, "end_row": 21,
                 "input_columns": {
-                    "invoice_date": "B", "end_date": "D", "consumption": "I",
+                    "invoice_date": "B", "end_date": "D", "start_date": "F", "consumption": "I",
                     "variable": "T", "fixed": "U",
                 },
                 "derived_columns": {"total": "R"},
+                "period_span_days_cell": "D23",
             },
             "OTROS_GASTOS": {
                 "sheet": "OTROS GASTOS", "start_row": 13, "end_row": 23,
@@ -162,6 +166,9 @@ def _make_template(path: Path) -> Path:
     workbook["ELECTRICIDAD"]["H23"] = "=SUM(H10:H21)"
     workbook["AGUA"]["R10"] = "=T10+U10"
     workbook["AGUA"]["R23"] = "=SUM(R10:R21)"
+    workbook["AGUA"]["D23"] = "=D21-F10"
+    workbook["LECTURAS ACS M3"]["P6"] = "1-agosto-2025 a 31-Julio-2026"
+    workbook["LECTURAS ACS M3"]["P7"] = "=C25-E10"
     workbook["LECTURAS ACS M3"]["G8"] = "=D8-F8"
     workbook["LECTURAS ACS M3"]["J8"] = "=SUM(H8:I8)"
     workbook["LECTURAS ACS M3"]["L8"] = "=H8/G8"
@@ -176,7 +183,7 @@ def _make_template(path: Path) -> Path:
     for sheet_name, columns, first, last in (
         ("GAS", ("B", "D"), 10, 30),
         ("ELECTRICIDAD", ("B", "C", "D"), 10, 21),
-        ("AGUA", ("B", "D"), 10, 21),
+        ("AGUA", ("B", "D", "F"), 10, 21),
         ("OTROS GASTOS", ("D",), 13, 23),
         ("LECTURAS ACS M3", ("B", "C", "E"), 8, 25),
     ):
@@ -325,6 +332,21 @@ class ExcelExportServiceTest(unittest.TestCase):
             "parameter:acs_variable_billed": 16_800,
         }
 
+    def test_actual_cost_parameters_are_outputs_not_stale_validation_inputs(self):
+        from excel_profiles import load_profile
+
+        case = _case_context(self.connection, self.case_id)
+        expected = _expected_totals(
+            self.connection,
+            case,
+            load_profile("658_acs_v1", self.project_root),
+        )
+
+        self.assertNotIn("parameter:acs_fixed_actual", expected)
+        self.assertNotIn("parameter:acs_variable_actual", expected)
+        self.assertEqual(11_200, expected["parameter:acs_fixed_billed"])
+        self.assertEqual(16_800, expected["parameter:acs_variable_billed"])
+
     def test_export_writes_typed_data_preserves_template_and_reports_progress(self):
         stages = []
         result = generate_official_excel(
@@ -368,6 +390,9 @@ class ExcelExportServiceTest(unittest.TestCase):
         self.assertEqual("=SUM(H8:I8)", workbook["LECTURAS ACS M3"]["J8"].value)
         self.assertEqual("=H8/G8", workbook["LECTURAS ACS M3"]["L8"].value)
         self.assertEqual("=I9/'DATOS'!$D$4", workbook["LECTURAS ACS M3"]["M9"].value)
+        self.assertEqual("01/09/2025 a 31/08/2026", workbook["LECTURAS ACS M3"]["P6"].value)
+        self.assertEqual(365, workbook["LECTURAS ACS M3"]["P7"].value)
+        self.assertEqual("=D10-F10", workbook["AGUA"]["D23"].value)
         self.assertEqual("=SUM(G8:G25)", workbook["LECTURAS ACS M3"]["G27"].value)
         for column in ("G", "J", "L", "M"):
             self.assertIsNone(workbook["LECTURAS ACS M3"][f"{column}15"].value)
@@ -384,6 +409,43 @@ class ExcelExportServiceTest(unittest.TestCase):
                 self.assertEqual(
                     template_archive.read("xl/styles.xml"), archive.read("xl/styles.xml")
                 )
+
+    def test_export_uses_latest_reliable_reading_for_an_outdated_carry_forward(self):
+        owner_id = self.connection.execute(
+            "SELECT id_propietario FROM propietarios WHERE codigo_vivienda='P1-A'"
+        ).fetchone()[0]
+        self.connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,fuente)
+               VALUES (?,?,'ACS','2026-03-31',130,'real','lectura intermedia')""",
+            (owner_id, self.period_id),
+        )
+        self.connection.execute(
+            """UPDATE lecturas_vecino
+               SET valor_acumulado=100,estado='estimado',
+                   metodo_estimacion='counter_reset_carry_forward'
+               WHERE id_propietario=? AND id_periodo=? AND tipo='ACS'
+                 AND fecha_lectura='2026-08-31'""",
+            (owner_id, self.period_id),
+        )
+        self.connection.commit()
+
+        result = generate_official_excel(
+            self.connection,
+            id_case=self.case_id,
+            project_root=self.project_root,
+            output_root=self.output_root,
+            recalculator=DeterministicRecalculator(),
+        )
+
+        workbook = load_workbook(result.output_path, data_only=False)
+        try:
+            sheet = workbook["LECTURAS ACS M3"]
+            self.assertEqual(345, sheet["D8"].value)
+            self.assertEqual(300, sheet["F8"].value)
+            self.assertEqual("=D8-F8", sheet["G8"].value)
+        finally:
+            workbook.close()
 
     def test_open_issue_blocks_export_without_replacing_predecessor(self):
         self.official_output.parent.mkdir(parents=True)
@@ -710,6 +772,51 @@ class ExcelExportServiceTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(RecalculationError, "LibreOffice"):
             recalculator.recalculate(self.template, self.root / "recalculo")
+
+    def test_windows_prefers_soffice_console_launcher_that_waits_for_conversion(self):
+        program = self.root / "LibreOffice" / "program"
+        program.mkdir(parents=True)
+        (program / "soffice.exe").write_bytes(b"gui-launcher")
+        (program / "soffice.com").write_bytes(b"console-launcher")
+        recalculator = LibreOfficeRecalculator()
+
+        with (
+            mock.patch("office_recalculation.shutil.which", return_value=None),
+            mock.patch.dict(
+                "office_recalculation.os.environ",
+                {"ProgramFiles": str(self.root), "ProgramFiles(x86)": ""},
+                clear=False,
+            ),
+        ):
+            executable = recalculator._find_executable()
+
+        self.assertEqual(program / "soffice.com", executable)
+
+    def test_libreoffice_retries_once_when_first_launch_returns_before_output_exists(self):
+        executable = self.root / "soffice.com"
+        executable.write_bytes(b"launcher")
+        workbook = self.root / "entrada.xlsx"
+        workbook.write_bytes(b"original")
+        calls = []
+
+        def launch(command, **_kwargs):
+            calls.append(command)
+            if len(calls) == 2:
+                output_directory = Path(command[command.index("--outdir") + 1])
+                (output_directory / workbook.name).write_bytes(b"recalculado")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("office_recalculation.subprocess.run", side_effect=launch):
+            LibreOfficeRecalculator(executable=executable).recalculate(
+                workbook, self.root / "trabajo",
+            )
+
+        self.assertEqual(2, len(calls))
+        profile_argument = next(
+            value for value in calls[0] if value.startswith("-env:UserInstallation=")
+        )
+        self.assertNotIn("trabajo", profile_argument)
+        self.assertEqual(b"recalculado", workbook.read_bytes())
 
     def test_legacy_entry_point_accepts_an_eligible_case(self):
         self.connection.close()

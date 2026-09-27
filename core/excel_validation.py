@@ -64,9 +64,16 @@ def _mutable_addresses(profile: ExcelProfile) -> dict[str, set[str]]:
             result.setdefault(sheet_name, set()).add(address)
     for table in layout.get("tables", {}).values():
         sheet_name = table["sheet"]
+        if table.get("period_span_days_cell"):
+            result.setdefault(sheet_name, set()).add(str(table["period_span_days_cell"]))
         for row in range(int(table["start_row"]), int(table["end_row"]) + 1):
             for column in (*_input_columns(table).values(), *table.get("derived_columns", {}).values()):
                 result.setdefault(sheet_name, set()).add(f"{column}{row}")
+    if profile.key == "658_acs_v1":
+        # Enlaces históricos añadidos por el exportador sin cambiar el JSON
+        # v1 que ya está registrado por huella en bases de datos existentes.
+        result.setdefault("LECTURAS ACS M3", set()).update({"P6", "P7"})
+        result.setdefault("AGUA", set()).add("D23")
     return result
 
 

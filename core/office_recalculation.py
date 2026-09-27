@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -49,9 +51,19 @@ class LibreOfficeRecalculator:
         self._timeout_seconds = timeout_seconds
 
     def _find_executable(self) -> Path:
+        def waiting_launcher(path: Path) -> Path:
+            # En Windows soffice.exe es un lanzador gráfico: puede devolver el
+            # control antes de que termine la conversión y el programa cree
+            # erróneamente que no hubo salida. soffice.com es el lanzador de
+            # consola equivalente y sí espera al proceso real.
+            console = path.with_suffix(".com")
+            if os.name == "nt" and console.is_file():
+                return console
+            return path
+
         if self._executable is not None:
             if self._executable.is_file():
-                return self._executable
+                return waiting_launcher(self._executable)
             raise RecalculationError(
                 "LibreOffice no está disponible en la ruta configurada. "
                 "Instálalo o selecciona su ejecutable soffice."
@@ -59,12 +71,13 @@ class LibreOfficeRecalculator:
         for command in ("soffice", "libreoffice"):
             located = shutil.which(command)
             if located:
-                return Path(located)
+                return waiting_launcher(Path(located))
         candidates: list[Path] = []
         for variable in ("ProgramFiles", "ProgramFiles(x86)"):
             base = os.environ.get(variable)
             if base:
-                candidates.append(Path(base) / "LibreOffice" / "program" / "soffice.exe")
+                program = Path(base) / "LibreOffice" / "program"
+                candidates.extend((program / "soffice.com", program / "soffice.exe"))
         for candidate in candidates:
             if candidate.is_file():
                 return candidate
@@ -80,36 +93,50 @@ class LibreOfficeRecalculator:
         executable = self._find_executable()
         work_directory = Path(work_directory).resolve()
         output_directory = work_directory / "recalculated"
-        profile_directory = work_directory / "libreoffice_profile"
         output_directory.mkdir(parents=True, exist_ok=True)
-        profile_directory.mkdir(parents=True, exist_ok=True)
         output_path = output_directory / workbook_path.name
         if output_path.exists():
             output_path.unlink()
-        command = [
-            str(executable),
-            "--headless",
-            f"-env:UserInstallation={profile_directory.as_uri()}",
-            "--convert-to",
-            "xlsx",
-            "--outdir",
-            str(output_directory),
-            str(workbook_path),
-        ]
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise RecalculationError(
-                f"LibreOffice superó el límite de {self._timeout_seconds} segundos al recalcular"
-            ) from error
-        except OSError as error:
-            raise RecalculationError(f"No se pudo iniciar LibreOffice: {error}") from error
+        completed = None
+        # LibreOffice crea rutas internas profundas. En expedientes ubicados
+        # dentro de un worktree la ruta del perfil superaba MAX_PATH y soffice
+        # terminaba con 0xC0000409 sin imprimir diagnóstico. El perfil es
+        # efímero y puede vivir de forma segura en el directorio temporal corto.
+        with tempfile.TemporaryDirectory(prefix="regularizacion-lo-") as profile_root:
+            profile_directory = Path(profile_root).resolve()
+            command = [
+                str(executable),
+                "--headless",
+                f"-env:UserInstallation={profile_directory.as_uri()}",
+                "--convert-to",
+                "xlsx",
+                "--outdir",
+                str(output_directory),
+                str(workbook_path),
+            ]
+            for attempt in range(2):
+                try:
+                    completed = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        timeout=self._timeout_seconds,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    raise RecalculationError(
+                        f"LibreOffice superó el límite de {self._timeout_seconds} segundos al recalcular"
+                    ) from error
+                except OSError as error:
+                    raise RecalculationError(f"No se pudo iniciar LibreOffice: {error}") from error
+                if completed.returncode != 0 or output_path.is_file():
+                    break
+                # Algunas instalaciones de Windows terminan la primera invocación
+                # mientras aún inicializan el perfil aislado. Una segunda llamada
+                # al mismo perfil completa la conversión de forma determinista.
+                if attempt == 0:
+                    time.sleep(0.2)
+        assert completed is not None
         if completed.returncode != 0 or not output_path.is_file():
             details = (completed.stderr or completed.stdout or "sin diagnóstico").strip()
             raise RecalculationError(

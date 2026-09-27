@@ -233,6 +233,8 @@
       "unidad_consumo": "m3",
       "_notas": "Factura escaneada — requiere OCR (pdfplumber no extrae texto). Se procesa con pytesseract si está instalado.",
       "requiere_ocr": true,
+      "ocr_detail_first_page": 2,
+      "ocr_detail_last_page": 2,
       "firmas_identificacion": [
         "OFICINA MUNICIPAL DEL AGUA",
         "aguaszaragoza.es",
@@ -246,14 +248,22 @@
         "fecha_inicio": "(?:del\\s+|Lectura\\s+anterior[\\s\\S]{0,100}?)(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
         "fecha_fin": "(?:al\\s+|[UÚu�]ltima\\s+lectura[\\s\\S]{0,100}?)(?P<valor>\\d{2}[–-]\\d{2}[–-]\\d{2,4})",
         "dias_facturados": "Dias\\s+de\\s+facturacion\\s+(?P<valor>\\d+)",
-        "consumo_m3": "Saneamiento\\s+\\(m[3°o]\\)\\s+(?P<valor>\\d+)",
+        "consumo_m3": "(?:Consumo|Saneamiento)\\s+\\(m[3³°o�]\\)\\s+(?P<valor>\\d+)",
         "termino_fijo": "Cuota fija.*?Importe.*?\\n.*?(?P<valor>[\\d\\.,]+)\\s*$",
         "termino_variable": "Total cuota variable\\s+(?P<valor>[\\d\\.,]+)",
         "iva": "IVA\\s+\\(\\d+%\\)\\s+de\\s+[\\d\\.,]+\\s+(?P<valor>[\\d\\.,]+)",
         "importe_total": "TOTAL\\s+A\\s+PAGAR\\s+(?P<valor>[\\d\\.,]+)",
         "cups": "N[eº°o]\\s+de\\s+p[oó]liza\\s+(?P<valor>\\d+)",
-        "lec_ini": "Lectura\\s+anterior\\s+\\(m.\\)\\s+(?P<valor>[\\d]{2}\\.[\\d]{3})",
-        "lec_fin": "[UÚu]ltima\\s+lectura\\s+\\(m.\\)\\s+(?P<valor>[\\d]{2}\\.[\\d]{3})"
+        "lec_ini": "Lectura\\s+anterior\\s+\\(m.\\)\\s+(?P<valor>[\\d]{1,3}\\.[\\d]{3})",
+        "lec_fin": "[UÚu]ltima\\s+lectura\\s+\\(m.\\)\\s+(?P<valor>[\\d]{1,3}\\.[\\d]{3})"
+      },
+      "regex_preferidos": {
+        "fecha_factura": [
+          "Fecha\\s+de\\s+emisi[oó�]n\\s+(?P<valor>\\d{2}/\\d{2}/\\d{2,4})"
+        ],
+        "importe_total": [
+          "(?im)^TOTAL\\s+A\\s+PAGAR\\s*$\\s*(?P<valor>[\\d.,]+)"
+        ]
       },
       "cups_comunidades": {
         "644": "1027952"
@@ -379,6 +389,8 @@
       "nombre_display": "Naturgy Clientes S.A.U. — Gas mercado libre",
       "tipo_suministro": "GAS",
       "unidad_consumo": "kWh",
+      "ocr_detail_first_page": 2,
+      "ocr_detail_last_page": 2,
       "_notas": "Factura de gas de Naturgy Clientes. El CUPS se valida sólo cuando la comunidad lo tenga confirmado en este perfil.",
       "firma_exclusion": "(?:AVISO|RECORDATORIO)\\s+DE\\s+PAGO|FACTURA\\s+PENDIENTE",
       "firmas_identificacion": [
@@ -401,7 +413,7 @@
         "consumo_kwh"
       ],
       "regex": {
-        "num_factura": "N[.º°o�]\\s*(?:de\\s*)?factura:\\s*(?P<valor>[A-Z0-9]+)",
+        "num_factura": "N(?:[.\\s]*[º°o�])?\\s*(?:de\\s*)?factura:\\s*(?P<valor>[A-Z0-9]+)",
         "fecha_factura": "Fecha\\s+de\\s+emisi[oó�]n:\\s*(?P<valor>\\d{2}[/.]\\d{2}[/.]\\d{4})",
         "fecha_inicio": "(?:Per[ií�]odo\\s+gas:|Gas:)\\s*del\\s*(?P<valor>\\d{2}[/.]\\d{2}[/.]\\d{4})",
         "fecha_fin": "(?:Per[ií�]odo\\s+gas:|Gas:)\\s*del\\s*\\d{2}[/.]\\d{2}[/.]\\d{4}\\s+al\\s*(?P<valor>\\d{2}[/.]\\d{2}[/.]\\d{4})",

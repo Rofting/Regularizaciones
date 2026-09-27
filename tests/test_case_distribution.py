@@ -19,6 +19,7 @@ import gestor_bd
 import document_review
 from case_distribution import (
     DistributionBlockedError,
+    _consumption_weights,
     allocate_concept_cents,
     calculate_case_distribution,
 )
@@ -414,6 +415,32 @@ class CaseDistributionTest(unittest.TestCase):
         result = calculate_case_distribution(self.connection, id_case=self.case_id)
 
         self.assertEqual(6, result.owner_result_count)
+
+    def test_consumption_uses_latest_reliable_history_for_stale_carry_forward(self):
+        self.connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado)
+               VALUES (?,?,'ACS','2026-07-31',50,'real')""",
+            (self.owner_one, self.period_id),
+        )
+        self.connection.execute(
+            """UPDATE lecturas_vecino
+               SET valor_acumulado=20,estado='estimado',metodo_estimacion='carry_forward_decrease'
+               WHERE id_propietario=? AND fecha_lectura='2026-08-31'""",
+            (self.owner_one,),
+        )
+        self.connection.commit()
+        case = self.connection.execute(
+            "SELECT * FROM regularization_cases WHERE id_case=?", (self.case_id,),
+        ).fetchone()
+        concept = ConceptRule("acs_variable", "consumption", "acs_variable_actual", None, True)
+
+        weights = _consumption_weights(
+            self.connection, case, concept, [self.owner_one, self.owner_two],
+        )
+
+        self.assertEqual(40, weights[self.owner_one])
+        self.assertEqual(10, weights[self.owner_two])
 
     def test_rejects_validated_export_when_profile_bytes_changed_without_version_bump(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

@@ -328,14 +328,39 @@ def apply_confirmed_readings(
                     pending_review = True
                 continue
         else:
-            initial_ok = _insert_confirmed_reading(
-                con, owner_id, period_id, service, initial_date, initial_value,
-                "real", source_path,
-            )
+            previous_initial = con.execute(
+                """SELECT valor_acumulado FROM lecturas_vecino
+                   WHERE id_propietario=? AND tipo=? AND fecha_lectura<?
+                     AND valor_acumulado>0
+                     AND (estado='real' OR (estado='estimado' AND metodo_estimacion IN
+                          ('carry_forward_zero','carry_forward_decrease',
+                           'counter_reset_carry_forward')))
+                   ORDER BY fecha_lectura DESC,id_lectura DESC LIMIT 1""",
+                (owner_id, service, initial_date),
+            ).fetchone()
+            if (
+                previous_initial is not None
+                and initial_value < float(previous_initial["valor_acumulado"])
+            ):
+                initial_ok = apply_decrease_carry_forward(
+                    con, owner_id=owner_id, service=service,
+                    reading_date=initial_date, period_id=period_id,
+                    observation_id=initial_observation, source_path=source_path,
+                )
+            else:
+                initial_ok = _insert_confirmed_reading(
+                    con, owner_id, period_id, service, initial_date, initial_value,
+                    "real", source_path,
+                )
             _link_observation_to_effective_reading(
                 con, observation_id=initial_observation, owner_id=owner_id,
                 service=service, reading_date=initial_date,
-                status="observed" if initial_ok else "conflict",
+                status=(
+                    "carried_forward"
+                    if initial_ok and previous_initial is not None
+                    and initial_value < float(previous_initial["valor_acumulado"])
+                    else "observed" if initial_ok else "conflict"
+                ),
             )
             if not initial_ok:
                 _create_reading_issue(
@@ -344,6 +369,16 @@ def apply_confirmed_readings(
                 )
                 pending_review = True
                 continue
+
+        effective_initial = con.execute(
+            """SELECT valor_acumulado FROM lecturas_vecino
+               WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
+            (owner_id, service, initial_date),
+        ).fetchone()
+        if effective_initial is None:
+            pending_review = True
+            continue
+        effective_initial_value = float(effective_initial["valor_acumulado"])
 
         final_observation = record_reading_observation(
             con, owner_id=owner_id, service=service, reading_date=final_date,
@@ -363,7 +398,7 @@ def apply_confirmed_readings(
                     pending_review = True
             continue
 
-        if final_value < initial_value:
+        if final_value < effective_initial_value:
             # Un contador que baja suele ser una lectura provisional rota. La
             # cifra recibida permanece en reading_observations, pero para el
             # cálculo se conserva la última lectura fiable hasta que una lectura
@@ -597,10 +632,11 @@ def apply_decrease_carry_forward(
         """SELECT id_lectura,valor_acumulado FROM lecturas_vecino
            WHERE id_propietario=? AND tipo=? AND fecha_lectura < ?
              AND valor_acumulado>0
-             AND (estado='real' OR (estado='estimado'
-                  AND metodo_estimacion='counter_reset_carry_forward'
-                  AND trim(COALESCE(approved_by,''))<>''
-                  AND trim(COALESCE(approved_at,''))<>''))
+             AND (estado='real' OR (estado='estimado' AND (
+                  metodo_estimacion IN ('carry_forward_zero','carry_forward_decrease')
+                  OR (metodo_estimacion='counter_reset_carry_forward'
+                      AND trim(COALESCE(approved_by,''))<>''
+                      AND trim(COALESCE(approved_at,''))<>''))))
            ORDER BY fecha_lectura DESC,id_lectura DESC LIMIT 1""",
         (owner_id, service, reading_date),
     ).fetchone()
