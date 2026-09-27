@@ -255,7 +255,7 @@ _GUIDED_STEP_LABELS = (
 
 def guided_workspace_state(
     *, has_case: bool, document_count: int, open_issue_count: int, case_status: str,
-    has_registered_template: bool = True,
+    has_registered_template: bool = True, profile_issue: str | None = None,
 ) -> GuidedWorkspaceState:
     """Returns the next safe user action without replacing workflow service gates."""
     if not has_case:
@@ -266,6 +266,13 @@ def guided_workspace_state(
         active_step, next_action = "validar", "resolver_incidencias"
         headline = "Resuelve las incidencias"
         detail = f"Hay {open_issue_count} decisión(es) pendiente(s) antes de continuar."
+    elif profile_issue:
+        active_step, next_action = "validar", "revalidar_perfil"
+        headline = "Revalidar configuración del Excel"
+        detail = (
+            f"{profile_issue}. Comprueba la plantilla y actualiza su registro "
+            "para volver a generar el Excel oficial."
+        )
     elif case_status in {"ready_for_calculation"}:
         # Ya no se pide el modelo inicial: si la comunidad no tiene plantilla,
         # generar la crea desde el modelo canónico del despacho. «Importar
@@ -1816,6 +1823,13 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 else:
                     duplicate_count += 1
                 kinds.append(result.document.document_kind)
+            final_connection = gestor_bd.conectar(database_path)
+            try:
+                automatic, ready_for_calculation = case_ingestion.finalize_case_source_intake(
+                    final_connection, case_id,
+                )
+            finally:
+                final_connection.close()
             app.log(
                 f"Fuentes añadidas: {created_count} nueva(s), "
                 f"{duplicate_count} duplicada(s), {len(errors)} con error",
@@ -1827,7 +1841,12 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 messagebox.showinfo(
                     "Fuentes analizadas",
                     f"{source_summary(kinds)}\n\n{created_count} nuevas · {duplicate_count} duplicadas · {len(errors)} con error\n"
-                    "Revisa las incidencias del expediente para confirmar los datos pendientes."
+                    + (
+                        f"Se aplicaron automáticamente {automatic} fuente(s) completas. "
+                        "El expediente está listo para generar el Excel oficial."
+                        if ready_for_calculation else
+                        "Revisa las incidencias del expediente para confirmar los datos pendientes."
+                    )
                     + (
                         f"\n\n{len(foreign_paths)} fuente(s) de otras comunidades se apartaron. "
                         "Usa Bandeja global para clasificarlas."
