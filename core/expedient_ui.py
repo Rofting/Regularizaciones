@@ -256,6 +256,7 @@ _GUIDED_STEP_LABELS = (
 def guided_workspace_state(
     *, has_case: bool, document_count: int, open_issue_count: int, case_status: str,
     has_registered_template: bool = True, profile_issue: str | None = None,
+    profile_missing: bool = False,
 ) -> GuidedWorkspaceState:
     """Returns the next safe user action without replacing workflow service gates."""
     if not has_case:
@@ -266,6 +267,13 @@ def guided_workspace_state(
         active_step, next_action = "validar", "resolver_incidencias"
         headline = "Resuelve las incidencias"
         detail = f"Hay {open_issue_count} decisión(es) pendiente(s) antes de continuar."
+    elif profile_missing:
+        active_step, next_action = "reparto", "generar_excel"
+        headline = "Prepara el Excel oficial"
+        detail = (
+            "La comunidad aún no tiene un perfil Excel registrado. Se creará "
+            "automáticamente desde el modelo común al generar el Excel oficial."
+        )
     elif profile_issue:
         active_step, next_action = "validar", "revalidar_perfil"
         headline = "Revalidar configuración del Excel"

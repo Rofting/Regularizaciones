@@ -440,34 +440,48 @@ def run_generate_excel(
     progress: ProgressCallback | None = None,
 ):
     _emit(progress, "validate_case", id_case=id_case)
-    connection, profile = _with_case_profile(
-        database_path, id_case=id_case, active_community_id=active_community_id,
-        project_root=project_root,
-    )
-    original_status = None
+    connection = _connection(database_path)
     try:
-        _ensure_actionable_invoice_inputs(
-            connection, id_case=id_case, profile=profile,
-        )
-        original_status = _prepare_explicit_rerun(
-            connection, id_case, "ready_for_calculation"
-        )
-        # El modelo de estudio es el mismo para todas las comunidades, así que
-        # no hay motivo para exigir que alguien elija un Excel maestro antes de
-        # empezar: si la comunidad no tiene plantilla, se crea desde el modelo
-        # canónico. «Importar modelo inicial» sigue disponible para las que ya
-        # tengan su libro propio y quieran partir de él.
+        try:
+            case_ingestion.assert_case_belongs_to_community(
+                connection, id_case, active_community_id,
+            )
+        except LookupError as error:
+            raise WorkflowBlockedError(str(error)) from error
+
+        # La primera exportación de una comunidad es precisamente la que debe
+        # crear su perfil común. Resolver el perfil antes de prepararlo dejaba
+        # a las comunidades nuevas atrapadas en una falsa "revalidación".
         try:
             creada = plantilla_comunidad.asegurar_plantilla(
-                connection, community_id=active_community_id, project_root=Path(project_root),
+                connection,
+                community_id=active_community_id,
+                project_root=Path(project_root),
             )
         except plantilla_comunidad.PlantillaNoDisponible as error:
             raise WorkflowBlockedError(
                 f"{error}. Restaura el modelo canónico o usa «Importar modelo inicial» "
                 "para instalar el Excel maestro de esta comunidad."
             ) from error
+        profile = resolve_case_profile(
+            connection,
+            id_case=id_case,
+            active_community_id=active_community_id,
+            project_root=project_root,
+        )
+    except Exception:
+        connection.close()
+        raise
+    original_status = None
+    try:
         if creada is not None and not creada.reutilizada:
             _emit(progress, "prepare_template", template=str(creada.plantilla))
+        _ensure_actionable_invoice_inputs(
+            connection, id_case=id_case, profile=profile,
+        )
+        original_status = _prepare_explicit_rerun(
+            connection, id_case, "ready_for_calculation"
+        )
         _emit(progress, "generar_excel", id_case=id_case)
         result = generate_official_excel(
             connection, id_case=id_case, project_root=Path(project_root),

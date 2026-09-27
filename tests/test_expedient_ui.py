@@ -596,6 +596,20 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
         self.assertEqual("Revalidar configuración del Excel", state.headline)
         self.assertIn("huella", state.detail)
 
+    def test_missing_profile_routes_to_automatic_excel_preparation(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True,
+            document_count=3,
+            open_issue_count=0,
+            case_status="reconciled",
+            has_registered_template=False,
+            profile_missing=True,
+        )
+
+        self.assertEqual(("reparto", "generar_excel"), (state.active_step, state.next_action))
+        self.assertEqual("Prepara el Excel oficial", state.headline)
+        self.assertIn("automáticamente", state.detail.lower())
+
     def test_no_case_prompts_case_creation(self):
         state = expedient_ui.guided_workspace_state(
             has_case=False, document_count=0, open_issue_count=0, case_status=""
