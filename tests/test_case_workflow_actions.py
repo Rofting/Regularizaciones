@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import shutil
 import sys
 import tempfile
 import unittest
@@ -270,6 +271,57 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         export.assert_called_once()
         provision.assert_called_once()
         self.assertEqual(self.community_id, provision.call_args.kwargs["community_id"])
+
+    def test_generate_excel_prepares_an_unconfigured_community_before_resolving_its_profile(self):
+        """El primer Excel de una comunidad nace del modelo común automáticamente."""
+        from case_workflow_actions import run_generate_excel
+
+        self.connection.execute(
+            "DELETE FROM excel_template_profiles WHERE id_comunidad=?",
+            (self.community_id,),
+        )
+        self.connection.commit()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base_profile = root / "config" / "modelo_excel" / "perfil_base.json"
+            canonical_model = root / "plantillas" / "modelo" / "modelo_acs_v1.xlsx"
+            base_profile.parent.mkdir(parents=True)
+            canonical_model.parent.mkdir(parents=True)
+            shutil.copy2(
+                PROJECT_ROOT / "config" / "modelo_excel" / "perfil_base.json",
+                base_profile,
+            )
+            shutil.copy2(
+                PROJECT_ROOT / "plantillas" / "modelo" / "modelo_acs_v1.xlsx",
+                canonical_model,
+            )
+
+            with patch(
+                "case_workflow_actions.generate_official_excel", return_value="excel"
+            ) as export:
+                result = run_generate_excel(
+                    self.database_path,
+                    id_case=self.case_id,
+                    active_community_id=self.community_id,
+                    project_root=root,
+                    output_root=root / "salidas",
+                )
+
+            self.assertEqual("excel", result)
+            self.assertTrue(
+                (
+                    root
+                    / "config"
+                    / "excel_profiles"
+                    / "runtime"
+                    / "658_acs_v1.json"
+                ).is_file()
+            )
+            self.assertTrue(
+                (root / "plantillas" / "comunidades" / "658" / "658_acs_v1.xlsx").is_file()
+            )
+            export.assert_called_once()
 
     def test_generate_excel_blocks_when_the_canonical_model_is_missing(self):
         """Sin modelo del que copiar sí hay que parar, y decir por qué."""

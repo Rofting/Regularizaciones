@@ -1319,6 +1319,7 @@ class AppGestionFincas(ctk.CTk):
                 (self.id_comunidad,),
             ).fetchone()
             has_registered_template = False
+            profile_missing = template_row is None
             if template_row is not None:
                 try:
                     template_path = (BASE_DIR / template_row["template_relative_path"]).resolve()
@@ -1335,8 +1336,11 @@ class AppGestionFincas(ctk.CTk):
                     )
                     profile_label = profile.key
                 except workflow.WorkflowBlockedError as error:
-                    profile_issue = str(error)
-                    profile_label = f"Perfil pendiente: {error}"
+                    if profile_missing:
+                        profile_label = "Se preparará automáticamente"
+                    else:
+                        profile_issue = str(error)
+                        profile_label = f"Perfil pendiente: {error}"
             else:
                 profile_label = "Perfil no disponible"
         except LookupError as exc:
@@ -1376,6 +1380,7 @@ class AppGestionFincas(ctk.CTk):
             open_issue_count=open_count, case_status=case.status,
             has_registered_template=has_registered_template,
             profile_issue=profile_issue,
+            profile_missing=profile_missing,
         )
         self.after(0, lambda: self._actualizar_workspace(workspace))
 
