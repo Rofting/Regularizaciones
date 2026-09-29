@@ -205,7 +205,9 @@ def revalidate_case_profile_registration(
     current = expedient_service.get_case(connection, id_case)
     if current.status not in {"draft", "gathering_sources", "under_review"}:
         expedient_service.set_case_status(connection, id_case, "under_review")
-    document_review.validate_case_ready(connection, id_case)
+    document_review.validate_case_ready(
+        connection, id_case, project_root=project_root
+    )
     return profile
 
 
@@ -441,7 +443,9 @@ def run_bootstrap_import(
             companions = None
             open_issues = result.open_issue_count
         if not open_issues:
-            document_review.validate_case_ready(connection, id_case)
+            document_review.validate_case_ready(
+                connection, id_case, project_root=project_root
+            )
         return result, companions
     finally:
         connection.close()
