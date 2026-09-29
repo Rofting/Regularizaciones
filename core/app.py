@@ -97,7 +97,8 @@ def _importar_modulos():
                    "excel_writer", "carta_writer", "importar_lecturas_metrigest",
                    "importar_excel_maestro", "letter_settings", "regularization_flow",
                    "expedient_service", "document_review", "case_ingestion",
-                   "expedient_ui", "case_workflow_actions", "database_reset"]:
+                   "expedient_ui", "case_workflow_actions", "case_readiness",
+                   "database_reset"]:
         try:
             modulos[nombre] = __import__(nombre)
         except ImportError:
@@ -1343,6 +1344,12 @@ class AppGestionFincas(ctk.CTk):
                         profile_label = f"Perfil pendiente: {error}"
             else:
                 profile_label = "Perfil no disponible"
+            readiness_report = None
+            readiness_module = MOD.get("case_readiness")
+            if readiness_module is not None:
+                readiness_report = readiness_module.evaluate_case_readiness(
+                    connection, self.id_expediente, BASE_DIR,
+                )
         except LookupError as exc:
             self._limpiar_contexto_expediente()
             self._refrescar_lista_expedientes()
@@ -1381,6 +1388,7 @@ class AppGestionFincas(ctk.CTk):
             has_registered_template=has_registered_template,
             profile_issue=profile_issue,
             profile_missing=profile_missing,
+            readiness_report=readiness_report,
         )
         self.after(0, lambda: self._actualizar_workspace(workspace))
 
@@ -1444,6 +1452,8 @@ class AppGestionFincas(ctk.CTk):
             "importar_modelo": ("Importar modelo inicial", self._accion_importar_modelo_inicial),
             "resolver_incidencias": ("Resolver incidencias", self._accion_resolver_incidencias),
             "confirmar_fuentes": ("Confirmar fuentes", self._accion_confirmar_fuentes),
+            "gestionar_periodos": ("Gestionar períodos", self._nuevo_periodo),
+            "importar_propietarios": ("Importar propietarios", self._accion_anadir_fuentes),
             "revalidar_perfil": ("Revalidar perfil Excel", self._accion_revalidar_perfil),
             "generar_excel": ("Generar Excel oficial", self._accion_generar_excel_expediente),
             "calcular_reparto": ("Calcular reparto", self._accion_calcular_reparto_expediente),

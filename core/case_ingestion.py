@@ -636,8 +636,8 @@ def finalize_case_source_intake(
     )
     if issues or pending_sources:
         return automatic, False
-    document_review.validate_case_ready(connection, case_id)
-    return automatic, True
+    reviewed = document_review.validate_case_ready(connection, case_id)
+    return automatic, reviewed.status == "ready_for_calculation"
 
 
 def list_pending_sources(

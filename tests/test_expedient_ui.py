@@ -16,6 +16,7 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import expedient_ui
+from case_readiness import CaseReadinessReport, ReadinessBlocker
 import ui_moderna
 from community_onboarding import (
     InvoiceDecision,
@@ -346,11 +347,15 @@ class SourceActionsTest(unittest.TestCase):
             "SELECT estado FROM regularization_cases WHERE id_case=?",
             (self.case.id_case,),
         ).fetchone()[0]
-        self.assertEqual("ready_for_calculation", status)
+        self.assertEqual("under_review", status)
         self.assertIn(
-            "listo para generar el Excel oficial",
+            "propietarios",
             self.messages.showinfo.call_args.args[1],
         )
+        self.app._refrescar_lista_expedientes.assert_called_with(
+            select_case_id=self.case.id_case
+        )
+        self.app._refrescar_expediente.assert_called()
 
     def test_classification_override_only_appears_for_unknown_and_creates_invoice_fields(self):
         self.ingest()
@@ -527,6 +532,64 @@ class SourceActionsTest(unittest.TestCase):
 
 
 class GuidedWorkspaceStateTest(unittest.TestCase):
+    def test_missing_owners_routes_to_importing_the_owner_list(self):
+        report = CaseReadinessReport(7, (
+            ReadinessBlocker(
+                "MISSING_OWNERS", "excel",
+                "Faltan propietarios activos para preparar el reparto.",
+                "import_owners",
+            ),
+        ))
+
+        state = expedient_ui.guided_workspace_state(
+            has_case=True,
+            document_count=5,
+            open_issue_count=0,
+            case_status="under_review",
+            readiness_report=report,
+        )
+
+        self.assertEqual(("fuentes", "importar_propietarios"), (
+            state.active_step, state.next_action,
+        ))
+        self.assertEqual("Importar propietarios", state.headline)
+        self.assertEqual(report.blockers, state.blockers)
+
+    def test_readiness_profile_blocker_offers_automatic_excel_preparation(self):
+        report = CaseReadinessReport(7, (
+            ReadinessBlocker(
+                "MISSING_PROFILE", "excel",
+                "Falta preparar el perfil Excel de la comunidad.",
+                "prepare_excel",
+            ),
+        ))
+
+        state = expedient_ui.guided_workspace_state(
+            has_case=True,
+            document_count=5,
+            open_issue_count=0,
+            case_status="under_review",
+            readiness_report=report,
+        )
+
+        self.assertEqual(("reparto", "generar_excel"), (
+            state.active_step, state.next_action,
+        ))
+        self.assertEqual("Preparar Excel oficial", state.headline)
+
+    def test_blocker_free_calculated_case_routes_to_distribution(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True,
+            document_count=5,
+            open_issue_count=0,
+            case_status="calculated",
+            readiness_report=CaseReadinessReport(7, ()),
+        )
+
+        self.assertEqual(("reparto", "calcular_reparto"), (
+            state.active_step, state.next_action,
+        ))
+
     def test_review_summary_treats_resets_from_one_source_as_one_action(self):
         issues = tuple(
             expedient_ui.ReviewIssue(

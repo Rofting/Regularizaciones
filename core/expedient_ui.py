@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypeVar
 import customtkinter as ctk
 
 import case_ingestion
+import case_readiness
 import cuotas_servicio
 import community_discovery
 import community_onboarding
@@ -222,6 +223,7 @@ class GuidedWorkspaceState:
     headline: str
     detail: str
     steps: tuple[GuidedStep, ...]
+    blockers: tuple[case_readiness.ReadinessBlocker, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -257,12 +259,38 @@ def guided_workspace_state(
     *, has_case: bool, document_count: int, open_issue_count: int, case_status: str,
     has_registered_template: bool = True, profile_issue: str | None = None,
     profile_missing: bool = False,
+    readiness_report: case_readiness.CaseReadinessReport | None = None,
 ) -> GuidedWorkspaceState:
     """Returns the next safe user action without replacing workflow service gates."""
+    blockers = tuple(readiness_report.blockers) if readiness_report is not None else ()
     if not has_case:
         active_step, next_action = "fuentes", "crear_expediente"
         headline = "Crear expediente"
         detail = "Elige el intervalo que vas a regularizar antes de incorporar fuentes."
+    elif blockers:
+        blocker = blockers[0]
+        routes = {
+            "add_sources": ("fuentes", "anadir_fuentes", "Añadir fuentes"),
+            "resolve_issues": ("validar", "resolver_incidencias", "Resolver incidencias"),
+            "confirm_sources": ("validar", "confirmar_fuentes", "Confirmar fuentes"),
+            "manage_periods": ("fuentes", "gestionar_periodos", "Definir período"),
+            "import_owners": ("fuentes", "importar_propietarios", "Importar propietarios"),
+            "prepare_excel": ("reparto", "generar_excel", "Preparar Excel oficial"),
+            "manage_profile": ("validar", "revalidar_perfil", "Revisar perfil Excel"),
+            "revalidate_profile": ("validar", "revalidar_perfil", "Revalidar perfil Excel"),
+            "review_sources": ("validar", "confirmar_fuentes", "Completar datos de fuentes"),
+            "review_owners": ("validar", "importar_propietarios", "Revisar coeficientes"),
+            "review_readings": ("validar", "anadir_fuentes", "Completar lecturas"),
+            "generate_excel": ("reparto", "generar_excel", "Generar Excel oficial"),
+            "calculate_distribution": ("reparto", "calcular_reparto", "Calcular reparto"),
+        }
+        active_step, next_action, headline = routes.get(
+            blocker.action,
+            ("validar", "confirmar_fuentes", "Completar expediente"),
+        )
+        detail = blocker.message
+        if len(blockers) > 1:
+            detail += f" Después quedan {len(blockers) - 1} requisito(s) más."
     elif open_issue_count:
         active_step, next_action = "validar", "resolver_incidencias"
         headline = "Resuelve las incidencias"
@@ -347,6 +375,7 @@ def guided_workspace_state(
         headline=headline,
         detail=detail,
         steps=steps,
+        blockers=blockers,
     )
 
 
@@ -1836,6 +1865,11 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 automatic, ready_for_calculation = case_ingestion.finalize_case_source_intake(
                     final_connection, case_id,
                 )
+                readiness = case_readiness.evaluate_case_readiness(
+                    final_connection,
+                    case_id,
+                    Path(__file__).resolve().parents[1],
+                )
             finally:
                 final_connection.close()
             app.log(
@@ -1846,6 +1880,11 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
             def refresh_case():
                 app._refrescar_lista_expedientes(select_case_id=case_id)
                 app._refrescar_expediente()
+                next_requirement = (
+                    readiness.blockers[0].message
+                    if readiness.blockers else
+                    "El expediente no tiene decisiones pendientes."
+                )
                 messagebox.showinfo(
                     "Fuentes analizadas",
                     f"{source_summary(kinds)}\n\n{created_count} nuevas · {duplicate_count} duplicadas · {len(errors)} con error\n"
@@ -1853,7 +1892,7 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                         f"Se aplicaron automáticamente {automatic} fuente(s) completas. "
                         "El expediente está listo para generar el Excel oficial."
                         if ready_for_calculation else
-                        "Revisa las incidencias del expediente para confirmar los datos pendientes."
+                        f"Siguiente paso: {next_requirement}"
                     )
                     + (
                         f"\n\n{len(foreign_paths)} fuente(s) de otras comunidades se apartaron. "
