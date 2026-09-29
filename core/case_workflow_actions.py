@@ -15,6 +15,7 @@ from typing import Any, Callable
 import case_distribution
 import case_ingestion
 import case_letter_service
+import case_readiness
 import document_review
 import excel_bootstrap_importer
 import excel_export_service
@@ -45,6 +46,22 @@ def _connection(database_path: str | Path) -> sqlite3.Connection:
     connection = sqlite3.connect(str(database_path))
     connection.row_factory = sqlite3.Row
     return connection
+
+
+def _require_stage(
+    connection: sqlite3.Connection,
+    *,
+    id_case: int,
+    stage: str,
+    project_root: Path,
+) -> case_readiness.CaseReadinessReport:
+    """Traduce el informe común al error público del flujo guiado."""
+    try:
+        return case_readiness.require_stage(
+            connection, id_case, stage, Path(project_root)
+        )
+    except case_readiness.CaseNotReadyError as error:
+        raise WorkflowBlockedError(str(error)) from error
 
 
 def resolve_case_profile(
@@ -479,6 +496,12 @@ def run_generate_excel(
         _ensure_actionable_invoice_inputs(
             connection, id_case=id_case, profile=profile,
         )
+        _require_stage(
+            connection,
+            id_case=id_case,
+            stage="excel",
+            project_root=Path(project_root),
+        )
         original_status = _prepare_explicit_rerun(
             connection, id_case, "ready_for_calculation"
         )
@@ -512,6 +535,16 @@ def run_calculate_distribution(
         database_path, id_case=id_case, active_community_id=active_community_id,
         project_root=project_root,
     )
+    try:
+        _require_stage(
+            connection,
+            id_case=id_case,
+            stage="distribution",
+            project_root=Path(project_root),
+        )
+    except Exception:
+        connection.close()
+        raise
     original_status = _prepare_explicit_rerun(connection, id_case, "calculated")
     try:
         _emit(progress, "calcular_reparto", id_case=id_case)
@@ -547,6 +580,16 @@ def run_generate_letters(
         database_path, id_case=id_case, active_community_id=active_community_id,
         project_root=project_root,
     )
+    try:
+        _require_stage(
+            connection,
+            id_case=id_case,
+            stage="letters",
+            project_root=Path(project_root),
+        )
+    except Exception:
+        connection.close()
+        raise
     original_status = _prepare_explicit_rerun(connection, id_case, "reconciled")
     connection.close()
     _emit(progress, "generar_cartas", id_case=id_case)

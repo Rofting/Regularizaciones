@@ -27,6 +27,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
     setUp = test_expedient_flow.ExpedientFlowTest.setUp
     tearDown = test_expedient_flow.ExpedientFlowTest.tearDown
     add_confirmed_reading = test_expedient_flow.ExpedientFlowTest.add_confirmed_reading
+    _prepare_structural_case = test_expedient_flow.ExpedientFlowTest._prepare_structural_case
 
     def ingest(self, analysis, path=None, case=None):
         self.connection.commit()
@@ -53,6 +54,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
 
     def test_clean_analysed_invoice_is_applied_automatically(self):
         self.ingest(self.invoice_analysis())
+        self._prepare_structural_case()
         self.assertEqual("ready_for_calculation", document_review.validate_case_ready(
             self.connection, self.case.id_case,
         ).status)
@@ -146,8 +148,9 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
             reason="Pertenece a otro ejercicio",
             dismissed_by="gestora",
         )
+        self._prepare_structural_case()
         self.assertEqual(
-            "ready_for_calculation",
+            "under_review",
             document_review.validate_case_ready(
                 self.connection, self.case.id_case,
             ).status,
@@ -155,6 +158,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
 
     def test_confirmation_applies_invoice_and_export_input_changes_after_correction(self):
         document = self.ingest(self.invoice_analysis())
+        self._prepare_structural_case()
         self.assertTrue(callable(getattr(case_ingestion, "confirm_source_candidates", None)),
                         "Production ingestion needs a reachable confirmation operation")
         self.confirm(document)
@@ -175,6 +179,7 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
 
     def test_reanalysis_with_new_candidates_blocks_export_until_confirmation(self):
         document = self.ingest(self.invoice_analysis())
+        self._prepare_structural_case()
         self.confirm(document)
         document_review.validate_case_ready(self.connection, self.case.id_case)
         candidates = dict(self.invoice_analysis().candidates)

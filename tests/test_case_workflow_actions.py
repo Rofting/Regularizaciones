@@ -64,6 +64,31 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                 ).hexdigest(),
             ),
         )
+        self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario,coeficiente,
+                tipo_unidad,activo)
+               VALUES (?, 'BASE', 'Propietario de prueba', 1, 'vivienda', 1)""",
+            (self.community_id,),
+        )
+        self.connection.execute(
+            """INSERT INTO source_documents
+               (id_case,original_name,archived_path,sha256,document_kind,status,
+                eligibility_status)
+               VALUES (?, 'fuente.pdf', 'fuente.pdf', ?, 'invoice', 'validated',
+                       'eligible')""",
+            (self.case_id, "f" * 64),
+        )
+        for parameter in (
+            "acs_fixed_actual", "acs_fixed_billed",
+            "acs_variable_actual", "acs_variable_billed",
+        ):
+            self.connection.execute(
+                """INSERT INTO period_parameters
+                   (id_comunidad,id_periodo,parameter_key,numeric_value)
+                   VALUES (?,?,?,10)""",
+                (self.community_id, self.period_id, parameter),
+            )
         self.connection.commit()
 
     def tearDown(self):
@@ -160,7 +185,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             ).hexdigest(),
             registered,
         )
-        self.assertEqual("ready_for_calculation", status)
+        self.assertEqual("under_review", status)
 
     def test_revalidation_does_not_accept_a_changed_template(self):
         from case_workflow_actions import (
@@ -367,6 +392,89 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         self.assertEqual("excel", result)
         self.assertEqual("calculated", status)
 
+    def test_generate_excel_rejects_a_case_without_active_owners(self):
+        from case_workflow_actions import WorkflowBlockedError, run_generate_excel
+
+        self.connection.execute(
+            "UPDATE propietarios SET activo=0 WHERE id_comunidad=?",
+            (self.community_id,),
+        )
+        self.connection.commit()
+
+        with patch("case_workflow_actions.generate_official_excel") as export:
+            with self.assertRaisesRegex(WorkflowBlockedError, "propietarios"):
+                run_generate_excel(
+                    self.database_path,
+                    id_case=self.case_id,
+                    active_community_id=self.community_id,
+                    project_root=PROJECT_ROOT,
+                    output_root=PROJECT_ROOT / "salidas-prueba",
+                )
+
+        export.assert_not_called()
+        self.assertEqual(
+            "ready_for_calculation",
+            self.connection.execute(
+                "SELECT estado FROM regularization_cases WHERE id_case=?",
+                (self.case_id,),
+            ).fetchone()[0],
+        )
+
+    def test_distribution_rejects_a_case_without_a_current_validated_excel(self):
+        from case_workflow_actions import WorkflowBlockedError, run_calculate_distribution
+
+        self.connection.execute(
+            "UPDATE regularization_cases SET estado='calculated' WHERE id_case=?",
+            (self.case_id,),
+        )
+        self.connection.commit()
+
+        with patch("case_workflow_actions.calculate_case_distribution") as distribution:
+            with self.assertRaisesRegex(WorkflowBlockedError, "Excel oficial"):
+                run_calculate_distribution(
+                    self.database_path,
+                    id_case=self.case_id,
+                    active_community_id=self.community_id,
+                    project_root=PROJECT_ROOT,
+                )
+
+        distribution.assert_not_called()
+        self.assertEqual(
+            "calculated",
+            self.connection.execute(
+                "SELECT estado FROM regularization_cases WHERE id_case=?",
+                (self.case_id,),
+            ).fetchone()[0],
+        )
+
+    def test_letters_reject_a_case_without_a_completed_distribution(self):
+        from case_workflow_actions import WorkflowBlockedError, run_generate_letters
+
+        self.connection.execute(
+            "UPDATE regularization_cases SET estado='reconciled' WHERE id_case=?",
+            (self.case_id,),
+        )
+        self.connection.commit()
+
+        with patch("case_workflow_actions.generate_case_letters") as letters:
+            with self.assertRaisesRegex(WorkflowBlockedError, "reparto final"):
+                run_generate_letters(
+                    self.database_path,
+                    id_case=self.case_id,
+                    active_community_id=self.community_id,
+                    project_root=PROJECT_ROOT,
+                    selected_concepts=("acs_fixed",),
+                )
+
+        letters.assert_not_called()
+        self.assertEqual(
+            "reconciled",
+            self.connection.execute(
+                "SELECT estado FROM regularization_cases WHERE id_case=?",
+                (self.case_id,),
+            ).fetchone()[0],
+        )
+
     def test_missing_invoice_date_returns_case_to_actionable_review(self):
         from case_workflow_actions import WorkflowBlockedError, run_generate_excel
 
@@ -445,7 +553,9 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         self.assertEqual(["validate_case", "generar_excel"], [event[0] for event in events])
 
         events.clear()
-        with patch("case_workflow_actions.calculate_case_distribution", return_value="reparto") as distribution:
+        with patch("case_workflow_actions._require_stage"), patch(
+            "case_workflow_actions.calculate_case_distribution", return_value="reparto"
+        ) as distribution:
             result = run_calculate_distribution(
                 self.database_path, id_case=self.case_id,
                 active_community_id=self.community_id, project_root=PROJECT_ROOT,
@@ -457,7 +567,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
 
         events.clear()
         from case_letter_service import LetterBatchResult
-        with patch(
+        with patch("case_workflow_actions._require_stage"), patch(
             "case_workflow_actions.generate_case_letters",
             return_value=LetterBatchResult(1, PROJECT_ROOT / "salidas-prueba", 1, ("pendiente",)),
         ) as letters:
@@ -474,7 +584,9 @@ class CaseWorkflowActionsTest(unittest.TestCase):
     def test_successful_distribution_marks_the_case_reconciled_before_letters(self):
         from case_workflow_actions import run_calculate_distribution
 
-        with patch("case_workflow_actions.calculate_case_distribution", return_value="reparto"):
+        with patch("case_workflow_actions._require_stage"), patch(
+            "case_workflow_actions.calculate_case_distribution", return_value="reparto"
+        ):
             run_calculate_distribution(
                 self.database_path, id_case=self.case_id,
                 active_community_id=self.community_id, project_root=PROJECT_ROOT,
@@ -497,7 +609,9 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         )
         self.connection.commit()
         batch = LetterBatchResult(1, PROJECT_ROOT / "salidas-prueba", 2, ())
-        with patch("case_workflow_actions.generate_case_letters", return_value=batch):
+        with patch("case_workflow_actions._require_stage"), patch(
+            "case_workflow_actions.generate_case_letters", return_value=batch
+        ):
             run_generate_letters(
                 self.database_path, id_case=self.case_id,
                 active_community_id=self.community_id, project_root=PROJECT_ROOT,
@@ -540,7 +654,9 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             (self.case_id,),
         )
         self.connection.commit()
-        with patch("case_workflow_actions.calculate_case_distribution", return_value="nuevo reparto"):
+        with patch("case_workflow_actions._require_stage"), patch(
+            "case_workflow_actions.calculate_case_distribution", return_value="nuevo reparto"
+        ):
             self.assertEqual("nuevo reparto", run_calculate_distribution(
                 self.database_path, id_case=self.case_id,
                 active_community_id=self.community_id, project_root=PROJECT_ROOT,
@@ -550,7 +666,9 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         ).fetchone()[0])
 
         batch = LetterBatchResult(9, PROJECT_ROOT / "salidas-prueba", 2, ())
-        with patch("case_workflow_actions.generate_case_letters", return_value=batch):
+        with patch("case_workflow_actions._require_stage"), patch(
+            "case_workflow_actions.generate_case_letters", return_value=batch
+        ):
             run_generate_letters(
                 self.database_path, id_case=self.case_id,
                 active_community_id=self.community_id, project_root=PROJECT_ROOT,

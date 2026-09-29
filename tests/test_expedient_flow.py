@@ -140,6 +140,36 @@ class ExpedientFlowTest(unittest.TestCase):
         )
         return result.document
 
+    def _prepare_structural_case(self):
+        """Añade los mínimos no relacionados con la prueba para poder calcular."""
+        case_row = self.connection.execute(
+            "SELECT id_periodo FROM regularization_cases WHERE id_case=?",
+            (self.case.id_case,),
+        ).fetchone()
+        if case_row["id_periodo"] is None:
+            period_id = self.connection.execute(
+                """INSERT INTO periodos
+                   (id_comunidad,nombre,fecha_inicio,fecha_fin,estado)
+                   VALUES (?,'enero','2026-01-01','2026-01-31','abierto')""",
+                (self.community_id,),
+            ).lastrowid
+            self.connection.execute(
+                "UPDATE regularization_cases SET id_periodo=? WHERE id_case=?",
+                (period_id, self.case.id_case),
+            )
+        if self.connection.execute(
+            "SELECT 1 FROM propietarios WHERE id_comunidad=? AND activo=1 LIMIT 1",
+            (self.community_id,),
+        ).fetchone() is None:
+            self.connection.execute(
+                """INSERT INTO propietarios
+                   (id_comunidad,codigo_vivienda,nombre_propietario,coeficiente,
+                    tipo_unidad,activo)
+                   VALUES (?,'BASE','Propietario base',1,'vivienda',1)""",
+                (self.community_id,),
+            )
+        self.connection.commit()
+
     def test_complete_high_confidence_invoice_is_applied_without_manual_confirmation(self):
         result = case_ingestion.add_analysed_document_to_case(
             self.connection,
@@ -455,6 +485,7 @@ class ExpedientFlowTest(unittest.TestCase):
 
     def test_validated_source_without_marker_is_applied_to_canonical_data(self):
         document = self.add_confirmed_invoice()
+        self._prepare_structural_case()
         document_review.validate_case_ready(self.connection, self.case.id_case)
         self.assertEqual("validated", self.document_status(document))
 
@@ -1059,6 +1090,7 @@ class ExpedientFlowTest(unittest.TestCase):
 
     def test_invoice_review_flow_reaches_ready_for_calculation(self):
         result = self._add_invoice_and_resolve_start_date()
+        self._prepare_structural_case()
 
         ready_case = document_review.validate_case_ready(
             self.connection, self.case.id_case
@@ -1074,8 +1106,21 @@ class ExpedientFlowTest(unittest.TestCase):
         )
         self.assertEqual("ready_for_calculation", ready_case.status)
 
+    def test_case_without_owners_stays_under_review_even_without_open_issues(self):
+        self._add_invoice_and_resolve_start_date()
+
+        reviewed = document_review.validate_case_ready(
+            self.connection, self.case.id_case
+        )
+
+        self.assertEqual("under_review", reviewed.status)
+        self.assertEqual("under_review", expedient_service.get_case(
+            self.connection, self.case.id_case
+        ).status)
+
     def test_new_incomplete_source_returns_ready_case_to_review(self):
         self._add_invoice_and_resolve_start_date()
+        self._prepare_structural_case()
         document_review.validate_case_ready(self.connection, self.case.id_case)
         second_source = Path(self.directory.name) / "factura-adicional.pdf"
         second_source.write_bytes(b"%PDF-1.4 factura adicional")
