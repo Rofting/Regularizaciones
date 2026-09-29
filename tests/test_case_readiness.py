@@ -163,6 +163,26 @@ class CaseReadinessTest(unittest.TestCase):
         )
         self.assertTrue(report.excel_ready)
 
+    def test_single_configured_profile_is_usable_before_first_registration(self):
+        self._register_profile("equal")
+        self.connection.execute(
+            "DELETE FROM excel_template_profiles WHERE id_comunidad=?",
+            (self.community_id,),
+        )
+        self.connection.commit()
+        self._add_owner()
+        from case_readiness import evaluate_case_readiness
+
+        report = evaluate_case_readiness(
+            self.connection, self.case_id, self.project_root
+        )
+
+        self.assertNotIn(
+            "MISSING_PROFILE",
+            tuple(item.code for item in report.for_stage("excel")),
+        )
+        self.assertTrue(report.excel_ready)
+
     def test_consumption_concept_requires_effective_start_and_end_readings(self):
         self._register_profile("consumption")
         self._add_owner()

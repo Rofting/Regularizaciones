@@ -8,7 +8,12 @@ from pathlib import Path
 
 import document_review
 from excel_export_service import ExportBlockedError, calculate_case_input_hash
-from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
+from excel_profiles import (
+    ExcelProfile,
+    calculate_profile_sha256,
+    configured_profile_paths,
+    load_profile,
+)
 
 
 STAGE_ORDER = {
@@ -102,11 +107,35 @@ def _active_profile(
         (case["id_comunidad"],),
     ).fetchall()
     if not rows:
-        return None, ReadinessBlocker(
-            "MISSING_PROFILE", "excel",
-            "Falta preparar el perfil Excel de la comunidad.",
-            "prepare_excel",
-        )
+        configured: list[ExcelProfile] = []
+        for profile_path in configured_profile_paths(project_root):
+            try:
+                candidate = load_profile(profile_path.stem, project_root)
+            except (LookupError, ValueError):
+                continue
+            if candidate.community_code == str(case["codigo"]):
+                configured.append(candidate)
+        if not configured:
+            return None, ReadinessBlocker(
+                "MISSING_PROFILE", "excel",
+                "Falta preparar el perfil Excel de la comunidad.",
+                "prepare_excel",
+            )
+        if len(configured) != 1:
+            return None, ReadinessBlocker(
+                "MULTIPLE_ACTIVE_PROFILES", "excel",
+                "Hay varios perfiles Excel configurados para la comunidad.",
+                "manage_profile", len(configured),
+            )
+        profile = configured[0]
+        template = (project_root / profile.template_relative_path).resolve()
+        if not template.is_file():
+            return None, ReadinessBlocker(
+                "MISSING_TEMPLATE", "excel",
+                "No se encuentra la plantilla Excel configurada.",
+                "prepare_excel",
+            )
+        return profile, None
     if len(rows) != 1:
         return None, ReadinessBlocker(
             "MULTIPLE_ACTIVE_PROFILES", "excel",

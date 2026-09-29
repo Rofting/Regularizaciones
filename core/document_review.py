@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from itertools import count
+from pathlib import Path
 from typing import Collection, Iterator, Mapping
 
 from expedient_models import RegularizationCase, ReviewIssue, review_issue_from_row
@@ -1377,7 +1378,25 @@ def assert_case_final_readings_approved(
         )
 
 
-def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> RegularizationCase:
+def validate_case_ready(
+    connection: sqlite3.Connection,
+    case_id: int,
+    project_root: str | Path | None = None,
+) -> RegularizationCase:
+    structural_codes = {
+        "NO_SOURCES",
+        "OPEN_ISSUES",
+        "PENDING_SOURCES",
+        "UNAPPLIED_SOURCES",
+        "MISSING_PERIOD",
+        "MISSING_OWNERS",
+        "INVALID_PROFILE",
+        "MULTIPLE_ACTIVE_PROFILES",
+        "STALE_PROFILE",
+        "MISSING_CONCEPT_VALUES",
+        "MISSING_COEFFICIENTS",
+        "MISSING_READINGS",
+    }
     with _transaction(connection):
         open_count = connection.execute(
             "SELECT COUNT(*) FROM review_issues WHERE id_case = ? AND status = 'open'",
@@ -1390,21 +1409,44 @@ def validate_case_ready(connection: sqlite3.Connection, case_id: int) -> Regular
             raise ValueError("Hay fuentes pendientes de confirmar y aplicar a los datos canónicos")
 
         assert_case_final_readings_approved(connection, case_id)
-        case = get_case(connection, case_id)
-        if case.status == "draft":
-            case = set_case_status(connection, case_id, "gathering_sources")
-        if case.status == "gathering_sources":
-            case = set_case_status(connection, case_id, "under_review")
-        if case.status == "under_review":
-            case = set_case_status(connection, case_id, "ready_for_calculation")
-        elif case.status != "ready_for_calculation":
-            case = set_case_status(connection, case_id, "ready_for_calculation")
-
         connection.execute(
             """UPDATE source_documents SET status = 'validated' WHERE id_case = ?
                AND (classification_confidence IS NULL OR document_kind='other')""",
             (case_id,),
         )
+        # Import local para no crear un ciclo entre el informe y esta capa de
+        # revisión. El estado "listo" sólo se concede si los datos estructurales
+        # que necesitará el cálculo existen de verdad.
+        import case_readiness
+
+        root = (
+            Path(project_root).resolve()
+            if project_root is not None
+            else Path(__file__).resolve().parents[1]
+        )
+        report = case_readiness.evaluate_case_readiness(
+            connection, case_id, root
+        )
+        structural = tuple(
+            blocker for blocker in report.for_stage("distribution")
+            if blocker.code in structural_codes
+        )
+        if structural:
+            connection.execute(
+                "UPDATE regularization_cases SET estado='under_review' WHERE id_case=?",
+                (case_id,),
+            )
+            case = get_case(connection, case_id)
+        else:
+            case = get_case(connection, case_id)
+            if case.status == "draft":
+                case = set_case_status(connection, case_id, "gathering_sources")
+            if case.status == "gathering_sources":
+                case = set_case_status(connection, case_id, "under_review")
+            if case.status == "under_review":
+                case = set_case_status(connection, case_id, "ready_for_calculation")
+            elif case.status != "ready_for_calculation":
+                case = set_case_status(connection, case_id, "ready_for_calculation")
     return case
 
 
