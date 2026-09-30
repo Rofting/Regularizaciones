@@ -26,6 +26,28 @@
 El botón lateral **Reparto** nunca salta los pasos anteriores: abre la acción
 pendiente que muestre el panel central.
 
+## Qué significa «listo»
+
+Que no queden incidencias manuales no significa por sí solo que el expediente
+pueda calcularse. El panel central comprueba también los datos estructurales y
+muestra una única acción inmediata:
+
+- **Añadir fuentes** si todavía no hay documentos útiles.
+- **Gestionar períodos** si las fuentes no están ligadas al intervalo correcto.
+- **Importar propietarios** si faltan las unidades activas de la comunidad.
+- **Completar lecturas** sólo cuando un concepto activo se reparte por consumo.
+- **Revisar coeficientes** cuando un concepto activo los necesita y alguno no
+  tiene un valor positivo guardado.
+- **Preparar o revalidar el perfil Excel** si falta, hay más de uno activo o su
+  huella ya no coincide con el registro de la base de datos.
+- **Generar Excel oficial** antes del reparto y **Calcular reparto** antes de las
+  cartas. Un Excel o un reparto antiguo no autoriza a seguir si cambiaron sus
+  entradas.
+
+Después de analizar una carpeta, la aplicación vuelve a seleccionar el mismo
+expediente y actualiza este diagnóstico. Si falta algo, no es necesario buscar
+un botón oculto: usa la acción principal que aparece en el centro.
+
 ### Carpeta mixta de correo
 
 1. Pulsa **Bandeja global** sin seleccionar comunidad ni período.

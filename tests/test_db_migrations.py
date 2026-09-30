@@ -14,6 +14,7 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import gestor_bd
+import db_migrations
 
 
 EXPECTED_TABLES = {
@@ -47,6 +48,12 @@ class DatabaseMigrationTest(unittest.TestCase):
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def test_public_schema_version_matches_the_latest_registered_migration(self):
+        self.assertEqual(
+            max(db_migrations.MIGRATIONS),
+            db_migrations.CURRENT_SCHEMA_VERSION,
+        )
 
     def test_crear_bd_applies_version_one_to_empty_database(self):
         with redirect_stdout(StringIO()):

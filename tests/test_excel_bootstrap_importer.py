@@ -486,7 +486,31 @@ class ExcelBootstrapImporterTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual(profile.template_relative_path, registration["template_relative_path"])
         self.assertEqual(source_hash, registration["template_sha256"])
-        document_review.validate_case_ready(self.connection, self.case.id_case)
+        owner_id = self.connection.execute(
+            """INSERT INTO propietarios
+               (id_comunidad,codigo_vivienda,nombre_propietario,coeficiente,
+                tipo_unidad,activo)
+               VALUES (?,'BASE','Propietario base',1,'vivienda',1)""",
+            (self.community_id,),
+        ).lastrowid
+        period_id = self.connection.execute(
+            "SELECT id_periodo FROM regularization_cases WHERE id_case=?",
+            (self.case.id_case,),
+        ).fetchone()[0]
+        self.connection.executemany(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,
+                estado,fuente)
+               VALUES (?,?,'ACS',?,?,'real','prueba')""",
+            (
+                (owner_id, period_id, "2025-09-01", 100),
+                (owner_id, period_id, "2026-08-31", 120),
+            ),
+        )
+        self.connection.commit()
+        document_review.validate_case_ready(
+            self.connection, self.case.id_case, project_root=project
+        )
         case_context = _case_context(self.connection, self.case.id_case)
         _profile_id, exported_template, exported_hash = _template_registration(
             self.connection, case_context, profile, project

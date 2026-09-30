@@ -154,6 +154,14 @@ class Private658ValidationGuardsTest(unittest.TestCase):
                    VALUES (?, 'A', 'Persona sintética', 1, 1)""",
                 (community_id,),
             ).lastrowid
+            connection.execute(
+                """INSERT INTO source_documents
+                   (id_case,original_name,archived_path,sha256,document_kind,
+                    status,eligibility_status)
+                   VALUES (?,'fuente.pdf','fuente.pdf',?,'invoice','validated',
+                           'eligible')""",
+                (case_id, "f" * 64),
+            )
             connection.commit()
             connection.close()
 
