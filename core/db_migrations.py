@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 15
 
 
 MIGRATION_1_SQL = (
@@ -823,6 +823,21 @@ def _migration_14(connection: sqlite3.Connection) -> None:
         ON source_field_evidence(id_document, field_name)""")
 
 
+def _migration_15(connection: sqlite3.Connection) -> None:
+    """CIF de emisores aprendidos de facturas confirmadas.
+
+    El catálogo global no lleva CIF; cada vez que un proveedor se confirma (por
+    firma segura o a mano) su CIF queda aquí y las siguientes facturas se
+    reconocen por él aunque el nombre salga distinto o mal leído.
+    """
+    connection.execute("""CREATE TABLE IF NOT EXISTS provider_learned_tax_ids (
+        tax_id TEXT PRIMARY KEY,
+        provider_key TEXT NOT NULL,
+        source TEXT NOT NULL,
+        learned_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -838,6 +853,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _migration_12,
     13: _migration_13,
     14: _migration_14,
+    15: _migration_15,
 }
 
 

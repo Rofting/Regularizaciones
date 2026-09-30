@@ -251,6 +251,17 @@ def _recover_invalid_confirmed_candidates(
         )
 
 
+def _manual_provider(connection: sqlite3.Connection, document_id: int) -> str | None:
+    """Proveedor confirmado a mano para un documento, si existe."""
+    row = connection.execute(
+        """SELECT value FROM extraction_candidates
+           WHERE id_document=? AND field_name='document.provider'
+             AND source='manual' AND validation_status='validated'""",
+        (document_id,),
+    ).fetchone()
+    return str(row["value"]).strip() if row and row["value"] else None
+
+
 def _persist_analysis(
     connection: sqlite3.Connection,
     case_id: int,
@@ -270,7 +281,10 @@ def _persist_analysis(
         eligibility_status, eligibility_reason = "not_applicable", "non_operational"
     elif analysis.kind == "unknown":
         eligibility_status, eligibility_reason = "review_required", "document_unknown"
-    elif analysis.kind == "invoice" and analysis.field_evidence and not analysis.provider_key:
+    elif (
+        analysis.kind == "invoice" and analysis.field_evidence and not analysis.provider_key
+        and not _manual_provider(connection, document.id_document)
+    ):
         eligibility_status, eligibility_reason = "review_required", "provider_unknown"
     elif analysis.kind == "invoice":
         eligibility = _invoice_eligibility_for_case(connection, case_id, candidates)
@@ -1243,8 +1257,20 @@ def _case_analyser(
     ).fetchone()
     if row is None:
         raise LookupError("El expediente no existe")
+    manual_providers = {
+        str(Path(item["archived_path"])): str(item["value"])
+        for item in connection.execute(
+            """SELECT d.archived_path, c.value
+                 FROM extraction_candidates c
+                 JOIN source_documents d ON d.id_document=c.id_document
+                WHERE d.id_case=? AND c.field_name='document.provider'
+                  AND c.source='manual' AND c.validation_status='validated'""",
+            (case_id,),
+        ).fetchall()
+    }
     return lambda path: analyse_source(
         path, community_code=row["codigo"], connection=connection,
+        forced_provider=manual_providers.get(str(Path(path))),
     )
 
 
