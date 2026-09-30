@@ -3,12 +3,109 @@
 from __future__ import annotations
 
 import os
+import posixpath
 import shutil
 import subprocess
 import tempfile
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Callable, Protocol
+from xml.etree import ElementTree as ET
+from zipfile import ZipFile
+
+
+_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+
+def _worksheet_paths(archive: ZipFile) -> dict[str, str]:
+    workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+    relationships = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    targets = {
+        item.attrib["Id"]: item.attrib["Target"]
+        for item in relationships.findall(f"{{{_PKG_REL}}}Relationship")
+    }
+    paths = {}
+    for sheet in workbook.findall(f"{{{_MAIN}}}sheets/{{{_MAIN}}}sheet"):
+        target = targets[sheet.attrib[f"{{{_REL}}}id"]]
+        paths[sheet.attrib["name"]] = (
+            target.lstrip("/") if target.startswith("/")
+            else posixpath.normpath(posixpath.join("xl", target))
+        )
+    return paths
+
+
+def restore_design_with_calculated_values(original: Path, calculated: Path) -> None:
+    """Conserva el OOXML diseñado por la plantilla y copia los cachés de fórmulas.
+
+    LibreOffice recalcula correctamente, pero reescribe fuentes, colores y otros
+    detalles de presentación. Los únicos cambios necesarios son los resultados
+    guardados en las celdas con fórmula.
+    """
+    replacement: dict[str, bytes] = {}
+    with ZipFile(original) as source, ZipFile(calculated) as result:
+        source_sheets = _worksheet_paths(source)
+        result_sheets = _worksheet_paths(result)
+        shared_strings = []
+        if "xl/sharedStrings.xml" in result.namelist():
+            string_table = ET.fromstring(result.read("xl/sharedStrings.xml"))
+            shared_strings = [
+                "".join(node.text or "" for node in item.iter(f"{{{_MAIN}}}t"))
+                for item in string_table.findall(f"{{{_MAIN}}}si")
+            ]
+        for name, source_path in source_sheets.items():
+            if name not in result_sheets:
+                raise RecalculationError(f"LibreOffice eliminó la hoja {name}")
+            source_xml = ET.fromstring(source.read(source_path))
+            result_xml = ET.fromstring(result.read(result_sheets[name]))
+            result_cells = {
+                cell.attrib["r"]: cell
+                for cell in result_xml.iter(f"{{{_MAIN}}}c")
+                if "r" in cell.attrib
+            }
+            changed = False
+            for cell in source_xml.iter(f"{{{_MAIN}}}c"):
+                formula = cell.find(f"{{{_MAIN}}}f")
+                if formula is None:
+                    continue
+                address = cell.attrib.get("r", "")
+                computed = result_cells.get(address)
+                if computed is None or computed.find(f"{{{_MAIN}}}f") is None:
+                    raise RecalculationError(f"Falta la fórmula recalculada {name}!{address}")
+                value = computed.find(f"{{{_MAIN}}}v")
+                if value is None:
+                    raise RecalculationError(f"Falta el resultado recalculado {name}!{address}")
+                if computed.attrib.get("t") == "s":
+                    try:
+                        value = ET.Element(f"{{{_MAIN}}}v")
+                        value.text = shared_strings[int(computed.find(f"{{{_MAIN}}}v").text)]
+                    except (IndexError, TypeError, ValueError) as error:
+                        raise RecalculationError(
+                            f"No se puede leer el resultado de {name}!{address}"
+                        ) from error
+                previous = cell.find(f"{{{_MAIN}}}v")
+                if previous is not None:
+                    cell.remove(previous)
+                cell.insert(list(cell).index(formula) + 1, deepcopy(value))
+                if "t" in computed.attrib:
+                    cell.attrib["t"] = (
+                        "str" if computed.attrib["t"] == "s" else computed.attrib["t"]
+                    )
+                else:
+                    cell.attrib.pop("t", None)
+                changed = True
+            if changed:
+                replacement[source_path] = ET.tostring(source_xml, encoding="utf-8")
+        temporary = original.with_name(original.name + ".cached")
+        try:
+            with ZipFile(temporary, "w") as output:
+                for part in source.infolist():
+                    output.writestr(part, replacement.get(part.filename, source.read(part.filename)))
+            os.replace(temporary, calculated)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 class RecalculationError(RuntimeError):

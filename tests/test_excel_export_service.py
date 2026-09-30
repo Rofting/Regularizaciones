@@ -1,6 +1,7 @@
 import json
 import hashlib
 import sqlite3
+import shutil
 import sys
 import tempfile
 import unittest
@@ -409,6 +410,29 @@ class ExcelExportServiceTest(unittest.TestCase):
                 self.assertEqual(
                     template_archive.read("xl/styles.xml"), archive.read("xl/styles.xml")
                 )
+
+    @unittest.skipUnless(shutil.which("soffice") or shutil.which("libreoffice"),
+                         "LibreOffice no está instalado")
+    def test_real_libreoffice_export_preserves_design_and_formula_results(self):
+        from excel_profiles import load_profile
+
+        result = generate_official_excel(
+            self.connection,
+            id_case=self.case_id,
+            project_root=self.project_root,
+            output_root=self.output_root,
+        )
+        profile = load_profile("658_acs_v1", self.project_root)
+        self.assertEqual(
+            workbook_fingerprint(self.template, profile),
+            workbook_fingerprint(result.output_path, profile),
+        )
+        workbook = load_workbook(result.output_path, data_only=True)
+        try:
+            self.assertEqual(100, workbook["GAS"]["M10"].value)
+            self.assertEqual(100, workbook["GAS"]["M31"].value)
+        finally:
+            workbook.close()
 
     def test_export_uses_latest_reliable_reading_for_an_outdated_carry_forward(self):
         owner_id = self.connection.execute(

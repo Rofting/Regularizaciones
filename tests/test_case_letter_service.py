@@ -212,7 +212,7 @@ class CaseLetterServiceTest(unittest.TestCase):
         result = generate_case_letters(
             self.database_path, id_case=self.case_id, project_root=self.root
         )
-        document = next(result.output_path.glob("*.docx"))
+        document = next(result.output_path.glob("CARTA_A-1_*.docx"))
         with zipfile.ZipFile(document) as archive:
             text = "\n".join(
                 archive.read(name).decode("utf-8", errors="ignore")
