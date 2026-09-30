@@ -262,7 +262,10 @@ class SourceAnalysisTest(unittest.TestCase):
     def test_provider_catalog_is_loaded_once_per_path(self):
         lector_pdf.cargar_proveedores.cache_clear()
         config = str(PROJECT_ROOT / "config" / "proveedores.json")
-        with mock.patch("lector_pdf.json.load", wraps=lector_pdf.json.load) as load:
+        import provider_registry
+        with mock.patch(
+            "provider_registry.load_catalog_payload", wraps=provider_registry.load_catalog_payload,
+        ) as load:
             lector_pdf.cargar_proveedores(config)
             lector_pdf.cargar_proveedores(config)
 
@@ -1331,7 +1334,7 @@ class ProviderLearningTest(unittest.TestCase):
     }})
     INVOICE = (
         "FACTURA F-{n} Fecha factura: 03/03/2026 Emisor CIF: A-95.758.389 "
-        "Cliente Comunidad de Propietarios NIF H99258139 "
+        "Cliente Comunidad de Propietarios NIF H12345674 "
         "Periodo de facturacion 01/02/2026 al 28/02/2026 "
         "Base imponible 100,00 EUR IVA 21,00 EUR Total factura 121,00 EUR"
     )
@@ -1373,6 +1376,15 @@ class ProviderLearningTest(unittest.TestCase):
         # Otra factura del mismo emisor sin su nombre: se reconoce por el CIF.
         later = self.analyse(self.INVOICE.format(n=2), "b.pdf")
         self.assertEqual("ACME", later.provider_key)
+
+    def test_office_tax_id_is_never_learned_as_the_issuer(self):
+        import office_settings
+        office_settings.save_office_settings(
+            self.connection, office_settings.OfficeSettings(name="Despacho", tax_id="B50000009"),
+        )
+        text = self.INVOICE.format(n=5) + " A la atención del administrador CIF B50000009"
+        self.analyse(text, "e.pdf", forced_provider="ACME")
+        self.assertEqual({"A95758389": "ACME"}, source_analysis.load_learned_tax_ids(self.connection))
 
     def test_ambiguous_documents_do_not_teach_a_tax_id(self):
         text = self.INVOICE.format(n=3) + " Distribuidora CIF B50000009 ACME ENERGIA"

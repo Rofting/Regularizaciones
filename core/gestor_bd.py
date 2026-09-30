@@ -21,6 +21,7 @@ TABLAS:
 
 import sqlite3
 import os
+import re
 import argparse
 from datetime import datetime
 
@@ -49,7 +50,7 @@ TABLAS = [
         id_comunidad    INTEGER PRIMARY KEY AUTOINCREMENT,
         codigo          TEXT    NOT NULL UNIQUE,   -- ej: '644'
         nombre          TEXT    NOT NULL,           -- nombre completo
-        cif             TEXT    UNIQUE,             -- ej: 'H99258139' — usado para autodetectar comunidad en PDFs
+        cif             TEXT    UNIQUE,             -- ej: 'H12345674' — usado para autodetectar comunidad en PDFs
         direccion       TEXT,
         num_viviendas   INTEGER DEFAULT 0,
         activa          INTEGER DEFAULT 1,          -- 1=activa, 0=baja
@@ -68,7 +69,7 @@ TABLAS = [
     CREATE TABLE IF NOT EXISTS propietarios (
         id_propietario      INTEGER PRIMARY KEY AUTOINCREMENT,
         id_comunidad        INTEGER NOT NULL REFERENCES comunidades(id_comunidad),
-        codigo_vivienda     TEXT    NOT NULL,   -- ej: 'SS22 BAJO IZDA' (siempre sin espacios sobrantes)
+        codigo_vivienda     TEXT    NOT NULL,   -- ej: 'BL1 BAJO IZDA' (siempre sin espacios sobrantes)
         tipo_unidad         TEXT    NOT NULL DEFAULT 'vivienda',  -- 'vivienda' | 'garaje' | 'local'
         nombre_propietario  TEXT    NOT NULL,
         coeficiente         REAL    NOT NULL DEFAULT 0.0,   -- enteros de participación
@@ -294,7 +295,12 @@ def conectar(ruta_bd: str) -> sqlite3.Connection:
 
 def obtener_o_crear_comunidad(con: sqlite3.Connection, codigo: str, nombre: str,
                                cif: str = None) -> int:
-    """Devuelve id_comunidad. La crea si no existe."""
+    """Devuelve id_comunidad. La crea si no existe.
+
+    El CIF se normaliza (sin espacios, puntos ni guiones) y uno vacío se guarda
+    como NULL: la columna es única y dos comunidades sin CIF no deben chocar.
+    """
+    cif = re.sub(r"[^A-Z0-9]", "", str(cif or "").upper()) or None
     fila = con.execute(
         "SELECT id_comunidad FROM comunidades WHERE codigo = ?", (codigo,)
     ).fetchone()

@@ -17,8 +17,9 @@ ARRANQUE
 
      python core/app.py
 
-3. Comprueba en "Configurar rutas" que base de datos, archivo de expedientes,
-   salidas y plantilla de cartas apuntan a las carpetas locales correctas.
+3. La primera vez, la aplicación crea la base de datos vacía y pide los
+   "Datos del despacho" (nombre, CIF, ciudad, firma, logo y mes de inicio del
+   ejercicio). Se pueden cambiar en cualquier momento en Ajustes.
    El arranque no sube documentos ni datos a servicios externos.
 
 USO HABITUAL EN LA APP
@@ -27,9 +28,9 @@ USO HABITUAL EN LA APP
    El período puede ser anual o de cualquier duración.
 2. Añade las facturas y lecturas/PDF disponibles. Si un valor no se puede
    confirmar, se abrirá su copia archivada para completar el dato y motivo.
-   Si incorporas o modificas perfiles en config/proveedores.json, reinicia la
-   aplicación y pulsa "Reanalizar fuentes" en el expediente: no vuelvas a
-   copiar ni a cargar los mismos archivos.
+   Si añades o corriges proveedores en config/proveedores_despacho.json,
+   reinicia la aplicación y pulsa "Reevaluar fuentes" en el expediente: no
+   vuelvas a copiar ni a cargar los mismos archivos.
 3. Resuelve todas las incidencias. Sólo entonces queda listo para cálculo.
 4. Pulsa "Generar Excel oficial". El libro se recrea desde la base de datos;
    no se debe editar como fuente de cálculo.
@@ -42,7 +43,7 @@ USO HABITUAL EN LA APP
 
 ALTA DE UNA COMUNIDAD
 ─────────────────────
-El botón "+ Comunidad" permite elegir entre "Registro rápido" y "Alta guiada
+El botón "Nueva comunidad" permite elegir entre "Registro rápido" y "Alta guiada
 desde fuentes". El alta guiada no requiere preparar previamente un Excel
 maestro perfecto y recorre cinco etapas visibles:
 
@@ -100,7 +101,7 @@ manuales. Para otra comunidad se añade su perfil mediante el alta guiada o,
 si existe un histórico adecuado, se hace el bootstrap inicial; no se programa
 una comunidad concreta en el código.
 
-VALIDACIÓN PRIVADA OPCIONAL DE LA 658
+VALIDACIÓN PRIVADA OPCIONAL DE LA 658 (sólo en este despacho)
 ────────────────────────────────────
 Existe un comprobador técnico independiente, sin interfaz, para verificar las
 tres fuentes reales antes de usar el flujo en producción. No se ejecuta con
@@ -117,6 +118,38 @@ base privada y reanuda esa ejecución sin reimportar ni crear otra base:
 
 La reanudación rechaza carpetas inseguras y no vuelve a generar salidas que ya
 estén completadas y auditadas.
+
+DATOS DEL DESPACHO Y DATOS DEL PRODUCTO
+───────────────────────────────────────
+La aplicación es la misma para todos los despachos. Lo propio de cada uno vive
+separado y nunca se copia a otro:
+
+• data/                         base de datos (comunidades, propietarios,
+                                expedientes, datos del despacho, CIF de
+                                proveedores aprendidos), fuentes archivadas y logo.
+• config/proveedores_despacho.json  proveedores propios, correcciones y CUPS
+                                de sus comunidades (capa sobre el catálogo).
+• config/excel_profiles/        perfiles Excel de sus comunidades.
+• config/letter_identities.json excepciones de cartas por comunidad (opcional).
+• plantillas/comunidades/, entrada/, salidas/.
+
+El producto (core/, scripts/, config/proveedores.json, config/modelo_excel/ y
+las plantillas genéricas) no contiene datos de comunidades ni de personas.
+
+INSTALAR EN OTRO DESPACHO
+─────────────────────────
+1. Desde esta instalación genera una copia limpia del producto:
+
+     python scripts/exportar_producto.py "<carpeta nueva>" --bd data/gestion.db
+
+   El script copia sólo el producto y comprueba que no quede ningún CIF de
+   comunidad, NIF, CUPS ni nombre de comunidades o propietarios de esta base.
+   Si encuentra alguno, lo indica y no da la copia por buena.
+2. En el otro despacho: instala las dependencias (requirements.txt) y ejecuta
+   python core/app.py. Se crea su base vacía y se piden sus datos del despacho.
+3. Sus proveedores locales se añaden en config/proveedores_despacho.json
+   (ver config/proveedores_despacho.ejemplo.json). El CIF de cada proveedor se
+   aprende solo al confirmar sus primeras facturas.
 
 CONTROLES IMPORTANTES
 ─────────────────────

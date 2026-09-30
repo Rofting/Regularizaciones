@@ -19,8 +19,8 @@ USO:
 
 import os
 import sys
-import shutil
 import sqlite3
+from contextlib import closing
 import threading
 import traceback
 from datetime import datetime
@@ -67,12 +67,10 @@ from ui_moderna import C
 BASE_DIR = Path(__file__).parent.parent  # sube un nivel desde core/
 
 RUTA_BD         = BASE_DIR / "data" / "gestion.db"
-RUTA_ENTRADA    = BASE_DIR / "entrada"
-RUTA_PROCESADOS = BASE_DIR / "procesados"
-RUTA_EXCELS     = BASE_DIR / "Excels_Maestros"
 RUTA_PLANTILLA  = BASE_DIR / "plantillas" / "Plantilla_Cartas.docx"
 RUTA_CARTAS     = BASE_DIR / "salidas" / "cartas"
 RUTA_PROVEEDORES= BASE_DIR / "config" / "proveedores.json"
+RUTA_PROVEEDORES_DESPACHO = BASE_DIR / "config" / "proveedores_despacho.json"
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +88,7 @@ def _importar_modulos():
                    "importar_excel_maestro", "letter_settings", "regularization_flow",
                    "expedient_service", "document_review", "case_ingestion",
                    "expedient_ui", "case_workflow_actions", "case_readiness",
-                   "database_reset"]:
+                   "database_reset", "office_settings"]:
         try:
             modulos[nombre] = __import__(nombre)
         except ImportError:
@@ -141,8 +139,10 @@ class AppGestionFincas(ctk.CTk):
         self.log("     deja los PDFs/Excels en entrada/ y pulsa PROCESAR TODO.", "bienvenida")
         self.log("  ✦ Flujo guiado activo · selección de fuentes y conceptos disponible", "bienvenida")
         UIM.aparecer(self)
-        # El periodo se elige desde la tarjeta de contexto; no interrumpimos
-        # el arranque con un diálogo heredado.
+        self._actualizar_titulo_despacho()
+        # Una instalación nueva (o anterior a los datos del despacho) pide su
+        # identidad una sola vez; «Más tarde» deja usar la aplicación.
+        self.after(600, self._comprobar_datos_despacho)
 
     # -----------------------------------------------------------------------
     # CONSTRUCCIÓN DE LA UI
@@ -153,7 +153,8 @@ class AppGestionFincas(ctk.CTk):
         header.pack(fill="x")
         header.pack_propagate(False)
         ctk.CTkLabel(header, text="Regularizaciones", font=UIM.fuente(22, "bold"), text_color=C["texto"]).pack(side="left", padx=(28, 8), pady=18)
-        ctk.CTkLabel(header, text="Flujo guiado de facturas, lecturas y cartas", font=UIM.fuente(11), text_color=C["texto_sec"]).pack(side="left", pady=18)
+        self.lbl_despacho = ctk.CTkLabel(header, text="Flujo guiado de facturas, lecturas y cartas", font=UIM.fuente(11), text_color=C["texto_sec"])
+        self.lbl_despacho.pack(side="left", pady=18)
         self.interruptor = UIM.InterruptorTema(header)
         self.interruptor.pack(side="right", padx=(8, 22))
         for text, command in (
@@ -210,6 +211,7 @@ class AppGestionFincas(ctk.CTk):
         # contador: sin este paso el análisis no tiene con qué comparar el coste.
         for text, command in (
             ("Cuotas cobradas", self._accion_cuotas_cobradas),
+            ("Gastos fijos", self._accion_gastos_fijos),
             ("Reevaluar fuentes", self._accion_reanalizar_fuentes),
             ("Historial", self._accion_ver_historial_periodo),
             ("Abrir salidas", self._abrir_salidas),
@@ -296,8 +298,7 @@ class AppGestionFincas(ctk.CTk):
     # -----------------------------------------------------------------------
     def _verificar_estructura(self):
         """Crea las carpetas necesarias si no existen."""
-        for carpeta in [RUTA_ENTRADA, RUTA_PROCESADOS,
-                        RUTA_EXCELS, RUTA_CARTAS,
+        for carpeta in [RUTA_CARTAS,
                         self.ruta_archivo_expedientes,
                         BASE_DIR / "data",
                         BASE_DIR / "config"]:
@@ -785,6 +786,26 @@ class AppGestionFincas(ctk.CTk):
         finally:
             connection.close()
         ui.open_service_fees_dialog(self, "ACS", period_id=self.id_periodo)
+
+    def _periodo_enlazado(self):
+        """Período del expediente activo, creándolo si aún no está enlazado."""
+        if self._procesando or not self._validar_expediente_activo():
+            return None
+        database, service = MOD.get("gestor_bd"), MOD.get("expedient_service")
+        connection = database.conectar(str(self.ruta_bd_expedientes))
+        try:
+            self.id_periodo = service.link_case_to_period(connection, self.id_expediente)
+        except ValueError as error:
+            self.log(f"No se pudo preparar el período del expediente: {error}", "aviso")
+            return None
+        finally:
+            connection.close()
+        return self.id_periodo
+
+    def _accion_gastos_fijos(self):
+        period_id = self._periodo_enlazado()
+        if period_id and MOD.get("expedient_ui"):
+            MOD["expedient_ui"].open_fixed_costs_dialog(self, period_id)
 
     def _accion_resolver_incidencias(self):
         review = MOD.get("document_review")
@@ -1538,45 +1559,6 @@ class AppGestionFincas(ctk.CTk):
     # -----------------------------------------------------------------------
     # GESTIÓN DE EXCELS POR COMUNIDAD
     # -----------------------------------------------------------------------
-    def _crear_excel_si_no_existe(self, codigo: str, nombre: str = "") -> "Path | None":
-        """
-        Asegura que Comunidad_{codigo}.xlsx existe en Excels_Maestros/.
-        Orden de búsqueda/creación:
-          1. Si ya existe → devuelve su ruta
-          2. Si existe Comunidad_PLANTILLA.xlsx → lo copia
-          3. Si no → usa excel_writer.crear_plantilla_excel() para generarlo limpio
-        """
-        nombre_archivo = f"Comunidad_{codigo}.xlsx"
-        ruta_destino   = RUTA_EXCELS / nombre_archivo
-
-        if ruta_destino.exists():
-            return ruta_destino
-
-        # Buscar plantilla explícita (blank, sin datos)
-        candidatos_plantilla = [
-            RUTA_EXCELS / "Comunidad_PLANTILLA.xlsx",
-            BASE_DIR / "plantillas" / "Comunidad_PLANTILLA.xlsx",
-        ]
-        plantilla = next((p for p in candidatos_plantilla if p.exists()), None)
-        if plantilla:
-            shutil.copy2(str(plantilla), str(ruta_destino))
-            self.log(f"  📊 Excel {nombre_archivo} creado desde Comunidad_PLANTILLA.xlsx", "ok")
-            return ruta_destino
-
-        # Generar Excel desde cero con la estructura correcta
-        if MOD.get("excel_writer") and hasattr(MOD["excel_writer"], "crear_plantilla_excel"):
-            try:
-                MOD["excel_writer"].crear_plantilla_excel(
-                    str(ruta_destino), codigo, nombre
-                )
-                self.log(f"  📊 Excel {nombre_archivo} generado (plantilla nueva)", "ok")
-                return ruta_destino
-            except Exception as e:
-                self.log(f"  ❌ No se pudo generar {nombre_archivo}: {e}", "error")
-                return None
-
-        self.log(f"  ❌ No se pudo crear {nombre_archivo}: módulo excel_writer no disponible", "error")
-        return None
 
     # -----------------------------------------------------------------------
     # UTILIDADES
@@ -1735,24 +1717,41 @@ class AppGestionFincas(ctk.CTk):
         dialogo = self._preparar_dialogo("Nueva Comunidad", 470, 320)
 
         campos = [
-            ("Código (ej: 644):",   "codigo",  "644"),
+            ("Código de comunidad:", "codigo",  "Ej. 101"),
             ("Nombre completo:",     "nombre",  "CDAD. PROP. …"),
-            ("CIF de la comunidad:", "cif",     "H99258139"),
-            ("Nº de viviendas:",     "viviendas","120"),
+            ("CIF de la comunidad:", "cif",     "Ej. H12345674"),
+            ("Nº de viviendas:",     "viviendas","Ej. 24"),
         ]
         entradas = {}
         for i, (label, clave, defecto) in enumerate(campos):
             ctk.CTkLabel(dialogo, text=label, font=UIM.fuente(12),
                          text_color=C["texto"]).grid(
                              row=i, column=0, padx=(24, 8), pady=10, sticky="w")
+            # Ejemplos como placeholder: antes se insertaban como texto real y
+            # podían guardarse por descuido como datos de la comunidad.
             e = ctk.CTkEntry(dialogo, font=UIM.fuente(12), width=230, height=32,
-                             border_color=C["borde"])
-            e.insert(0, defecto)
+                             border_color=C["borde"], placeholder_text=defecto)
             e.grid(row=i, column=1, padx=(0, 24), pady=10)
             entradas[clave] = e
 
         def _crear():
             if not MOD.get("gestor_bd"):
+                return
+            codigo = entradas["codigo"].get().strip()
+            nombre = entradas["nombre"].get().strip()
+            cif = entradas["cif"].get().strip()
+            viviendas = entradas["viviendas"].get().strip()
+            problema = None
+            if not codigo or not nombre:
+                problema = "Indica el código y el nombre de la comunidad."
+            elif viviendas and not viviendas.isdigit():
+                problema = "El número de viviendas debe ser un número entero."
+            elif cif:
+                from provider_registry import valid_spanish_tax_id
+                if not valid_spanish_tax_id(cif):
+                    problema = f"El CIF «{cif}» no es válido."
+            if problema:
+                messagebox.showwarning("Nueva comunidad", problema, parent=dialogo)
                 return
             try:
                 con = MOD["gestor_bd"].conectar(str(RUTA_BD))
@@ -1771,7 +1770,6 @@ class AppGestionFincas(ctk.CTk):
                 cod = entradas["codigo"].get().strip()
                 nom = entradas["nombre"].get().strip()
                 self.log(f"✅ Comunidad '{cod}' registrada (id={id_com})", "ok")
-                self._crear_excel_si_no_existe(cod, nom)
                 self._cargar_comunidades()
                 dialogo.destroy()
                 messagebox.showinfo(
@@ -1813,6 +1811,12 @@ class AppGestionFincas(ctk.CTk):
         ):
             return
 
+        office = MOD.get("office_settings")
+        conserved_office = None
+        if office and database_path.is_file():
+            with closing(sqlite3.connect(database_path)) as source:
+                conserved_office = office.load_office_settings(source)
+
         def work():
             try:
                 def initialise(path):
@@ -1826,6 +1830,10 @@ class AppGestionFincas(ctk.CTk):
                             for sql in (*database.TABLAS, *database.INDICES):
                                 connection.execute(sql)
                             database.aplicar_migraciones(connection)
+                        # Los datos del despacho son configuración, no datos de
+                        # comunidades: la base nueva los conserva.
+                        if office and conserved_office is not None and conserved_office.configured:
+                            office.save_office_settings(connection, conserved_office)
                     finally:
                         connection.close()
 
@@ -1861,39 +1869,71 @@ class AppGestionFincas(ctk.CTk):
         self._estado("Creando copia de seguridad y nueva base", procesando=True)
         self._en_hilo(work)
 
+    def _datos_despacho(self):
+        database, office = MOD.get("gestor_bd"), MOD.get("office_settings")
+        if not database or not office or not RUTA_BD.exists():
+            return None
+        connection = database.conectar(str(self.ruta_bd_expedientes))
+        try:
+            return office.load_office_settings(connection)
+        finally:
+            connection.close()
+
+    def _actualizar_titulo_despacho(self):
+        settings = self._datos_despacho()
+        name = settings.name if settings is not None and settings.configured else ""
+        self.title(f"Regularizaciones · {name}" if name else "Regularizaciones")
+        if hasattr(self, "lbl_despacho"):
+            self.lbl_despacho.configure(
+                text=name or "Flujo guiado de facturas, lecturas y cartas")
+
+    def _comprobar_datos_despacho(self):
+        settings = self._datos_despacho()
+        if settings is not None and not settings.configured and MOD.get("expedient_ui"):
+            MOD["expedient_ui"].open_office_settings_dialog(self, first_run=True)
+
     def _configurar_rutas(self):
-        """Muestra las rutas actuales y permite cambiarlas."""
-        ventana = self._preparar_dialogo("Ajustes", 760, 450)
+        """Datos del despacho, ubicación de los datos y base nueva."""
+        ventana = self._preparar_dialogo("Ajustes", 760, 520)
+        ctk.CTkButton(
+            ventana, text="Datos del despacho…",
+            command=lambda: (ventana.destroy(), MOD["expedient_ui"].open_office_settings_dialog(self)),
+            height=36, corner_radius=8, font=UIM.fuente(12, "bold"),
+            fg_color=C["primario"], hover_color=C["primario_hover"],
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(4, 2))
+        ctk.CTkLabel(
+            ventana, text="Nombre, CIF, ciudad, firma, logo y mes de inicio del ejercicio.",
+            font=UIM.fuente(11), text_color=C["texto_sec"],
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 12))
 
         rutas = [
             ("Base de datos:",      str(self.ruta_bd_expedientes)),
-            ("Carpeta entrada/:",   str(RUTA_ENTRADA)),
-            ("Carpeta procesados/:",str(RUTA_PROCESADOS)),
-            ("Excels Maestros/:",   str(RUTA_EXCELS)),
+            ("Fuentes archivadas:", str(self.ruta_archivo_expedientes)),
             ("Plantilla cartas:",   str(RUTA_PLANTILLA)),
+            ("Proveedores propios:", str(RUTA_PROVEEDORES_DESPACHO)),
             ("Cartas generadas/:",  str(RUTA_CARTAS)),
         ]
         for i, (label, ruta) in enumerate(rutas):
             ctk.CTkLabel(ventana, text=label, font=UIM.fuente(11),
                          text_color=C["texto"], anchor="w", width=170).grid(
-                row=i, column=0, padx=(20, 4), pady=6, sticky="w")
+                row=i + 2, column=0, padx=(20, 4), pady=6, sticky="w")
             ctk.CTkLabel(ventana, text=ruta, font=UIM.fuente_mono(11),
                          text_color=C["primario"], anchor="w").grid(
-                row=i, column=1, padx=4, pady=6, sticky="w")
+                row=i + 2, column=1, padx=4, pady=6, sticky="w")
 
         ctk.CTkLabel(ventana,
-                     text="Para cambiar las rutas, edita las constantes al inicio de app.py",
+                     text="Todos los datos del despacho (base, fuentes y salidas) viven en esta carpeta de instalación.",
                      font=UIM.fuente(11),
                      text_color=C["texto_sec"]).grid(
-            row=len(rutas), column=0, columnspan=2, pady=14, padx=20)
+            row=len(rutas) + 2, column=0, columnspan=2, pady=14, padx=20, sticky="w")
         ctk.CTkButton(
             ventana, text="Nueva base segura", command=lambda: self._accion_nueva_base_segura(ventana),
             height=36, corner_radius=8, font=UIM.fuente(11), **UIM.secondary_button_kwargs(),
-        ).grid(row=len(rutas) + 1, column=0, columnspan=2, sticky="w", padx=20, pady=(8, 4))
+        ).grid(row=len(rutas) + 3, column=0, columnspan=2, sticky="w", padx=20, pady=(8, 4))
         ctk.CTkLabel(
             ventana, text="Guarda una copia de seguridad verificada y empieza con una base vacía.",
             font=UIM.fuente(11), text_color=C["texto_sec"],
-        ).grid(row=len(rutas) + 2, column=0, columnspan=2, sticky="w", padx=20, pady=4)
+        ).grid(row=len(rutas) + 4, column=0, columnspan=2, sticky="w", padx=20, pady=4)
 
 
 # ---------------------------------------------------------------------------

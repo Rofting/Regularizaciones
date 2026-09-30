@@ -19,13 +19,14 @@ from openpyxl import load_workbook
 
 import document_review
 import cuotas_servicio
+from fixed_costs import load_fixed_costs, write_fixed_costs
 from excel_profiles import (
     ExcelProfile,
     calculate_profile_sha256,
     configured_profile_paths,
     load_profile,
 )
-from excel_validation import validate_workbook, workbook_fingerprint
+from excel_validation import SUPPLY_IDENTITY_CELLS, validate_workbook, workbook_fingerprint
 from office_recalculation import (
     LibreOfficeRecalculator, WorkbookRecalculator,
     restore_design_with_calculated_values,
@@ -991,6 +992,80 @@ def _write_meter_readings(
             )
 
 
+# Textos del modelo antiguo que eran datos de una comunidad concreta. Las
+# copias creadas antes de limpiar el modelo los llevan; se sustituyen siempre.
+# Se guardan como huella para no distribuir esos datos con el producto.
+_LEGACY_SUPPLY_FINGERPRINTS = frozenset({
+    "f0c1b7ad6b141a38",
+    "ea17d87c0bacea47",
+    "79d659a9b5d551df",
+    "98b4787da673ab76",
+    "2989b432647b624d",
+    "8e41a81d8553f7af",
+    "15f8f0f7a9462154",
+})
+
+
+def _is_legacy_placeholder(value: str) -> bool:
+    digest = hashlib.sha256(value.strip().upper().encode("utf-8")).hexdigest()[:16]
+    return digest in _LEGACY_SUPPLY_FINGERPRINTS
+
+
+_SUPPLY_SHEETS = {"GAS": ("GAS", "GASOLEO", "COMBUSTIBLE"), "ELECTRICIDAD": ("ELECTRICIDAD",)}
+
+
+def _case_supply_points(connection: sqlite3.Connection, case, services) -> str | None:
+    """CUPS confirmados en las facturas del expediente para esos servicios."""
+    placeholders = ",".join("?" for _ in services)
+    rows = connection.execute(
+        f"""SELECT DISTINCT upper(replace(cups.value,' ','')) AS cups
+              FROM source_documents d
+              JOIN extraction_candidates tipo ON tipo.id_document=d.id_document
+                   AND tipo.field_name='tipo_suministro'
+              JOIN extraction_candidates cups ON cups.id_document=d.id_document
+                   AND cups.field_name IN ('cups','cups_o_referencia')
+             WHERE d.id_case=? AND d.document_kind='invoice'
+               AND d.status NOT IN ('not_applicable','skipped')
+               AND upper(tipo.value) IN ({placeholders})
+               AND cups.value IS NOT NULL AND trim(cups.value)<>''
+             ORDER BY 1""",
+        (case["id_case"], *services),
+    ).fetchall()
+    values = [row["cups"] for row in rows if str(row["cups"]).startswith("ES")]
+    return " / ".join(values) or None
+
+
+def _write_supply_identity(connection: sqlite3.Connection, workbook, case) -> None:
+    """Dirección y CUPS de las hojas de suministro (C4/C5) con datos de la comunidad.
+
+    El modelo común no puede traer los de ninguna comunidad: la dirección sale
+    de la ficha de la comunidad y el CUPS de sus facturas confirmadas. Un valor
+    ya escrito a mano en la plantilla propia de la comunidad se respeta salvo
+    que tengamos uno confirmado o sea un resto del modelo antiguo.
+    """
+    try:
+        row = connection.execute(
+            "SELECT direccion FROM comunidades WHERE id_comunidad=?", (case["id_comunidad"],),
+        ).fetchone()
+        address = (row["direccion"] if row and row["direccion"] else "") or case["comunidad_nombre"]
+    except sqlite3.Error:
+        address = case["comunidad_nombre"]
+    for sheet_name, services in _SUPPLY_SHEETS.items():
+        if sheet_name not in workbook.sheetnames:
+            continue
+        sheet = workbook[sheet_name]
+        cups = _case_supply_points(connection, case, services)
+        address_cell, cups_cell = SUPPLY_IDENTITY_CELLS[sheet_name][:2]
+        for cell_name, value in ((address_cell, address), (cups_cell, cups)):
+            current = str(sheet[cell_name].value or "").strip()
+            if isinstance(sheet[cell_name].value, str) and current.startswith("="):
+                continue
+            if cell_name == cups_cell and value:
+                _set_cell_value(sheet[cell_name], value)
+            elif not current or _is_legacy_placeholder(current):
+                _set_cell_value(sheet[cell_name], value or "")
+
+
 def _write_workbook(
     connection: sqlite3.Connection,
     path: Path,
@@ -1036,6 +1111,21 @@ def _write_workbook(
             if key in metadata:
                 sheet_name, address = metadata[key]
                 _set_cell_value(workbook[sheet_name][address], value)
+        _write_supply_identity(connection, workbook, case)
+        # Rótulo de período de la hoja de lecturas (P6). El perfil 658 ya lo
+        # declara por compatibilidad; en el resto se escribe si la fila es la
+        # del modelo común («PERIODO:» en O6), para no dejar el de otro año.
+        if "meter_period_label" not in metadata and "LECTURAS ACS M3" in workbook.sheetnames:
+            lecturas = workbook["LECTURAS ACS M3"]
+            label = lecturas["P6"].value
+            if (str(lecturas["O6"].value or "").strip().upper().startswith("PERIODO")
+                    and not (isinstance(label, str) and label.startswith("="))):
+                _set_cell_value(lecturas["P6"], metadata_values["meter_period_label"])
+        write_fixed_costs(
+            workbook,
+            load_fixed_costs(connection, case["id_comunidad"], case["id_periodo"]),
+            _set_cell_value,
+        )
 
         tables = profile.workbook_layout["tables"]
         for module in profile.active_modules:

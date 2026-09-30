@@ -134,7 +134,7 @@ def period_presets(
     today: date,
     previous: Sequence[ExistingCase] = (),
     *,
-    fiscal_start_month: int = 9,
+    fiscal_start_month: int = 1,
 ) -> tuple[PeriodPreset, ...]:
     """Atajos ordenados por probabilidad de uso.
 
@@ -152,24 +152,30 @@ def period_presets(
         )
         presets.append(PeriodPreset("continue", f"Continuar «{last.name}»", start, end))
 
-    fiscal_year = today.year if today.month >= fiscal_start_month else today.year - 1
-    last_fiscal = date(fiscal_year - 1, fiscal_start_month, 1)
-    presets.append(PeriodPreset(
-        "last_fiscal",
-        f"Ejercicio {last_fiscal.year}-{last_fiscal.year + 1}",
-        last_fiscal,
-        _add_months(last_fiscal, 12) - timedelta(days=1),
-    ))
-    current_fiscal = date(fiscal_year, fiscal_start_month, 1)
-    presets.append(PeriodPreset(
-        "current_fiscal",
-        f"Ejercicio {current_fiscal.year}-{current_fiscal.year + 1}",
-        current_fiscal,
-        _add_months(current_fiscal, 12) - timedelta(days=1),
-    ))
+    if fiscal_start_month != 1:
+        # Despachos con ejercicio partido (p. ej. septiembre-agosto).
+        fiscal_year = today.year if today.month >= fiscal_start_month else today.year - 1
+        last_fiscal = date(fiscal_year - 1, fiscal_start_month, 1)
+        presets.append(PeriodPreset(
+            "last_fiscal",
+            f"Ejercicio {last_fiscal.year}-{last_fiscal.year + 1}",
+            last_fiscal,
+            _add_months(last_fiscal, 12) - timedelta(days=1),
+        ))
+        current_fiscal = date(fiscal_year, fiscal_start_month, 1)
+        presets.append(PeriodPreset(
+            "current_fiscal",
+            f"Ejercicio {current_fiscal.year}-{current_fiscal.year + 1}",
+            current_fiscal,
+            _add_months(current_fiscal, 12) - timedelta(days=1),
+        ))
     presets.append(PeriodPreset(
         "last_year", f"Año {today.year - 1}", date(today.year - 1, 1, 1), date(today.year - 1, 12, 31),
     ))
+    if fiscal_start_month == 1:
+        presets.append(PeriodPreset(
+            "current_year", f"Año {today.year}", date(today.year, 1, 1), date(today.year, 12, 31),
+        ))
     quarter_start = date(today.year, (today.month - 1) // 3 * 3 + 1, 1)
     previous_quarter = _add_months(quarter_start, -3)
     presets.append(PeriodPreset(

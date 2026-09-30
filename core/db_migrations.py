@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 16
 
 
 MIGRATION_1_SQL = (
@@ -838,6 +838,19 @@ def _migration_15(connection: sqlite3.Connection) -> None:
     )""")
 
 
+def _migration_16(connection: sqlite3.Connection) -> None:
+    """Datos del despacho de esta instalación (nombre, CIF, firma, ejercicio…).
+
+    Viven en la base de cada despacho y no en el código, para que la misma
+    aplicación pueda instalarse en despachos distintos.
+    """
+    connection.execute("""CREATE TABLE IF NOT EXISTS office_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        settings_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -854,6 +867,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     13: _migration_13,
     14: _migration_14,
     15: _migration_15,
+    16: _migration_16,
 }
 
 

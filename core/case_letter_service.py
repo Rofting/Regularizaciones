@@ -16,6 +16,7 @@ from carta_writer import generar_carta
 from excel_export_service import ExportBlockedError, calculate_case_input_hash
 from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
 from letter_settings import LetterIdentity, load_community_letter_identity
+from office_settings import load_office_settings
 
 
 class LetterGenerationBlockedError(ValueError):
@@ -530,7 +531,9 @@ def generate_case_letters(
         active_keys, rows = _active_results(
             connection, case, profile, selected_concepts=selected_concepts
         )
-        identity = load_community_letter_identity(root, str(case["codigo"]))
+        identity = load_community_letter_identity(
+            root, str(case["codigo"]), office=load_office_settings(connection),
+        )
         template = root / "plantillas" / "Plantilla_Cartas.docx"
         if not template.is_file():
             raise LetterGenerationBlockedError(f"No existe la plantilla de cartas: {template}")

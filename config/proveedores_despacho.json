@@ -1,0 +1,67 @@
+{
+  "_descripcion": "Capa del despacho sobre el catálogo del producto (config/proveedores.json). Aquí van los proveedores propios del despacho, las correcciones a los del producto y los datos de sus comunidades (CUPS). Las actualizaciones del producto no tocan este archivo. Se pueden desactivar proveedores del producto con \"desactivados\": [\"CLAVE\"].",
+  "proveedores": {
+    "BASER_GAS": {
+      "cups_comunidades": {
+        "644": "ES0208330734612001PV"
+      }
+    },
+    "ENDESA_LUZ_COMUNIDAD": {
+      "cups_comunidades": {
+        "644": "ES0031300718354001RR0F",
+        "644_ps0f": "ES0031300718351002PS0F"
+      },
+      "cups_multiples": {
+        "644": [
+          "ES0031300718354001RR0F",
+          "ES0031300718351002PS0F"
+        ]
+      }
+    },
+    "ENERGIAXXI_BOMBA": {
+      "cups_comunidades": {
+        "644": "ES0031300718351016DY0F"
+      }
+    },
+    "RIOS_RENOVABLES": {
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "METRIGEST_ACS": {
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "METRIGEST_CALEF": {
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "AGUA_ZARAGOZA": {
+      "cups_comunidades": {
+        "644": "1027952"
+      }
+    },
+    "BANKINTER_TRANSFERENCIA": {
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "ENVAC_RESIDUOS": {
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "LEBAL_LIMPIEZA": {
+      "cups_comunidades": {
+        "644": null
+      }
+    },
+    "IAA_AGUA_ARAGON": {
+      "cups_comunidades": {
+        "644": "50297001701027952"
+      }
+    }
+  }
+}

@@ -303,7 +303,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 15)
+        self.assertEqual(version, db_migrations.CURRENT_SCHEMA_VERSION)
         self.assertTrue({
             "regularization_cases", "source_documents", "extraction_candidates",
             "review_issues", "manual_corrections",
@@ -323,8 +323,8 @@ class DatabaseMigrationTest(unittest.TestCase):
             for statement in gestor_bd.TABLAS:
                 connection.execute(statement)
             connection.commit()
-            self.assertEqual(15, gestor_bd.aplicar_migraciones(connection))
-            self.assertEqual(15, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(db_migrations.CURRENT_SCHEMA_VERSION, gestor_bd.aplicar_migraciones(connection))
+            self.assertEqual(db_migrations.CURRENT_SCHEMA_VERSION, gestor_bd.aplicar_migraciones(connection))
             versions = connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -357,7 +357,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(15, version)
+        self.assertEqual(db_migrations.CURRENT_SCHEMA_VERSION, version)
         self.assertTrue({
             "invoice_components",
             "period_parameters",

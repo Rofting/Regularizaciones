@@ -289,7 +289,7 @@ def importar_comunidad(codigo: str, nombre: str, cif: str,
     Args:
         codigo:               Código de comunidad (ej: '644')
         nombre:               Nombre completo
-        cif:                  CIF de la comunidad (ej: 'H99258139')
+        cif:                  CIF de la comunidad (ej: 'H12345674')
         ruta_excel_lecturas:  Ruta al Excel CAL-ACS con lecturas históricas
         ruta_bd:              Ruta a gestion.db
         solo_vecinos:         Si True, solo importa vecinos (sin lecturas)
@@ -430,9 +430,9 @@ def importar_comunidad(codigo: str, nombre: str, cif: str,
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Importa datos de una comunidad a la BD")
-    parser.add_argument("--comunidad",    default="644",  help="Código de comunidad")
-    parser.add_argument("--nombre",       default="El Séptimo Sello 14-22 / El Tambor de Hojalata 13-21")
-    parser.add_argument("--cif",          default="H99258139")
+    parser.add_argument("--comunidad",    required=True,  help="Código de comunidad")
+    parser.add_argument("--nombre",       required=True,  help="Nombre de la comunidad")
+    parser.add_argument("--cif",          default=None,   help="CIF de la comunidad")
     parser.add_argument("--excel",        default=None,   help="Ruta al Excel CAL-ACS")
     parser.add_argument("--bd",           default=None,   help="Ruta a gestion.db")
     parser.add_argument("--solo-vecinos", action="store_true", help="Solo importar vecinos")

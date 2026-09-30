@@ -21,7 +21,9 @@ import community_discovery
 import community_onboarding
 import document_review
 import expedient_service
+import fixed_costs
 import gestor_bd
+import office_settings
 import period_selection
 import source_batch
 import ui_moderna as UIM
@@ -1752,6 +1754,134 @@ def _packed_field(parent, label: str, *, placeholder: str = ""):
     return entry
 
 
+def open_office_settings_dialog(app: "AppGestionFincas", *, first_run: bool = False) -> None:
+    """Datos del despacho: identidad de las cartas, CIF propio y ejercicio."""
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        current = office_settings.suggested_settings(connection)
+    finally:
+        connection.close()
+    project_root = Path(__file__).resolve().parents[1]
+
+    dialog = _dialog(app, "Datos del despacho", 640, 720)
+    panel = ctk.CTkScrollableFrame(
+        dialog, fg_color=C["panel"], corner_radius=16, border_width=1, border_color=C["borde"],
+    )
+    panel.pack(fill="both", expand=True, padx=18, pady=(18, 8))
+    ctk.CTkLabel(
+        panel, text="Bienvenido: configura tu despacho" if first_run else "Datos del despacho",
+        font=UIM.fuente(20, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=18, pady=(14, 2))
+    ctk.CTkLabel(
+        panel,
+        text=(
+            "Se usan en la cabecera, el pie y la firma de las cartas, y para no confundir "
+            "el CIF del despacho con el de un proveedor. Se guardan en la base de datos "
+            "de esta instalación y puedes cambiarlos en Ajustes."
+        ),
+        font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=520, justify="left",
+    ).pack(anchor="w", padx=18, pady=(0, 8))
+
+    variables: dict[str, ctk.CTkEntry] = {}
+    for key, label, placeholder in (
+        ("name", "Nombre del despacho *", "Ej. Administración de Fincas García"),
+        ("tax_id", "CIF / NIF", "Ej. B12345674"),
+        ("city", "Ciudad (aparece junto a la fecha)", "Ej. Valencia"),
+        ("address", "Dirección", "Calle, número, código postal"),
+        ("phone", "Teléfono", ""),
+        ("email", "Correo electrónico", ""),
+        ("signature", "Firma de las cartas", "Si lo dejas vacío se usa el nombre del despacho"),
+        ("footer", "Pie de las cartas", "Si lo dejas vacío: dirección · teléfono · correo"),
+    ):
+        ctk.CTkLabel(panel, text=label.upper(), font=UIM.fuente(10, "bold"),
+                     text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(10, 3))
+        # Sin textvariable para que el ejemplo (placeholder) sea visible.
+        variables[key] = ctk.CTkEntry(
+            panel, height=36, corner_radius=9,
+            border_color=C["borde"], fg_color=C["panel_2"], text_color=C["texto"],
+            placeholder_text=placeholder, font=UIM.fuente(12),
+        )
+        variables[key].pack(fill="x", padx=18)
+        value = str(getattr(current, key) or "")
+        if value:
+            variables[key].insert(0, value)
+
+    month_labels = [name.capitalize() for name in period_selection.MONTH_NAMES]
+    ctk.CTkLabel(panel, text="EL EJERCICIO EMPIEZA EN", font=UIM.fuente(10, "bold"),
+                 text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(12, 3))
+    month = ctk.CTkComboBox(panel, values=month_labels, state="readonly", width=200)
+    month.set(month_labels[current.fiscal_start_month - 1])
+    month.pack(anchor="w", padx=18)
+    ctk.CTkLabel(
+        panel, text="Se usa para proponer las fechas de los expedientes nuevos.",
+        font=UIM.fuente(10), text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=18, pady=(2, 0))
+
+    logo_state = {"path": current.logo_path, "source": None}
+    ctk.CTkLabel(panel, text="LOGO (OPCIONAL)", font=UIM.fuente(10, "bold"),
+                 text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(12, 3))
+    logo_row = ctk.CTkFrame(panel, fg_color="transparent")
+    logo_row.pack(fill="x", padx=18, pady=(0, 12))
+    logo_label = ctk.CTkLabel(
+        logo_row, text=Path(current.logo_path).name if current.logo_path else "Sin logo",
+        font=UIM.fuente(11), text_color=C["texto"],
+    )
+
+    def choose_logo():
+        selected = filedialog.askopenfilename(
+            parent=dialog, title="Logo del despacho",
+            filetypes=[("Imágenes", "*.png *.jpg *.jpeg")],
+        )
+        if selected:
+            logo_state["source"] = Path(selected)
+            logo_label.configure(text=Path(selected).name)
+
+    def remove_logo():
+        logo_state.update(path="", source=None)
+        logo_label.configure(text="Sin logo")
+
+    ctk.CTkButton(logo_row, text="Elegir imagen…", width=120, height=30, corner_radius=8,
+                  command=choose_logo, **UIM.secondary_button_kwargs()).pack(side="left")
+    ctk.CTkButton(logo_row, text="Quitar", width=70, height=30, corner_radius=8,
+                  command=remove_logo, **UIM.secondary_button_kwargs()).pack(side="left", padx=6)
+    logo_label.pack(side="left", padx=8)
+
+    def save():
+        try:
+            logo_path = logo_state["path"]
+            if logo_state["source"] is not None:
+                logo_path = office_settings.install_logo(project_root, logo_state["source"])
+            settings = office_settings.OfficeSettings(
+                **{key: variable.get() for key, variable in variables.items()},
+                logo_path=logo_path or "",
+                fiscal_start_month=month_labels.index(month.get()) + 1,
+            )
+            connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+            try:
+                saved = office_settings.save_office_settings(connection, settings)
+            finally:
+                connection.close()
+        except (ValueError, OSError) as error:
+            messagebox.showwarning("Datos del despacho", str(error), parent=dialog)
+            return
+        dialog.destroy()
+        app.log(f"Datos del despacho guardados: {saved.name}", "ok")
+        refresh = getattr(app, "_actualizar_titulo_despacho", None)
+        if refresh:
+            refresh()
+
+    buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+    buttons.pack(fill="x", padx=20, pady=(0, 14))
+    ctk.CTkButton(
+        buttons, text="Guardar", command=save, height=36, width=120, corner_radius=8,
+        font=UIM.fuente(12, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"],
+    ).pack(side="right")
+    ctk.CTkButton(
+        buttons, text="Más tarde" if first_run else "Cancelar", command=dialog.destroy,
+        height=36, width=110, corner_radius=8, **UIM.secondary_button_kwargs(),
+    ).pack(side="right", padx=8)
+
+
 def _existing_period_cases(connection, community_id: int, exclude_case_id: int | None):
     return [
         period_selection.ExistingCase(case.name, case.start_date, case.end_date)
@@ -1781,6 +1911,7 @@ def open_case_period_dialog(app: "AppGestionFincas", case_id: int | None = None)
     try:
         current = expedient_service.get_case(connection, case_id) if case_id else None
         existing = _existing_period_cases(connection, app.id_comunidad, case_id)
+        office = office_settings.suggested_settings(connection)
     finally:
         connection.close()
     editing = current is not None
@@ -1811,7 +1942,9 @@ def open_case_period_dialog(app: "AppGestionFincas", case_id: int | None = None)
     name_var = tk.StringVar(value=current.name if editing else "")
     name_state = {"auto": not editing}
 
-    presets = period_selection.period_presets(date.today(), existing)
+    presets = period_selection.period_presets(
+        date.today(), existing, fiscal_start_month=office.fiscal_start_month,
+    )
     ctk.CTkLabel(
         content, text="ATAJOS", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"],
     ).pack(anchor="w", padx=22, pady=(4, 4))
@@ -2953,6 +3086,71 @@ def open_service_fees_dialog(
     selector.set(_FEE_SERVICES[state["service"]])
     update_preview()
     refresh()
+
+
+def open_fixed_costs_dialog(app: "AppGestionFincas", period_id: int) -> None:
+    """Gastos fijos mensuales del estudio (lecturas y mantenimientos)."""
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        current = fixed_costs.load_fixed_costs(connection, app.id_comunidad, period_id)
+        periodo = connection.execute(
+            "SELECT nombre FROM periodos WHERE id_periodo=?", (period_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    dialog = _dialog(app, "Gastos fijos", 560, 520)
+    panel = ctk.CTkFrame(
+        dialog, fg_color=C["panel"], corner_radius=16, border_width=1, border_color=C["borde"],
+    )
+    panel.pack(fill="both", expand=True, padx=18, pady=(18, 8))
+    ctk.CTkLabel(panel, text="Gastos fijos del estudio", font=UIM.fuente(20, "bold"),
+                 text_color=C["texto"]).pack(anchor="w", padx=20, pady=(18, 2))
+    ctk.CTkLabel(
+        panel,
+        text=(
+            f"{periodo['nombre'] if periodo else ''} · Importe mensual de cada servicio para esta "
+            "comunidad. Se escriben en la hoja OTROS GASTOS al generar el Excel (el modelo los "
+            "multiplica por 12). Déjalo vacío si la comunidad no tiene ese gasto."
+        ),
+        font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=480, justify="left",
+    ).pack(anchor="w", padx=20, pady=(0, 10))
+    entries = {}
+    for item in fixed_costs.FIXED_COSTS:
+        row = ctk.CTkFrame(panel, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=4)
+        ctk.CTkLabel(row, text=item.label, font=UIM.fuente(12), text_color=C["texto"],
+                     anchor="w").pack(side="left")
+        entries[item.key] = ctk.CTkEntry(row, width=120, height=32, corner_radius=8,
+                                         placeholder_text="€/mes")
+        entries[item.key].pack(side="right")
+        if item.key in current:
+            entries[item.key].insert(0, f"{current[item.key]:.2f}".replace(".", ","))
+
+    def save():
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            saved = fixed_costs.save_fixed_costs(
+                connection, app.id_comunidad, period_id,
+                {key: entry.get() for key, entry in entries.items()},
+            )
+        except ValueError as error:
+            messagebox.showwarning("Gastos fijos", str(error), parent=dialog)
+            return
+        finally:
+            connection.close()
+        dialog.destroy()
+        yearly = sum(saved.values()) * 12
+        app.log(f"Gastos fijos guardados: {_euros(yearly)} al año. Regenera el Excel si ya existía.", "ok")
+        if getattr(app, "id_expediente", None):
+            app._refrescar_expediente()
+
+    buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+    buttons.pack(fill="x", padx=20, pady=(0, 14))
+    ctk.CTkButton(buttons, text="Guardar", command=save, width=120, height=36, corner_radius=8,
+                  font=UIM.fuente(12, "bold"), fg_color=C["primario"],
+                  hover_color=C["primario_hover"]).pack(side="right")
+    ctk.CTkButton(buttons, text="Cancelar", command=dialog.destroy, width=110, height=36,
+                  corner_radius=8, **UIM.secondary_button_kwargs()).pack(side="right", padx=8)
 
 
 def open_skip_source_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:

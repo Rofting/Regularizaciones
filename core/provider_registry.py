@@ -217,10 +217,65 @@ def provider_registry_from_payload(
     return MappingProxyType(registry)
 
 
-def load_provider_registry(path: str | Path) -> Mapping[str, ProviderProfile]:
+OFFICE_CATALOG_NAME = "proveedores_despacho.json"
+# Datos que pertenecen a las comunidades de un despacho concreto y nunca deben
+# vivir en el catálogo del producto.
+OFFICE_ONLY_KEYS = ("cups_comunidades", "cups_multiples")
+
+
+def office_catalog_path(base_path: str | Path) -> Path:
+    """Capa del despacho que acompaña al catálogo del producto."""
+    return Path(base_path).with_name(OFFICE_CATALOG_NAME)
+
+
+def _deep_merge(base: Mapping[str, object], overlay: Mapping[str, object]) -> dict:
+    merged = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def merge_catalogs(base: Mapping[str, object], office: Mapping[str, object]) -> dict:
+    """Aplica la capa del despacho sobre el catálogo del producto.
+
+    La capa puede añadir proveedores propios, completar o corregir los del
+    producto (sólo los campos que indique) y desactivar los que no use con
+    ``"desactivados": ["CLAVE", ...]``. Así las actualizaciones del producto
+    no pisan lo que cada despacho ha configurado.
+    """
+    providers = dict(base.get("proveedores", {}) or {})
+    for key, value in (office.get("proveedores", {}) or {}).items():
+        key = str(key).strip().upper()
+        if isinstance(value, Mapping) and isinstance(providers.get(key), Mapping):
+            providers[key] = _deep_merge(providers[key], value)
+        else:
+            providers[key] = value
+    for key in office.get("desactivados", ()) or ():
+        providers.pop(str(key).strip().upper(), None)
+    merged = dict(base)
+    merged["proveedores"] = providers
+    return merged
+
+
+def load_catalog_payload(path: str | Path) -> dict:
+    """Catálogo del producto con la capa del despacho aplicada, si existe."""
     with Path(path).open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
-    return provider_registry_from_payload(payload)
+    overlay_path = office_catalog_path(path)
+    if overlay_path.is_file():
+        with overlay_path.open("r", encoding="utf-8") as handle:
+            overlay = json.load(handle)
+        if not isinstance(overlay, Mapping):
+            raise ValueError(f"{overlay_path.name} debe contener un objeto JSON")
+        payload = merge_catalogs(payload, overlay)
+    return payload
+
+
+def load_provider_registry(path: str | Path) -> Mapping[str, ProviderProfile]:
+    return provider_registry_from_payload(load_catalog_payload(path))
 
 
 def _compact(value: str) -> str:
@@ -360,7 +415,12 @@ def resolve_provider(
 
 
 __all__ = [
+    "OFFICE_CATALOG_NAME",
+    "OFFICE_ONLY_KEYS",
     "ProviderMatch",
+    "load_catalog_payload",
+    "merge_catalogs",
+    "office_catalog_path",
     "ProviderProfile",
     "find_tax_ids",
     "profile_for_name",
