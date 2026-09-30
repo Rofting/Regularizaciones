@@ -275,7 +275,7 @@ class DocumentReviewTest(unittest.TestCase):
             (self.document.id_document,),
         ).fetchone()["status"]
 
-        self.assertEqual("ready_for_calculation", ready.status)
+        self.assertEqual("under_review", ready.status)
         self.assertEqual("validated", document_status)
 
     def test_repeating_missing_review_reuses_the_open_issue(self):

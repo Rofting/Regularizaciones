@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 
 
 MIGRATION_1_SQL = (

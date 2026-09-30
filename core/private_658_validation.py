@@ -349,7 +349,9 @@ def resume_private_658_validation(
             return result
         status = str(case["estado"])
         if status in {"draft", "gathering_sources", "under_review"}:
-            status = document_review.validate_case_ready(connection, id_case).status
+            status = document_review.validate_case_ready(
+                connection, id_case, project_root=run
+            ).status
         has_export = _validated_export_exists(connection, id_case, run)
     finally:
         connection.close()
