@@ -14,7 +14,7 @@ import itertools
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Callable, Iterator, Mapping
@@ -288,8 +288,8 @@ _IVA_LABELS = (
     r"total\s+iva"
 )
 _TOTAL_STRONG = (
-    rf"\btotal\s+(?:a\s+pagar|a\s+abonar|factura|importe(?:\s+factura)?|general|"
-    rf"(?:\(?iva\s+incluido\)?))\b",
+    r"\btotal\s+(?:a\s+pagar|a\s+abonar|factura|importe(?:\s+factura)?|general|"
+    r"(?:\(?iva\s+incluido\)?))\b",
     r"\bimporte\s+(?:total|a\s+pagar|de\s+la\s+factura|factura)\b",
     r"\btotal\s+(?:eur|euros|€)",
     r"\ba\s+pagar\b",

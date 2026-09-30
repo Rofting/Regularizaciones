@@ -1105,19 +1105,29 @@ def generar_carta(datos: dict, ruta_plantilla: str, ruta_salida: str) -> str:
 
     # 6. COMPARATIVA DE CONSUMO (franjas de vecinos + histórico propio)
     grafica = datos.get("consumo_grafica") or {}
-    png = None
-    if render_consumption_charts and grafica:
-        png = render_consumption_charts(
-            tempfile.mktemp(suffix=".png"),
-            owner_consumption=grafica.get("owner_consumption", 0),
-            neighbor_consumptions=grafica.get("neighbor_consumptions", []),
-            history=grafica.get("history", []),
-            unit=grafica.get("unit", "m³"),
-        )
-    if not png and not conceptos_activos:
+    series = list(grafica.get("series") or ([grafica] if grafica else []))
+    images = []
+    if render_consumption_charts:
+        for item in series:
+            png = render_consumption_charts(
+                tempfile.mktemp(suffix=".png"),
+                owner_consumption=item.get("owner_consumption"),
+                neighbor_consumptions=item.get("neighbor_consumptions", []),
+                history=item.get("history", []),
+                unit=item.get("unit", "m³"),
+                title=item.get("title") if len(series) > 1 else None,
+                current_label=item.get("current_label"),
+            )
+            if png:
+                images.append(png)
+    if not images and not conceptos_activos:
         png = _grafica_unica(calef, acs, medias)
-    if png:
-        _insertar_imagen(doc, png, 16.2)
+        if png:
+            images.append(png)
+    if images:
+        _parrafo(doc, "COMPARATIVA DE CONSUMO", tam=9, negrita=True, color=C_PRIMARIO, despues=2)
+        for png in images:
+            _insertar_imagen(doc, png, 16.2 if len(images) == 1 else 15.0)
     elif not conceptos_activos:
         calef_cob, calef_real = calef.get("importe_cobrado", 0.0), calef.get("importe_real", 0.0)
         acs_cob,   acs_real   = acs.get("importe_cobrado", 0.0),   acs.get("importe_real", 0.0)
@@ -1234,6 +1244,7 @@ def generar_todas_las_cartas(ruta_bd: str,
             "owner_consumption": float((datos.get("acs") or {}).get("consumo_real") or 0.0),
             "neighbor_consumptions": consumo_vecinos,
             "history": historicos_por_vecino.get(datos.get("id_propietario"), []),
+            "current_label": nombre_periodo,
             "unit": "m³",
         }
 

@@ -646,6 +646,19 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
         self.assertEqual("confirmar_fuentes", state.next_action)
         self.assertEqual("Confirmar fuentes", state.headline)
 
+    def test_completed_stages_can_be_repeated_once_excel_exists(self):
+        def repeats(status):
+            return expedient_ui.guided_workspace_state(
+                has_case=True, document_count=3, open_issue_count=0, case_status=status,
+            ).repeat_actions
+
+        self.assertEqual((), repeats("under_review"))
+        self.assertIn("reevaluar_fuentes", repeats("calculated"))
+        self.assertIn("generar_excel", repeats("calculated"))
+        self.assertNotIn("generar_cartas", repeats("calculated"))
+        self.assertIn("calcular_reparto", repeats("reconciled"))
+        self.assertIn("generar_cartas", repeats("deliveries_generated"))
+
     def test_profile_mismatch_routes_to_an_actionable_revalidation(self):
         state = expedient_ui.guided_workspace_state(
             has_case=True,

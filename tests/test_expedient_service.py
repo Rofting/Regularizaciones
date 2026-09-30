@@ -52,6 +52,45 @@ class ExpedientServiceTest(unittest.TestCase):
         self.assertEqual(created.end_date, date(2026, 3, 14))
         self.assertEqual(created.status, "draft")
 
+    def test_update_case_dates_moves_linked_period_and_reopens_review(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="2025-2026",
+            start_date=date(2025, 9, 1), end_date=date(2026, 8, 31),
+        )
+        period_id = expedient_service.link_case_to_period(self.connection, case.id_case)
+        self.connection.execute(
+            "UPDATE regularization_cases SET estado='calculated' WHERE id_case=?", (case.id_case,),
+        )
+        updated = expedient_service.update_case_dates(
+            self.connection, case.id_case, name="2025-2026 ampliado",
+            start_date=date(2025, 8, 1), end_date=date(2026, 8, 31),
+        )
+        self.assertEqual((date(2025, 8, 1), "under_review"), (updated.start_date, updated.status))
+        period = self.connection.execute(
+            "SELECT nombre,fecha_inicio FROM periodos WHERE id_periodo=?", (period_id,),
+        ).fetchone()
+        self.assertEqual(("2025-2026 ampliado", "2025-08-01"), tuple(period))
+        self.assertEqual(period_id, expedient_service.link_case_to_period(self.connection, case.id_case))
+
+    def test_renaming_without_date_change_keeps_the_status(self):
+        case = expedient_service.create_case(
+            self.connection, self.community_id, name="A",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        self.connection.execute(
+            "UPDATE regularization_cases SET estado='reconciled' WHERE id_case=?", (case.id_case,),
+        )
+        updated = expedient_service.update_case_dates(
+            self.connection, case.id_case, name="Enero 2026",
+            start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
+        )
+        self.assertEqual(("Enero 2026", "reconciled"), (updated.name, updated.status))
+        with self.assertRaises(ValueError):
+            expedient_service.update_case_dates(
+                self.connection, case.id_case, name="X",
+                start_date=date(2026, 2, 1), end_date=date(2026, 1, 1),
+            )
+
     def test_create_case_rejects_end_before_start(self):
         with self.assertRaisesRegex(ValueError, "fin posterior"):
             expedient_service.create_case(

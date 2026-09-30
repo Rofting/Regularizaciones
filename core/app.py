@@ -1,40 +1,32 @@
 """
 app.py
 ======
-Interfaz gráfica principal del sistema de Gestión de Fincas.
-Diseñada para usuarios no técnicos — un botón por acción, mensajes claros.
+Ventana principal de Regularizaciones (CustomTkinter, modo claro/oscuro).
 
-INTERFAZ: CustomTkinter (moderna, modo claro/oscuro, animaciones).
+Flujo guiado por expediente:
+    1. Elige la comunidad y crea un expediente con el intervalo a regularizar.
+    2. Fuentes: añade facturas, lecturas y listados (PDF, Excel o CSV).
+    3. Validar: resuelve las incidencias y confirma las fuentes.
+    4. Reparto: genera el Excel oficial y calcula el reparto por vecino.
+    5. Cartas: genera una carta por propietario con sus gráficas de consumo.
 
-REQUISITOS:
-    pip install customtkinter openpyxl python-docx pdfplumber
-    (customtkinter se instala automáticamente si falta)
+Cualquier etapa ya superada puede repetirse; las ejecuciones anteriores se
+conservan en el historial del expediente.
 
 USO:
     python app.py
-    (o doble clic en el .exe si está empaquetado con PyInstaller)
-
-FLUJO DE UN USUARIO TÍPICO:
-    1. Selecciona una comunidad del desplegable
-    2. Selecciona el periodo (ej: 2024-2025)
-    3. Pincha "Procesar Facturas" → lee los PDFs de la carpeta entrada/
-    4. Pincha "Actualizar Excel" → vuelca datos en el Excel Maestro
-    5. Pincha "Calcular Reparto" → calcula cuotas por vecino
-    6. Pincha "Generar Cartas" → crea los .docx en salidas/cartas/
 """
 
 import os
-import re
 import sys
-import json
 import shutil
 import sqlite3
 import threading
 import traceback
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox
 
 # Si se lanza desde una consola normal de Windows (doble clic en un .bat,
 # o "python app.py" desde cmd), la consola usa cp1252 y cualquier emoji en
@@ -112,29 +104,6 @@ MOD = _importar_modulos()
 # ---------------------------------------------------------------------------
 # MOVIMIENTO SEGURO DE ARCHIVOS (evita WinError 32 si el archivo está abierto)
 # ---------------------------------------------------------------------------
-def mover_seguro(origen, destino, log=None, intentos: int = 3,
-                 espera: float = 1.2) -> bool:
-    """Mueve un archivo con reintentos; si sigue bloqueado, lo copia y avisa."""
-    import time
-    origen, destino = str(origen), str(destino)
-    nombre = Path(origen).name
-    for _ in range(intentos):
-        try:
-            shutil.move(origen, destino)
-            return True
-        except (PermissionError, OSError):
-            time.sleep(espera)
-    try:
-        shutil.copy2(origen, destino)
-        if log:
-            log(f"  ⚠️  «{nombre}» está abierto en otro programa (¿Excel?).", "aviso")
-            log("     Se copió a procesados/, pero el original sigue en entrada/.", "aviso")
-            log("     👉 Ciérralo en Excel y bórralo de entrada/ (o vuelve a procesar).", "aviso")
-    except Exception:
-        if log:
-            log(f"  ❌ No se pudo mover «{nombre}»: está abierto en otro programa.", "error")
-            log("     👉 Cierra el archivo y pulsa de nuevo el botón.", "error")
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +119,6 @@ class AppGestionFincas(ctk.CTk):
 
         # Estado
         self.comunidad_actual  = tk.StringVar(value="")
-        self.periodo_actual     = tk.StringVar(value="")
         self.expediente_actual  = tk.StringVar(value="")
         self.expediente_seleccionado = tk.StringVar(value="")
         self.id_comunidad       = None
@@ -165,7 +133,7 @@ class AppGestionFincas(ctk.CTk):
         self._workspace_command = self._accion_crear_expediente
         self._workspace_action_label = "Crear expediente"
 
-        self._crear_ui_v3()
+        self._crear_ui_guiada()
         self._cargar_comunidades()
         self._verificar_estructura()
         self.log("", "bienvenida")
@@ -179,11 +147,6 @@ class AppGestionFincas(ctk.CTk):
     # -----------------------------------------------------------------------
     # CONSTRUCCIÓN DE LA UI
     # -----------------------------------------------------------------------
-    def _crear_ui_v3(self):
-        """Panel principal del flujo de regularización, diseñado para operar por pasos."""
-        self._crear_ui_guiada()
-        return
-
     def _crear_ui_guiada(self):
         """Shell compacto: contexto arriba, cuatro pasos y una tarea principal."""
         header = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=76)
@@ -193,7 +156,12 @@ class AppGestionFincas(ctk.CTk):
         ctk.CTkLabel(header, text="Flujo guiado de facturas, lecturas y cartas", font=UIM.fuente(11), text_color=C["texto_sec"]).pack(side="left", pady=18)
         self.interruptor = UIM.InterruptorTema(header)
         self.interruptor.pack(side="right", padx=(8, 22))
-        ctk.CTkButton(header, text="Ajustes", command=self._configurar_rutas, height=31, corner_radius=8, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="right", padx=8)
+        for text, command in (
+            ("Ajustes", self._configurar_rutas),
+            ("Nueva comunidad", self._nueva_comunidad),
+            ("Bandeja global", self._accion_bandeja_global),
+        ):
+            ctk.CTkButton(header, text=text, command=command, height=31, corner_radius=8, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="right", padx=(0, 8))
         self.linea = UIM.LineaGradiente(self, altura=2)
         self.linea.pack(fill="x")
         self.interruptor.al_cambiar(self.linea.refrescar)
@@ -201,21 +169,19 @@ class AppGestionFincas(ctk.CTk):
         context = ctk.CTkFrame(self, fg_color="transparent")
         context.pack(fill="x", padx=28, pady=(16, 8))
         context.grid_columnconfigure(0, weight=3)
-        context.grid_columnconfigure(1, weight=2)
-        context.grid_columnconfigure(2, weight=2)
-        for column, label in enumerate(("Comunidad", "Período", "Expediente")):
+        context.grid_columnconfigure(1, weight=3)
+        # Las fechas pertenecen al expediente: su período contable se crea y
+        # enlaza automáticamente, así que no hay un selector de período aparte.
+        for column, label in enumerate(("Comunidad", "Expediente (intervalo que se regulariza)")):
             ctk.CTkLabel(context, text=label, font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=column, sticky="w", padx=(0 if column == 0 else 10, 0), pady=(0, 4))
-        self.cb_comunidad = UIM.ComboModerno(context, variable=self.comunidad_actual, values=[], width=420, height=38, command=lambda _v: self._on_comunidad_seleccionada())
+        self.cb_comunidad = UIM.ComboModerno(context, variable=self.comunidad_actual, values=[], width=380, height=38, command=lambda _v: self._on_comunidad_seleccionada())
         self.cb_comunidad.grid(row=1, column=0, sticky="ew", padx=(0, 10))
-        self.cb_periodo = UIM.ComboModerno(context, variable=self.periodo_actual, values=[], width=250, height=38, command=lambda _v: self._on_periodo_seleccionado())
-        self.cb_periodo.grid(row=1, column=1, sticky="ew", padx=10)
-        self.cb_expediente = UIM.ComboModerno(context, variable=self.expediente_seleccionado, values=[], width=250, height=38, command=lambda _v: self._on_expediente_seleccionado())
-        self.cb_expediente.grid(row=1, column=2, sticky="ew", padx=10)
+        self.cb_expediente = UIM.ComboModerno(context, variable=self.expediente_seleccionado, values=[], width=340, height=38, command=lambda _v: self._on_expediente_seleccionado())
+        self.cb_expediente.grid(row=1, column=1, sticky="ew", padx=10)
         actions = ctk.CTkFrame(context, fg_color="transparent")
-        actions.grid(row=1, column=3, padx=(14, 0))
-        ctk.CTkButton(actions, text="Bandeja global", command=self._accion_bandeja_global, height=38, corner_radius=9, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="left", padx=(0, 7))
-        ctk.CTkButton(actions, text="Nueva comunidad", command=self._nueva_comunidad, height=38, corner_radius=9, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="left", padx=(0, 7))
-        ctk.CTkButton(actions, text="Crear expediente", command=self._accion_crear_expediente, height=38, corner_radius=9, font=UIM.fuente(11, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left")
+        actions.grid(row=1, column=2, padx=(4, 0), sticky="e")
+        ctk.CTkButton(actions, text="Cambiar fechas", command=self._accion_cambiar_fechas, height=38, width=118, corner_radius=9, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="left", padx=(0, 7))
+        ctk.CTkButton(actions, text="Nuevo expediente", command=self._accion_crear_expediente, height=38, corner_radius=9, font=UIM.fuente(11, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left")
         self.banner_periodo = ctk.CTkFrame(self, fg_color=C["acento_suave"], corner_radius=10)
         self.banner_periodo.pack(fill="x", padx=28, pady=(0, 12))
         self.lbl_banner = ctk.CTkLabel(self.banner_periodo, text="Selecciona una comunidad y un período para empezar.", font=UIM.fuente(11), text_color=C["primario"], anchor="w")
@@ -236,24 +202,23 @@ class AppGestionFincas(ctk.CTk):
             row.pack(fill="x", padx=8, pady=3)
             self.workflow_step_rows[key] = row
             self.etapas[key] = row._marker
-        ctk.CTkButton(nav, text="Gestionar períodos", command=self._nuevo_periodo, height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(18, 5))
-        self.botones["Reanalizar fuentes"] = ctk.CTkButton(
-            nav, text="Reanalizar fuentes", command=self._accion_reanalizar_fuentes,
-            height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs(),
-        )
-        self.botones["Reanalizar fuentes"].pack(fill="x", padx=12, pady=(0, 5))
-        ctk.CTkButton(nav, text="Resolver copias", command=self._accion_resolver_copias_archivadas,
-                      height=31, corner_radius=8, font=UIM.fuente(10),
-                      **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
-        ctk.CTkButton(nav, text="Confirmar fuentes", command=self._accion_confirmar_fuentes,
-                      height=31, corner_radius=8, font=UIM.fuente(10),
-                      **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
+        # Herramientas que no son un paso del flujo. «Confirmar fuentes» y
+        # «Resolver copias» se alcanzan desde «Validar» y sus incidencias, y las
+        # fechas se cambian junto al selector de expediente.
+        ctk.CTkLabel(nav, text="Herramientas", font=UIM.fuente(11, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=16, pady=(18, 6))
         # Lo cobrado a los vecinos no está en ninguna factura ni en ningún
         # contador: sin este paso el análisis no tiene con qué comparar el coste.
-        ctk.CTkButton(nav, text="Cuotas cobradas", command=self._accion_cuotas_cobradas,
-                      height=31, corner_radius=8, font=UIM.fuente(10),
-                      **UIM.secondary_button_kwargs()).pack(fill="x", padx=12, pady=(0, 5))
-        ctk.CTkButton(nav, text="Abrir salidas", command=self._abrir_salidas, height=31, corner_radius=8, font=UIM.fuente(10), **UIM.secondary_button_kwargs()).pack(fill="x", padx=12)
+        for text, command in (
+            ("Cuotas cobradas", self._accion_cuotas_cobradas),
+            ("Reevaluar fuentes", self._accion_reanalizar_fuentes),
+            ("Historial", self._accion_ver_historial_periodo),
+            ("Abrir salidas", self._abrir_salidas),
+        ):
+            self.botones[text] = ctk.CTkButton(
+                nav, text=text, command=command, height=31, corner_radius=8,
+                font=UIM.fuente(10), **UIM.secondary_button_kwargs(),
+            )
+            self.botones[text].pack(fill="x", padx=12, pady=(0, 5))
 
         work = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=14, border_width=1, border_color=C["borde"])
         work.grid(row=0, column=1, sticky="nsew")
@@ -264,20 +229,11 @@ class AppGestionFincas(ctk.CTk):
         self.workspace_primary = ctk.CTkButton(work, text="Crear expediente", command=self._accion_crear_expediente, height=44, corner_radius=10, font=UIM.fuente(13, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"])
         self.workspace_primary.pack(anchor="w", padx=24, pady=(18, 16))
         self.botones["Crear expediente · principal"] = self.workspace_primary
+        # Se rellena en _actualizar_workspace con las etapas repetibles del estado.
         self.workspace_repeat_actions = ctk.CTkFrame(work, fg_color="transparent")
-        for text, command in (
-            ("Regenerar Excel", self._accion_generar_excel_expediente),
-            ("Recalcular reparto", self._accion_calcular_reparto_expediente),
-            ("Repetir cartas", self._accion_generar_cartas_expediente),
-        ):
-            ctk.CTkButton(
-                self.workspace_repeat_actions, text=text, command=command,
-                height=34, corner_radius=8, font=UIM.fuente(10, "bold"),
-                **UIM.secondary_button_kwargs(),
-            ).pack(side="left", padx=(0, 7))
         panel = ctk.CTkFrame(work, fg_color=C["panel_2"], corner_radius=11)
         panel.pack(fill="both", expand=True, padx=24, pady=(0, 20))
-        self.lbl_incidencias_bandeja = ctk.CTkLabel(panel, text="Validación del expediente", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"])
+        self.lbl_incidencias_bandeja = ctk.CTkLabel(panel, text="Incidencias pendientes", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"])
         self.lbl_incidencias_bandeja.pack(anchor="w", padx=14, pady=(12, 3))
         self.bandeja_incidencias = ctk.CTkScrollableFrame(panel, fg_color="transparent")
         self.bandeja_incidencias.pack(fill="both", expand=True, padx=7, pady=(0, 7))
@@ -292,441 +248,7 @@ class AppGestionFincas(ctk.CTk):
         self.lbl_bd = ctk.CTkLabel(self.barra_estado, text="Datos locales", font=UIM.fuente(10), text_color=C["texto_sec"]); self.lbl_bd.pack(side="right", padx=20)
         self.progreso = ctk.CTkProgressBar(self.barra_estado, mode="indeterminate", width=130, height=5, progress_color=C["primario"])
 
-        # La composición v3 heredada continúa debajo por compatibilidad, pero
-        # no debe ejecutarse después de la pantalla guiada.
-        return
 
-        header = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=78)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        marca = ctk.CTkFrame(header, width=36, height=36, corner_radius=10, fg_color=C["primario"])
-        marca.pack(side="left", padx=(28, 10), pady=20)
-        marca.pack_propagate(False)
-        ctk.CTkLabel(marca, text="R", font=UIM.fuente(18, "bold"), text_color="#FFFFFF").pack(expand=True)
-        title = ctk.CTkFrame(header, fg_color="transparent")
-        title.pack(side="left", pady=15)
-        ctk.CTkLabel(title, text="Regularización", font=UIM.fuente(22, "bold"), text_color=C["texto"]).pack(anchor="w")
-        ctk.CTkLabel(title, text="Facturas, consumos y cartas en un único flujo", font=UIM.fuente(11), text_color=C["texto_sec"]).pack(anchor="w", pady=(1, 0))
-        self.interruptor = UIM.InterruptorTema(header)
-        self.interruptor.pack(side="right", padx=26)
-        self.linea = UIM.LineaGradiente(self, altura=2)
-        self.linea.pack(fill="x")
-        self.interruptor.al_cambiar(self.linea.refrescar)
-
-        context = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
-        context.pack(fill="x", padx=24, pady=(18, 12))
-        context.grid_columnconfigure(0, weight=3)
-        context.grid_columnconfigure(1, weight=2)
-        context.grid_columnconfigure(2, weight=0)
-        ctk.CTkLabel(context, text="COMUNIDAD", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=0, sticky="w", padx=20, pady=(15, 3))
-        ctk.CTkLabel(context, text="PERÍODO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=0, column=1, sticky="w", padx=12, pady=(15, 3))
-        self.cb_comunidad = UIM.ComboModerno(context, variable=self.comunidad_actual, values=[], width=460, height=40, command=lambda _v: self._on_comunidad_seleccionada())
-        self.cb_comunidad.grid(row=1, column=0, sticky="ew", padx=(20, 12), pady=(0, 16))
-        self.cb_periodo = UIM.ComboModerno(context, variable=self.periodo_actual, values=[], width=280, height=40, command=lambda _v: self._on_periodo_seleccionado())
-        self.cb_periodo.grid(row=1, column=1, sticky="ew", padx=12, pady=(0, 16))
-        ctk.CTkLabel(context, text="ELEGIR EXPEDIENTE", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=2, column=1, sticky="w", padx=12, pady=(0, 3))
-        self.cb_expediente = UIM.ComboModerno(
-            context,
-            variable=self.expediente_seleccionado,
-            values=[],
-            width=280,
-            height=40,
-            command=lambda _v: self._on_expediente_seleccionado(),
-        )
-        self.cb_expediente.grid(row=3, column=1, sticky="ew", padx=12, pady=(0, 16))
-        add = ctk.CTkFrame(context, fg_color="transparent")
-        add.grid(row=0, column=2, rowspan=4, padx=(12, 18), pady=16)
-        ctk.CTkButton(add, text="+ Comunidad", command=self._nueva_comunidad, height=32, corner_radius=9, fg_color="transparent", border_width=1, border_color=C["borde"], text_color=C["primario"], hover_color=C["acento_suave"]).pack(fill="x")
-        ctk.CTkButton(add, text="Gestionar periodos", command=self._nuevo_periodo, height=32, corner_radius=9, fg_color=C["acento_suave"], text_color=C["primario"], hover_color=C["acento_suave_hover"]).pack(fill="x", pady=(7, 0))
-        ctk.CTkButton(add, text="+ Expediente", command=self._accion_crear_expediente, height=32, corner_radius=9, fg_color=C["primario"], hover_color=C["primario_hover"]).pack(fill="x", pady=(7, 0))
-
-        self.banner_periodo = ctk.CTkFrame(self, fg_color=C["banner_abierto"], corner_radius=14, border_width=1, border_color=C["borde"])
-        self.banner_periodo.pack(fill="x", padx=24, pady=(0, 12))
-        self.lbl_banner = ctk.CTkLabel(self.banner_periodo, text="Selecciona una comunidad y un ejercicio para preparar la regularización.", font=UIM.fuente(12), text_color=C["primario"], anchor="w")
-        self.lbl_banner.pack(fill="x", padx=18, pady=(11, 5))
-        self.etapas = {}
-        tracker = ctk.CTkFrame(self.banner_periodo, fg_color="transparent")
-        tracker.pack(fill="x", padx=18, pady=(1, 11))
-        for index, (key, label) in enumerate((("fuentes", "01  Fuentes"), ("validacion", "02  Validar"), ("calculo", "03  Calcular"), ("cartas", "04  Cartas"), ("fin", "05  Terminado"))):
-            cell = ctk.CTkFrame(tracker, fg_color="transparent")
-            cell.pack(side="left", fill="x", expand=True)
-            dot = ctk.CTkLabel(cell, text="○", font=UIM.fuente(16, "bold"), text_color=C["texto_sec"])
-            dot.pack(side="left")
-            ctk.CTkLabel(cell, text=label, font=UIM.fuente(10, "bold" if index == 0 else "normal"), text_color=C["texto_sec"]).pack(side="left", padx=4)
-            self.etapas[key] = dot
-
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=24, pady=(0, 14))
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=3)
-        body.grid_columnconfigure(2, weight=2)
-        body.grid_rowconfigure(0, weight=3)
-        body.grid_rowconfigure(1, weight=2)
-
-        nav = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
-        nav.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 12))
-        ctk.CTkLabel(nav, text="EL FLUJO", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(19, 10))
-        self.botones = {}
-        acciones = (
-            ("1", "Crear expediente", "Define el intervalo a revisar", self._accion_crear_expediente),
-            ("2", "Importar modelo inicial", "Carga el Excel histórico una sola vez", self._accion_importar_modelo_inicial),
-            ("3", "Añadir fuentes", "Archiva los PDF nuevos sin alterarlos", self._accion_anadir_fuentes),
-            ("4", "Resolver incidencias", "Confirma solo los datos pendientes", self._accion_resolver_incidencias),
-            ("5", "Generar Excel oficial", "Reconstruye el modelo desde datos validados", self._accion_generar_excel_expediente),
-            ("6", "Calcular reparto final", "Cuadra cada concepto al céntimo", self._accion_calcular_reparto_expediente),
-            ("7", "Generar cartas", "Prepara una carta auditada por propietario", self._accion_generar_cartas_expediente),
-        )
-        for number, name, description, command in acciones:
-            row = ctk.CTkButton(nav, text=f"{number}   {name}\n     {description}", command=command, anchor="w", height=50, corner_radius=11, font=UIM.fuente(11, "bold"), fg_color=C["acento_suave"], hover_color=C["acento_suave_hover"], text_color=C["primario"])
-            row.pack(fill="x", padx=12, pady=4)
-            self.botones[name] = row
-        ctk.CTkFrame(nav, fg_color=C["borde"], height=1).pack(fill="x", padx=16, pady=16)
-        ctk.CTkLabel(nav, text="OTRAS ACCIONES", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(0, 7))
-        for name, command in (("Regularización guiada", self._accion_regularizacion_guiada), ("Procesar PDFs recibidos", self._accion_procesar_facturas), ("Historial del período", self._accion_ver_historial_periodo), ("Abrir salidas", self._abrir_salidas), ("Configurar rutas", self._configurar_rutas)):
-            button = ctk.CTkButton(nav, text=name, command=command, height=32, corner_radius=8, anchor="w", font=UIM.fuente(11), fg_color="transparent", hover_color=C["acento_suave"], text_color=C["texto_sec"])
-            button.pack(fill="x", padx=12, pady=1)
-            self.botones[name] = button
-
-        hero = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
-        hero.grid(row=0, column=1, sticky="nsew", padx=(0, 12))
-        ctk.CTkLabel(hero, text="Prepara una regularización", font=UIM.fuente(20, "bold"), text_color=C["texto"]).pack(anchor="w", padx=24, pady=(24, 4))
-        ctk.CTkLabel(hero, text="Elige fechas, añade fuentes y resuelve solo los datos que falten.", font=UIM.fuente(12), text_color=C["texto_sec"], justify="left", wraplength=460).pack(anchor="w", padx=24)
-        start = ctk.CTkButton(hero, text="Crear expediente", command=self._accion_crear_expediente, height=48, corner_radius=12, font=UIM.fuente(14, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"])
-        start.pack(anchor="w", padx=24, pady=(20, 18))
-        self.botones["Crear expediente · principal"] = start
-        issue_panel = ctk.CTkFrame(hero, fg_color=C["panel_2"], corner_radius=12)
-        issue_panel.pack(fill="both", expand=True, padx=24, pady=(0, 24))
-        issue_header = ctk.CTkFrame(issue_panel, fg_color="transparent")
-        issue_header.pack(fill="x", padx=12, pady=(11, 3))
-        ctk.CTkLabel(issue_header, text="INCIDENCIAS ABIERTAS", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(side="left")
-        self.lbl_incidencias_bandeja = ctk.CTkLabel(issue_header, text="0", font=UIM.fuente(10, "bold"), text_color=C["primario"])
-        self.lbl_incidencias_bandeja.pack(side="right")
-        self.bandeja_incidencias = ctk.CTkScrollableFrame(
-            issue_panel,
-            fg_color="transparent",
-            height=132,
-        )
-        self.bandeja_incidencias.pack(fill="both", expand=True, padx=7, pady=(0, 7))
-
-        state = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
-        state.grid(row=0, column=2, sticky="nsew")
-        ctk.CTkLabel(state, text="ESTADO DEL EXPEDIENTE", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18, pady=(20, 10))
-        state_summary = ctk.CTkFrame(state, fg_color="transparent")
-        state_summary.pack(fill="x", padx=18, pady=(0, 13))
-        self.carril_estado_expediente = ctk.CTkFrame(
-            state_summary, width=4, height=1, corner_radius=2, fg_color=C["borde"]
-        )
-        self.carril_estado_expediente.pack(side="left", fill="y", padx=(0, 9))
-        self.carril_estado_expediente.pack_propagate(False)
-        self.lbl_estado_resumen = ctk.CTkLabel(state_summary, text="Elige un expediente para continuar.", font=UIM.fuente(13, "bold"), text_color=C["texto"], justify="left", wraplength=225)
-        self.lbl_estado_resumen.pack(side="left", anchor="w")
-        self.expediente_metricas = {}
-        for key, label, value in (("rango", "Fechas", "—"), ("perfil", "Perfil Excel", "—"), ("fuentes", "Fuentes", "0"), ("estado", "Estado", "—"), ("incidencias", "Incidencias", "0 abiertas")):
-            line = ctk.CTkFrame(state, fg_color=C["panel_2"], corner_radius=9)
-            line.pack(fill="x", padx=16, pady=4)
-            ctk.CTkLabel(line, text=label, font=UIM.fuente(11), text_color=C["texto_sec"]).pack(side="left", padx=10, pady=9)
-            metric = ctk.CTkLabel(line, text=value, font=UIM.fuente(11, "bold"), text_color=C["primario"])
-            metric.pack(side="right", padx=10)
-            self.expediente_metricas[key] = metric
-
-        activity = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=18, border_width=1, border_color=C["borde"])
-        activity.grid(row=1, column=1, columnspan=2, sticky="nsew")
-        top = ctk.CTkFrame(activity, fg_color="transparent")
-        top.pack(fill="x", padx=16, pady=(12, 6))
-        ctk.CTkLabel(top, text="ACTIVIDAD", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).pack(side="left")
-        ctk.CTkButton(top, text="Limpiar", command=self._limpiar_log, width=68, height=25, corner_radius=7, fg_color="transparent", hover_color=C["acento_suave"], text_color=C["texto_sec"]).pack(side="right")
-        log_wrap = ctk.CTkFrame(activity, fg_color="#102021", corner_radius=11)
-        log_wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        mono = UIM.fuente_mono(10)
-        self.log_area = tk.Text(log_wrap, font=mono, bg="#102021", fg="#D6E4E2", insertbackground="white", relief="flat", state="disabled", wrap="word", padx=12, pady=10, borderwidth=0, highlightthickness=0, cursor="arrow")
-        scroll_log = ctk.CTkScrollbar(log_wrap, command=self.log_area.yview, fg_color="#102021", button_color="#2C4848", button_hover_color="#3F6665")
-        self.log_area.configure(yscrollcommand=scroll_log.set)
-        scroll_log.pack(side="right", fill="y", padx=(0, 3), pady=4)
-        self.log_area.pack(side="left", fill="both", expand=True)
-        for tag, color in (("hora", "#6D8988"), ("ok", "#7AD3B6"), ("error", "#FF9A9A"), ("aviso", "#F1C86A"), ("info", "#8BCAC6"), ("titulo", "#FFFFFF"), ("sep", "#29403F"), ("neutro", "#A2BCBA"), ("detalle", "#6D8988"), ("bienvenida", "#A2BCBA")):
-            self.log_area.tag_config(tag, foreground=color)
-
-        self.barra_estado = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=38, border_width=1, border_color=C["borde"])
-        self.barra_estado.pack(fill="x", side="bottom")
-        self.barra_estado.pack_propagate(False)
-        self.punto_estado = UIM.PuntoEstado(self.barra_estado)
-        self.punto_estado.pack(side="left", padx=(22, 6), pady=8)
-        self.interruptor.al_cambiar(self.punto_estado.refrescar)
-        self.lbl_estado = ctk.CTkLabel(self.barra_estado, text="Listo para empezar", font=UIM.fuente(11), text_color=C["texto"])
-        self.lbl_estado.pack(side="left")
-        self.lbl_bd = ctk.CTkLabel(self.barra_estado, text="Datos locales protegidos", font=UIM.fuente(10), text_color=C["texto_sec"])
-        self.lbl_bd.pack(side="right", padx=20)
-        self.progreso = ctk.CTkProgressBar(self.barra_estado, mode="indeterminate", width=140, height=6, corner_radius=3, progress_color=C["primario"], fg_color=C["acento_suave"])
-
-    def _crear_ui(self):
-        # ── CABECERA ────────────────────────────────────────────────────────
-        cabecera = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0,
-                                height=64)
-        cabecera.pack(fill="x")
-        cabecera.pack_propagate(False)
-
-        ctk.CTkLabel(cabecera, text="Regularización de facturas",
-                     font=UIM.fuente(20, "bold"),
-                     text_color=C["texto"]).pack(side="left",
-                                                 padx=(24, 8), pady=14)
-        ctk.CTkLabel(cabecera, text="●", font=UIM.fuente(9),
-                     text_color=C["primario"]).pack(side="left", pady=14)
-        ctk.CTkLabel(cabecera, text="Flujo guiado · edición 2 · cualquier despacho",
-                     font=UIM.fuente(12),
-                     text_color=C["texto_sec"]).pack(side="left",
-                                                     padx=8, pady=14)
-
-        # Interruptor claro / oscuro (a la derecha)
-        self.interruptor = UIM.InterruptorTema(cabecera)
-        self.interruptor.pack(side="right", padx=20)
-
-        # Línea de acento degradada bajo la cabecera
-        self.linea = UIM.LineaGradiente(self, altura=2)
-        self.linea.pack(fill="x")
-        self.interruptor.al_cambiar(self.linea.refrescar)
-
-        # ── SELECTOR DE COMUNIDAD Y PERIODO ────────────────────────────────
-        selector = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=16,
-                                border_width=1, border_color=C["borde"])
-        selector.pack(fill="x", padx=16, pady=(14, 0))
-
-        ctk.CTkLabel(selector, text="🏢  COMUNIDAD", font=UIM.fuente(10, "bold"),
-                     text_color=C["texto_sec"]).grid(
-                         row=0, column=0, padx=(20, 8), pady=(14, 2), sticky="w")
-        self.cb_comunidad = UIM.ComboModerno(
-            selector, variable=self.comunidad_actual, values=[],
-            width=400, height=38,
-            command=lambda _v: self._on_comunidad_seleccionada())
-        self.cb_comunidad.grid(row=1, column=0, padx=(18, 16),
-                               pady=(2, 16), sticky="w")
-
-        ctk.CTkLabel(selector, text="📅  PERIODO", font=UIM.fuente(10, "bold"),
-                     text_color=C["texto_sec"]).grid(
-                         row=0, column=1, padx=(8, 8), pady=(14, 2), sticky="w")
-        self.cb_periodo = UIM.ComboModerno(
-            selector, variable=self.periodo_actual, values=[],
-            width=170, height=38,
-            command=lambda _v: self._on_periodo_seleccionado())
-        self.cb_periodo.grid(row=1, column=1, padx=(6, 8),
-                             pady=(2, 16), sticky="w")
-
-        ctk.CTkButton(selector, text="＋ Nuevo periodo",
-                      command=self._nuevo_periodo,
-                      width=140, height=34, corner_radius=8,
-                      font=UIM.fuente(12, "bold"),
-                      fg_color=C["acento_suave"],
-                      hover_color=C["acento_suave_hover"],
-                      text_color=C["primario"]).grid(
-                          row=1, column=2, padx=8, pady=(4, 14), sticky="w")
-
-        # ── BANNER DE PERIODO ACTIVO ────────────────────────────────────────
-        self.banner_periodo = ctk.CTkFrame(
-            self, fg_color=C["banner_abierto"], corner_radius=12,
-            border_width=1, border_color=C["borde"])
-        self.banner_periodo.pack(fill="x", padx=16, pady=(10, 0))
-        self.lbl_banner = ctk.CTkLabel(
-            self.banner_periodo,
-            text="Selecciona una comunidad y un periodo para empezar.",
-            font=UIM.fuente(12), text_color=C["primario"],
-            anchor="w", justify="left")
-        self.lbl_banner.pack(fill="x", padx=14, pady=7)
-        self.etapas = {}
-        etapas = (("fuentes", "Fuentes"), ("validacion", "Validación"),
-                  ("calculo", "Cálculo"), ("cartas", "Cartas"), ("fin", "Listo"))
-        tracker = ctk.CTkFrame(self.banner_periodo, fg_color="transparent")
-        tracker.pack(fill="x", padx=14, pady=(0, 9))
-        for key, label in etapas:
-            item = ctk.CTkFrame(tracker, fg_color="transparent")
-            item.pack(side="left", expand=True, fill="x")
-            dot = ctk.CTkLabel(item, text="○", font=UIM.fuente(16, "bold"), text_color=C["texto_sec"])
-            dot.pack(side="left")
-            ctk.CTkLabel(item, text=label, font=UIM.fuente(10), text_color=C["texto_sec"]).pack(side="left", padx=3)
-            self.etapas[key] = dot
-
-        # ── CUERPO PRINCIPAL ────────────────────────────────────────────────
-        cuerpo = ctk.CTkFrame(self, fg_color="transparent")
-        cuerpo.pack(fill="both", expand=True, padx=16, pady=12)
-        cuerpo.columnconfigure(0, weight=1)
-        cuerpo.columnconfigure(1, weight=2)
-        cuerpo.rowconfigure(0, weight=1)
-
-        # ── PANEL IZQUIERDO: ACCIONES ───────────────────────────────────────
-        panel_acc = ctk.CTkFrame(cuerpo, fg_color=C["panel"], corner_radius=16,
-                                 border_width=1, border_color=C["borde"])
-        panel_acc.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-
-        self.botones = {}
-
-        # ── Acción principal ──
-        ctk.CTkLabel(panel_acc, text="ACCIÓN PRINCIPAL",
-                     font=UIM.fuente(10, "bold"),
-                     text_color=C["texto_sec"]).pack(
-                         anchor="w", padx=18, pady=(18, 6))
-
-        btn_todo = ctk.CTkButton(
-            panel_acc, text="▶   PROCESAR TODO",
-            command=self._accion_todo_en_uno,
-            height=56, corner_radius=14,
-            font=UIM.fuente(15, "bold"),
-            fg_color=C["primario"], hover_color=C["primario_hover"])
-        btn_todo.pack(fill="x", padx=16, pady=(0, 4))
-        self.botones["🔄  TODO EN UNO"] = btn_todo
-
-        ctk.CTkLabel(panel_acc,
-                     text="Ingesta entrada/ → BD → reparto → Excel → cartas",
-                     font=UIM.fuente(10),
-                     text_color=C["texto_sec"]).pack(
-                         anchor="w", padx=18, pady=(0, 10))
-
-        ctk.CTkFrame(panel_acc, fg_color=C["borde"], height=1).pack(
-            fill="x", padx=16, pady=(2, 10))
-
-        # ── Paso a paso ──
-        ctk.CTkLabel(panel_acc, text="PASO A PASO",
-                     font=UIM.fuente(10, "bold"),
-                     text_color=C["texto_sec"]).pack(
-                         anchor="w", padx=18, pady=(0, 6))
-
-        pasos = [
-            ("🧾  Regularización guiada", self._accion_regularizacion_guiada),
-            ("📥  Procesar facturas", self._accion_procesar_facturas),
-            ("📊  Regenerar Excel",   self._accion_actualizar_excel),
-            ("🔢  Calcular reparto",  self._accion_calcular_reparto),
-            ("✉️  Generar cartas",    self._accion_generar_cartas),
-        ]
-        claves = ["🧾  Regularización guiada", "📥  Procesar Facturas", "📊  Actualizar Excel",
-                  "🔢  Calcular Reparto", "✉️  Generar Cartas"]
-        for (texto, cmd), clave in zip(pasos, claves):
-            btn = ctk.CTkButton(
-                panel_acc, text=texto, command=cmd,
-                height=42, corner_radius=10, anchor="w",
-                font=UIM.fuente(13, "bold"),
-                fg_color=C["acento_suave"],
-                hover_color=C["acento_suave_hover"],
-                text_color=C["primario"])
-            btn.pack(fill="x", padx=16, pady=3)
-            self.botones[clave] = btn
-
-        ctk.CTkFrame(panel_acc, fg_color=C["borde"], height=1).pack(
-            fill="x", padx=16, pady=10)
-
-        # ── Utilidades ──
-        utils = [
-            ("📂  Abrir carpeta entrada",        self._abrir_entrada),
-            ("📂  Abrir carpeta salidas",        self._abrir_salidas),
-            ("⚙️  Configurar rutas",             self._configurar_rutas),
-            ("➕  Nueva comunidad",              self._nueva_comunidad),
-            ("🔄  Sincronizar comunidades",      self._accion_sincronizar_comunidades),
-            ("📥  Importar desde Excel Maestro", self._accion_importar_excel),
-        ]
-        for texto, cmd in utils:
-            ctk.CTkButton(
-                panel_acc, text=texto, command=cmd,
-                height=32, corner_radius=8, anchor="w",
-                font=UIM.fuente(12),
-                fg_color="transparent",
-                hover_color=C["acento_suave"],
-                text_color=C["texto_sec"]).pack(fill="x", padx=10, pady=1)
-
-        # ── PANEL DERECHO: LOG Y ESTADO ─────────────────────────────────────
-        panel_log = ctk.CTkFrame(cuerpo, fg_color=C["panel"], corner_radius=16,
-                                 border_width=1, border_color=C["borde"])
-        panel_log.grid(row=0, column=1, sticky="nsew")
-
-        # Cabecera del log
-        log_header = ctk.CTkFrame(panel_log, fg_color="transparent")
-        log_header.pack(fill="x")
-        ctk.CTkLabel(log_header, text="ACTIVIDAD",
-                     font=UIM.fuente(10, "bold"),
-                     text_color=C["texto_sec"]).pack(side="left",
-                                                     padx=16, pady=8)
-        ctk.CTkButton(log_header, text="Limpiar",
-                      command=self._limpiar_log,
-                      width=70, height=26, corner_radius=8,
-                      font=UIM.fuente(11),
-                      fg_color="transparent",
-                      hover_color=C["acento_suave"],
-                      text_color=C["texto_sec"]).pack(side="right",
-                                                      padx=10, pady=6)
-
-        # Área de log (estilo terminal moderno — oscura en ambos temas)
-        marco_log = ctk.CTkFrame(panel_log, fg_color="#0D1117",
-                                 corner_radius=10)
-        marco_log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        mono = UIM.fuente_mono(11)
-        self.log_area = tk.Text(
-            marco_log,
-            font=mono,
-            bg="#0D1117", fg="#C9D1D9",
-            insertbackground="white",
-            relief="flat",
-            state="disabled",
-            wrap="word",
-            padx=14, pady=12,
-            borderwidth=0, highlightthickness=0,
-            cursor="arrow",
-            spacing1=1, spacing3=1,
-        )
-        scroll_log = ctk.CTkScrollbar(marco_log, command=self.log_area.yview,
-                                      fg_color="#0D1117",
-                                      button_color="#30363D",
-                                      button_hover_color="#484F58")
-        self.log_area.configure(yscrollcommand=scroll_log.set)
-        scroll_log.pack(side="right", fill="y", padx=(0, 2), pady=4)
-        self.log_area.pack(side="left", fill="both", expand=True)
-
-        # Tags de estilo para el log
-        self.log_area.tag_config("hora",    foreground="#484F58",
-                                  font=(mono[0], 9))
-        self.log_area.tag_config("ok",      foreground="#4AC26B")
-        self.log_area.tag_config("error",   foreground="#FF8182",
-                                  background="#2A1215",
-                                  lmargin1=6, lmargin2=26,
-                                  spacing1=2, spacing3=2)
-        self.log_area.tag_config("aviso",   foreground="#F0B72F",
-                                  lmargin1=6, lmargin2=26)
-        self.log_area.tag_config("info",    foreground="#6CB6FF")
-        self.log_area.tag_config("titulo",  foreground="#E6EDF3",
-                                  font=(mono[0], 12, "bold"),
-                                  spacing1=10, spacing3=2)
-        self.log_area.tag_config("sep",     foreground="#21262D",
-                                  spacing3=4)
-        self.log_area.tag_config("neutro",  foreground="#8B949E")
-        self.log_area.tag_config("detalle", foreground="#57606A",
-                                  font=(mono[0], 9),
-                                  lmargin1=26, lmargin2=26)
-        self.log_area.tag_config("bienvenida", foreground="#8B949E",
-                                  font=(mono[0], 10, "italic"))
-
-        # ── BARRA DE ESTADO ─────────────────────────────────────────────────
-        self.barra_estado = ctk.CTkFrame(self, fg_color=C["panel"],
-                                         corner_radius=0, height=36,
-                                         border_width=1,
-                                         border_color=C["borde"])
-        self.barra_estado.pack(fill="x", side="bottom")
-        self.barra_estado.pack_propagate(False)
-
-        self.punto_estado = UIM.PuntoEstado(self.barra_estado)
-        self.punto_estado.pack(side="left", padx=(14, 4), pady=7)
-        self.interruptor.al_cambiar(self.punto_estado.refrescar)
-
-        self.lbl_estado = ctk.CTkLabel(self.barra_estado, text="Listo",
-                                       font=UIM.fuente(12),
-                                       text_color=C["texto"])
-        self.lbl_estado.pack(side="left", padx=(0, 12))
-
-        self.lbl_bd = ctk.CTkLabel(self.barra_estado,
-                                   text=f"BD: {RUTA_BD}",
-                                   font=UIM.fuente(10),
-                                   text_color=C["texto_sec"])
-        self.lbl_bd.pack(side="right", padx=14)
-
-        # Barra de progreso (oculta por defecto)
-        self.progreso = ctk.CTkProgressBar(
-            self.barra_estado, mode="indeterminate",
-            width=130, height=6, corner_radius=3,
-            progress_color=C["primario"], fg_color=C["acento_suave"])
 
     # -----------------------------------------------------------------------
     # LOG
@@ -750,10 +272,6 @@ class AppGestionFincas(ctk.CTk):
             self.log_area.configure(state="disabled")
         self.after(0, _escribir)
 
-    def _limpiar_log(self):
-        self.log_area.configure(state="normal")
-        self.log_area.delete("1.0", "end")
-        self.log_area.configure(state="disabled")
 
     def _estado(self, texto: str, procesando: bool = False):
         def _act():
@@ -820,28 +338,9 @@ class AppGestionFincas(ctk.CTk):
 
     def _on_comunidad_seleccionada(self, event=None):
         self._limpiar_contexto_expediente()
-        sel = self.comunidad_actual.get()
-        self.id_comunidad = self._ids_comunidad.get(sel)
-        if not self.id_comunidad or not MOD.get("gestor_bd"):
+        self.id_comunidad = self._ids_comunidad.get(self.comunidad_actual.get())
+        if not self.id_comunidad:
             return
-        try:
-            con = MOD["gestor_bd"].conectar(str(RUTA_BD))
-            rows = con.execute(
-                "SELECT id_periodo, nombre FROM periodos WHERE id_comunidad=? ORDER BY fecha_inicio DESC",
-                (self.id_comunidad,)
-            ).fetchall()
-            con.close()
-            opciones = [r["nombre"] for r in rows]
-            self.cb_periodo.configure(values=opciones)
-            self._ids_periodo = {r["nombre"]: r["id_periodo"] for r in rows}
-            if opciones:
-                self.cb_periodo.set(opciones[0])
-                self._on_periodo_seleccionado()
-            else:
-                self._actualizar_banner()
-        except Exception:
-            pass
-
         self._refrescar_lista_expedientes()
         if self.id_expediente:
             self._refrescar_expediente()
@@ -914,61 +413,30 @@ class AppGestionFincas(ctk.CTk):
         self.id_expediente = selected_id
         self._refrescar_expediente()
 
-    def _on_periodo_seleccionado(self, event=None):
-        nombre = self.periodo_actual.get()
-        self.id_periodo = self._ids_periodo.get(nombre) if hasattr(self, "_ids_periodo") else None
-        self._actualizar_banner()
-
-    def _actualizar_banner(self):
-        """Actualiza el banner con la info del periodo activo y su rango de fechas."""
-        if not self.id_periodo or not MOD.get("gestor_bd") or not RUTA_BD.exists():
-            if hasattr(self, "lbl_banner"):
-                self.lbl_banner.configure(
-                    text="Selecciona una comunidad y un periodo para empezar.",
-                    text_color=C["primario"])
-                self.banner_periodo.configure(fg_color=C["banner_abierto"])
+    def _actualizar_banner(self, case=None, period_label: str | None = None):
+        """Resume el intervalo del expediente activo; el período se deriva de él."""
+        if not hasattr(self, "lbl_banner"):
             return
-        try:
-            con = MOD["gestor_bd"].conectar(str(RUTA_BD))
-            r = con.execute(
-                "SELECT nombre, fecha_inicio, fecha_fin, estado FROM periodos "
-                "WHERE id_periodo=?", (self.id_periodo,)
-            ).fetchone()
-            # Contar facturas en este periodo
-            n_facturas = con.execute(
-                "SELECT COUNT(*) FROM facturas WHERE id_periodo=?",
-                (self.id_periodo,)
-            ).fetchone()[0]
-            con.close()
+        if case is None:
+            self.lbl_banner.configure(
+                text="Selecciona una comunidad y un expediente para empezar.",
+                text_color=C["primario"])
+            self.banner_periodo.configure(fg_color=C["banner_abierto"])
+            return
+        days = (case.end_date - case.start_date).days + 1
+        closed = case.status == "closed"
+        text = (
+            f"{'🔒' if closed else '📅'}  {case.name}  ·  "
+            f"{case.start_date.strftime('%d/%m/%Y')} → {case.end_date.strftime('%d/%m/%Y')}"
+            f"  ({days} días)"
+        )
+        if period_label:
+            text += f"  ·  {period_label}"
+        self.lbl_banner.configure(
+            text=text, text_color=C["texto_sec"] if closed else C["primario"])
+        self.banner_periodo.configure(
+            fg_color=C["banner_cerrado"] if closed else C["banner_abierto"])
 
-            if r:
-                fi = r["fecha_inicio"] or "?"
-                ff = r["fecha_fin"] or "abierto"
-                estado = r["estado"] or "abierto"
-                try:
-                    dias = (date.fromisoformat(ff[:10]) -
-                            date.fromisoformat(fi[:10])).days
-                    dur = f"{dias} días"
-                except Exception:
-                    dur = ""
-                abierto = estado == "abierto"
-                icono   = "📅" if abierto else "🔒"
-                texto = (
-                    f"{icono}  Periodo activo: {r['nombre']}  ·  "
-                    f"{fi} → {ff}  ({dur})  ·  "
-                    f"{n_facturas} factura(s) registrada(s)   "
-                    f"— Las facturas procesadas se asignarán al periodo que corresponda por fecha."
-                )
-                self.lbl_banner.configure(
-                    text=texto,
-                    text_color=C["primario"] if abierto else C["texto_sec"])
-                self.banner_periodo.configure(
-                    fg_color=C["banner_abierto"] if abierto else C["banner_cerrado"])
-        except Exception:
-            pass
-
-    # -----------------------------------------------------------------------
-    # ACCIONES PRINCIPALES — se ejecutan en hilo secundario
     # -----------------------------------------------------------------------
     def _en_hilo(self, fn):
         """Ejecuta fn en un hilo secundario para no bloquear la UI."""
@@ -1013,8 +481,28 @@ class AppGestionFincas(ctk.CTk):
             self.after(0, self._habilitar_botones)
             self._estado("Listo")
 
-    def _accion_procesar_facturas(self):
-        self._en_hilo(self._procesar_facturas_impl)
+
+    def _accion_cambiar_fechas(self):
+        if self._procesando or not self._validar_expediente_activo():
+            return
+        MOD["expedient_ui"].open_case_period_dialog(self, self.id_expediente)
+
+    def _accion_enlazar_periodo(self):
+        """El período se deriva del expediente; si no puede enlazarse, se corrigen las fechas."""
+        if self._procesando or not self._validar_expediente_activo():
+            return
+        database, service = MOD.get("gestor_bd"), MOD.get("expedient_service")
+        connection = database.conectar(str(self.ruta_bd_expedientes))
+        try:
+            service.link_case_to_period(connection, self.id_expediente)
+        except ValueError as error:
+            self.log(f"No se pudo enlazar el período: {error}", "aviso")
+            self.after(0, self._accion_cambiar_fechas)
+            return
+        finally:
+            connection.close()
+        self.log("Período del expediente enlazado.", "ok")
+        self._refrescar_expediente()
 
     def _accion_crear_expediente(self):
         expedient_ui = MOD.get("expedient_ui")
@@ -1202,35 +690,83 @@ class AppGestionFincas(ctk.CTk):
         self._en_hilo(work)
 
     def _accion_reanalizar_fuentes(self):
+        """Vuelve a leer las fuentes; si cambian, el expediente regresa a revisión."""
         if self._procesando or not self._validar_expediente_activo():
             return
-        ingestion, database, ui = (MOD.get(name) for name in ("case_ingestion", "gestor_bd", "expedient_ui"))
-        if not all((ingestion, database, ui)):
+        ingestion, database, ui, service = (
+            MOD.get(name) for name in ("case_ingestion", "gestor_bd", "expedient_ui", "expedient_service")
+        )
+        if not all((ingestion, database, ui, service)):
             self.log("No está disponible el análisis de fuentes.", "error")
             return
         case_id, community_id = self.id_expediente, self.id_comunidad
         database_path = str(self.ruta_bd_expedientes)
+        connection = database.conectar(database_path)
+        try:
+            status = service.get_case(connection, case_id).status
+        finally:
+            connection.close()
+        advanced = status in {"ready_for_calculation", "calculated", "reconciled",
+                              "deliveries_generated", "closed"}
+        if advanced and not messagebox.askyesno(
+            "Reevaluar fuentes",
+            "Se volverán a leer todas las fuentes del expediente.\n\n"
+            "Si cambia algún dato, el expediente vuelve a «En revisión» y tendrás que "
+            "confirmar las fuentes y regenerar el Excel, el reparto y las cartas. "
+            "Las versiones anteriores se conservan en el historial.\n\n¿Continuar?",
+            parent=self,
+        ):
+            return
 
         def work():
             connection = database.conectar(database_path)
             try:
                 ingestion.assert_case_belongs_to_community(connection, case_id, community_id)
-                results = ingestion.reanalyze_case_documents(connection, case_id)
+                outcome = ingestion.reevaluate_case_sources(connection, case_id)
             finally:
                 connection.close()
-            summary = ui.source_summary(result.document.document_kind for result in results)
-            self.log(f"Fuentes reanalizadas: {summary}", "ok")
+            summary = ui.source_summary(result.document.document_kind for result in outcome.results)
+            if outcome.reopened:
+                message = (
+                    f"{summary}\n\nHan cambiado datos de las fuentes: el expediente vuelve a "
+                    "revisión. Confirma las fuentes y regenera el Excel."
+                )
+            elif outcome.changed:
+                message = f"{summary}\n\nSe han actualizado los datos detectados."
+            else:
+                message = f"{summary}\n\nNo ha cambiado ningún dato."
+            self.log(f"Fuentes reevaluadas: {summary}", "ok")
 
             def completed():
                 self._refrescar_lista_expedientes(select_case_id=case_id)
                 self._refrescar_expediente()
-                messagebox.showinfo("Fuentes reanalizadas", summary, parent=self)
+                if advanced and not outcome.reopened:
+                    if messagebox.askyesno(
+                        "Fuentes reevaluadas",
+                        f"{message}\n\nEl Excel y el reparto siguen siendo válidos. "
+                        "¿Quieres reabrir igualmente la revisión para corregir datos ya confirmados?",
+                        parent=self,
+                    ):
+                        self._reabrir_revision(case_id)
+                else:
+                    messagebox.showinfo("Fuentes reevaluadas", message, parent=self)
 
             self.after(0, completed)
 
-        self._estado("Reanalizando fuentes", procesando=True)
+        self._estado("Reevaluando fuentes", procesando=True)
         self._en_hilo(work)
 
+    def _reabrir_revision(self, case_id):
+        database, service = MOD.get("gestor_bd"), MOD.get("expedient_service")
+        connection = database.conectar(str(self.ruta_bd_expedientes))
+        try:
+            service.set_case_status(connection, case_id, "under_review")
+        except ValueError as error:
+            self.log(str(error), "aviso")
+        finally:
+            connection.close()
+        self.log("Revisión reabierta: confirma las fuentes para volver a generar el Excel.", "ok")
+        self._refrescar_expediente()
 
     def _accion_cuotas_cobradas(self):
         ui = MOD.get("expedient_ui")
@@ -1238,12 +774,6 @@ class AppGestionFincas(ctk.CTk):
             self.log("No está disponible la gestión de cuotas.", "error")
             return
         ui.open_service_fees_dialog(self, "ACS")
-    def _accion_resolver_copias_archivadas(self):
-        if self._procesando or not self._validar_expediente_activo():
-            return
-        ui = MOD.get("expedient_ui")
-        if ui:
-            ui.open_archived_path_resolution_dialog(self, self.id_expediente)
 
     def _accion_resolver_incidencias(self):
         review = MOD.get("document_review")
@@ -1359,6 +889,11 @@ class AppGestionFincas(ctk.CTk):
             connection.close()
 
         self.expediente_actual.set(case.name)
+        self.id_periodo = case.period_id
+        self._actualizar_banner(
+            case,
+            "período enlazado" if case.period_id else "el período se enlazará al confirmar las fuentes",
+        )
         date_range = (
             f"{case.start_date.strftime('%d/%m/%Y')} – "
             f"{case.end_date.strftime('%d/%m/%Y')}"
@@ -1452,7 +987,7 @@ class AppGestionFincas(ctk.CTk):
             "importar_modelo": ("Importar modelo inicial", self._accion_importar_modelo_inicial),
             "resolver_incidencias": ("Resolver incidencias", self._accion_resolver_incidencias),
             "confirmar_fuentes": ("Confirmar fuentes", self._accion_confirmar_fuentes),
-            "gestionar_periodos": ("Gestionar períodos", self._nuevo_periodo),
+            "gestionar_periodos": ("Revisar fechas", self._accion_enlazar_periodo),
             "importar_propietarios": ("Importar propietarios", self._accion_anadir_fuentes),
             "revalidar_perfil": ("Revalidar perfil Excel", self._accion_revalidar_perfil),
             "generar_excel": ("Generar Excel oficial", self._accion_generar_excel_expediente),
@@ -1466,17 +1001,51 @@ class AppGestionFincas(ctk.CTk):
         self.workspace_headline.configure(text=workspace.headline)
         self.workspace_detail.configure(text=workspace.detail)
         self.workspace_primary.configure(text=label, command=command)
-        if workspace.next_action == "abrir_salidas":
-            if not self.workspace_repeat_actions.winfo_manager():
-                self.workspace_repeat_actions.pack(
-                    anchor="w", padx=24, pady=(0, 14), after=self.workspace_primary,
-                )
-        else:
-            self.workspace_repeat_actions.pack_forget()
+        self._pintar_acciones_repetibles(workspace)
         for step in workspace.steps:
             row = self.workflow_step_rows.get(step.key)
             if row is not None:
                 row.set_status(step.status)
+
+    _REPEAT_LABELS = {
+        "reevaluar_fuentes": "Reevaluar fuentes",
+        "anadir_fuentes": "Añadir fuentes",
+        "generar_excel": "Regenerar Excel",
+        "calcular_reparto": "Recalcular reparto",
+        "generar_cartas": "Repetir cartas",
+    }
+
+    def _pintar_acciones_repetibles(self, workspace):
+        """Muestra sólo las etapas ya superadas que tiene sentido repetir."""
+        frame = self.workspace_repeat_actions
+        for child in frame.winfo_children():
+            child.destroy()
+        commands = {
+            "reevaluar_fuentes": self._accion_reanalizar_fuentes,
+            "anadir_fuentes": self._accion_anadir_fuentes,
+            "generar_excel": self._accion_generar_excel_expediente,
+            "calcular_reparto": self._accion_calcular_reparto_expediente,
+            "generar_cartas": self._accion_generar_cartas_expediente,
+        }
+        actions = [
+            key for key in getattr(workspace, "repeat_actions", ())
+            if key != workspace.next_action and key in commands
+        ]
+        if not actions:
+            frame.pack_forget()
+            return
+        ctk.CTkLabel(
+            frame, text="Repetir una etapa:", font=UIM.fuente(10, "bold"),
+            text_color=C["texto_sec"],
+        ).pack(side="left", padx=(0, 8))
+        for key in actions:
+            ctk.CTkButton(
+                frame, text=self._REPEAT_LABELS[key], command=commands[key],
+                height=32, corner_radius=8, font=UIM.fuente(10),
+                **UIM.secondary_button_kwargs(),
+            ).pack(side="left", padx=(0, 6))
+        if not frame.winfo_manager():
+            frame.pack(anchor="w", padx=24, pady=(0, 14), after=self.workspace_primary)
 
     def _refrescar_bandeja_incidencias(self, issues=()):
         issues = tuple(issues)
@@ -1494,7 +1063,9 @@ class AppGestionFincas(ctk.CTk):
             expedient_ui = MOD.get("expedient_ui")
             summary = expedient_ui.review_summary(issues)
             groups = summary.groups
-            self.lbl_incidencias_bandeja.configure(text=str(summary.actionable_count))
+            count = summary.actionable_count
+            self.lbl_incidencias_bandeja.configure(
+                text="Incidencias pendientes" + (f" · {count}" if count else ""))
 
             if not self.id_expediente:
                 ctk.CTkLabel(
@@ -1669,8 +1240,10 @@ class AppGestionFincas(ctk.CTk):
         self._ids_expediente = {}
         if hasattr(self, "cb_expediente"):
             self.cb_expediente.configure(values=[])
+        self.id_periodo = None
         self._resumen_ejercicio("Elige un expediente para continuar.")
         self._refrescar_bandeja_incidencias()
+        self._actualizar_banner()
 
         def reset_case_state():
             metrics = getattr(self, "expediente_metricas", {})
@@ -1690,74 +1263,7 @@ class AppGestionFincas(ctk.CTk):
 
         self.after(0, reset_case_state)
 
-    def _accion_regularizacion_guiada(self):
-        if not self._validar_seleccion():
-            return
-        referencia = filedialog.askopenfilename(
-            title="Selecciona el Excel de referencia económica",
-            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")],
-        )
-        if not referencia:
-            return
-        propietarios = filedialog.askopenfilename(
-            title="Selecciona el listado de propietarios",
-            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
-        )
-        if not propietarios:
-            return
-        lecturas = filedialog.askopenfilename(
-            title="Selecciona el Excel de lecturas de contadores",
-            filetypes=[("Excel", "*.xls *.xlsx"), ("Todos", "*.*")],
-        )
-        if not lecturas:
-            return
-        self._en_hilo(lambda: self._regularizacion_guiada_impl(referencia, propietarios, lecturas))
 
-    def _regularizacion_guiada_impl(self, referencia, propietarios, lecturas):
-        flujo = MOD.get("regularization_flow")
-        gbd = MOD.get("gestor_bd")
-        if not flujo or not gbd:
-            self.log("❌ No está disponible el flujo de regularización guiada", "error")
-            return
-        self._estado("Importando fuentes…", procesando=True)
-        self.log("━━━ REGULARIZACIÓN GUIADA ━━━", "titulo")
-        def progress(stage, details):
-            labels = {
-                "reading_owners": ("fuentes", "Leyendo propietarios…"),
-                "reading_reference": ("fuentes", "Leyendo Excel de referencia…"),
-                "validating_reference": ("validacion", "Validando importes y periodo…"),
-                "reading_individual_readings": ("fuentes", "Leyendo contadores…"),
-                "individual_readings_imported": ("validacion", "Lecturas validadas"),
-                "period_calculated": ("calculo", "Resultados calculados"),
-                "regularization_completed": ("fin", "Regularización lista"),
-            }
-            if stage in labels:
-                key, text = labels[stage]
-                self._actualizar_etapa(key)
-                self._estado(text, procesando=True)
-                self._resumen_ejercicio(text)
-                self.log(f"  ▸ {text}", "info")
-                if stage == "individual_readings_imported" and details.get("carried_forward"):
-                    self.log(f"  ⚠️ {details['carried_forward']} contador(es) con lectura anterior arrastrada", "aviso")
-        con = gbd.conectar(str(RUTA_BD))
-        try:
-            resultado = flujo.run_regularization(
-                con, self.id_comunidad, referencia, propietarios, lecturas, progress=progress
-            )
-        finally:
-            con.close()
-        self.id_periodo = resultado["period_id"]
-        try:
-            self.after(0, self._cargar_periodos)
-        except Exception:
-            pass
-        self._actualizar_etapa("cartas")
-        self._resumen_ejercicio(
-            f"Cálculo cuadrado para {resultado['reading_summary'].participating_properties} propiedades. Elige los conceptos para crear las cartas."
-        )
-        self.log(f"  ✅ {resultado['results']} resultados calculados; conciliación cuadrada", "ok")
-        self.log("  ℹ️ Ahora puedes generar el Excel y las cartas desde los botones del flujo.", "info")
-        self.after(0, self._accion_generar_cartas)
 
     def _actualizar_etapa(self, activa):
         def _actualizar():
@@ -1772,326 +1278,18 @@ class AppGestionFincas(ctk.CTk):
                     dot.configure(text="○", text_color=C["texto_sec"])
         self.after(0, _actualizar)
 
-    def _accion_actualizar_excel(self):
-        self._en_hilo(self._actualizar_excel_impl)
 
-    def _accion_calcular_reparto(self):
-        self._en_hilo(self._calcular_reparto_impl)
 
-    def _accion_generar_cartas(self):
-        if not self._validar_seleccion():
-            return
-        selected = self._dialogo_conceptos_cartas()
-        if selected is None:
-            return
-        self._en_hilo(lambda: self._generar_cartas_impl(selected))
 
-    def _accion_todo_en_uno(self):
-        self._en_hilo(self._todo_en_uno_impl)
 
-    def _accion_sincronizar_comunidades(self):
-        self._en_hilo(self._sincronizar_comunidades_impl)
 
-    def _accion_importar_excel(self):
-        self._en_hilo(self._importar_excel_impl)
 
     # -----------------------------------------------------------------------
     # IMPLEMENTACIONES
     # -----------------------------------------------------------------------
-    def _validar_seleccion(self) -> bool:
-        if not self.id_comunidad:
-            self.log("⚠️  Selecciona una comunidad primero", "aviso")
-            return False
-        if not self.id_periodo:
-            self.log("⚠️  Selecciona un periodo primero", "aviso")
-            return False
-        return True
 
-    def _detectar_o_crear_periodo_para_factura(self, con, gbd, datos: dict,
-                                                id_comunidad: int = None):
-        """
-        Dado los datos de una factura (con fecha_inicio / fecha_fin o fecha_factura),
-        busca en la BD el periodo de la comunidad que solapa con esas fechas.
-        Si no existe, crea uno automáticamente con nombre 'YYYY-YYYY' según el año fiscal.
-        Devuelve id_periodo o None si no se puede determinar.
-        """
-        id_com = id_comunidad or self.id_comunidad
-        fecha_str = (datos.get("fecha_inicio") or
-                     datos.get("fecha_factura") or
-                     datos.get("fecha_fin"))
-        if not fecha_str:
-            return None
 
-        try:
-            fecha = date.fromisoformat(fecha_str[:10])
-        except (ValueError, TypeError):
-            return None
 
-        # Buscar periodos existentes de esta comunidad que solapen con la fecha
-        rows = con.execute(
-            "SELECT id_periodo, nombre, fecha_inicio, fecha_fin FROM periodos "
-            "WHERE id_comunidad=? AND fecha_inicio IS NOT NULL AND fecha_fin IS NOT NULL "
-            "ORDER BY fecha_inicio DESC",
-            (id_com,)
-        ).fetchall()
-
-        for r in rows:
-            try:
-                fi = date.fromisoformat(r["fecha_inicio"][:10])
-                ff = date.fromisoformat(r["fecha_fin"][:10])
-                if fi <= fecha <= ff:
-                    return r["id_periodo"]
-            except (ValueError, TypeError):
-                continue
-
-        # No hay periodo que cubra esta fecha → crear uno automático
-        # Año fiscal: sep YYYY → ago YYYY+1  (o ene→dic si es período simple)
-        if fecha.month >= 9:
-            anio_ini, anio_fin = fecha.year, fecha.year + 1
-            f_ini = date(anio_ini, 9, 1)
-            f_fin = date(anio_fin, 8, 31)
-        else:
-            anio_ini, anio_fin = fecha.year - 1, fecha.year
-            f_ini = date(anio_ini, 9, 1)
-            f_fin = date(anio_fin, 8, 31)
-
-        nombre_auto = f"{anio_ini}-{anio_fin}"
-        self.log(
-            f"     📅 Periodo '{nombre_auto}' creado automáticamente para factura de {fecha_str[:10]}",
-            "aviso"
-        )
-        try:
-            id_per = gbd.obtener_o_crear_periodo(
-                con, id_com, nombre_auto, str(f_ini)
-            )
-            con.execute(
-                "UPDATE periodos SET fecha_fin=?, estado='abierto' WHERE id_periodo=?",
-                (str(f_fin), id_per)
-            )
-            con.commit()
-            # Refrescar la lista de periodos en la UI
-            self.after(0, self._on_comunidad_seleccionada)
-            return id_per
-        except Exception as e:
-            self.log(f"     ⚠️  No se pudo crear periodo automático: {e}", "error")
-            return None
-
-    def _procesar_facturas_impl(self):
-        if not self._validar_seleccion():
-            return
-        if not MOD.get("lector_pdf") or not MOD.get("gestor_bd"):
-            self.log("❌ Módulos lector_pdf o gestor_bd no disponibles", "error")
-            return
-
-        self._estado("Procesando facturas…", procesando=True)
-        self.log("━━━ PROCESAR FACTURAS ━━━", "titulo")
-        self.log(
-            "  ℹ️  Las facturas se asignan al periodo que corresponda por su fecha\n"
-            "     (independientemente del periodo seleccionado en la UI).",
-            "neutro"
-        )
-
-        archivos = sorted([
-            f for f in os.listdir(RUTA_ENTRADA)
-            if f.lower().endswith(".pdf")
-        ])
-
-        if not archivos:
-            self.log(f"📂 Carpeta entrada/ vacía: {RUTA_ENTRADA}", "aviso")
-            return
-
-        self.log(f"📂 {len(archivos)} archivo(s) encontrado(s)", "info")
-
-        gbd  = MOD["gestor_bd"]
-        lpdf = MOD["lector_pdf"]
-        con  = gbd.conectar(str(RUTA_BD))
-
-        ok_count = err_count = dup_count = 0
-
-        # Obtener el código de la comunidad activa para usarlo como fallback
-        codigo_comunidad_activa = self.comunidad_actual.get().split(" — ")[0].strip()
-
-        for nombre in archivos:
-            ruta = RUTA_ENTRADA / nombre
-
-            if gbd.archivo_ya_procesado(con, nombre):
-                self.log(f"  ⏭  {nombre} — ya procesado", "neutro")
-                dup_count += 1
-                continue
-
-            # --- Detectar código de comunidad desde el nombre del archivo ---
-            # Intentamos extraer un código numérico del nombre (ej: "644_Endesa.pdf",
-            # "Endesa-644.pdf", "644.pdf"). Si no hay número, usamos la comunidad activa.
-            m_codigo = re.search(r'(?<![A-Za-z])(\d{3,6})(?![A-Za-z0-9])', nombre)
-            codigo = m_codigo.group(1) if m_codigo else codigo_comunidad_activa
-
-            # Resolver el id_comunidad real a partir del código detectado
-            id_com_factura = self.id_comunidad  # fallback: comunidad seleccionada en UI
-            if m_codigo and codigo != codigo_comunidad_activa:
-                row_com = con.execute(
-                    "SELECT id_comunidad, nombre FROM comunidades WHERE codigo=?",
-                    (codigo,)
-                ).fetchone()
-                if row_com:
-                    id_com_factura = row_com["id_comunidad"]
-                    self.log(
-                        f"     🏘️  Comunidad detectada del nombre: {codigo} — {row_com['nombre']}",
-                        "info"
-                    )
-                else:
-                    self.log(
-                        f"     ⚠️  Código '{codigo}' no registrado en BD → usando comunidad activa",
-                        "aviso"
-                    )
-
-            resultado = lpdf.procesar_archivo(
-                str(ruta), codigo,
-                con_bd=con,
-                ruta_proveedores=str(RUTA_PROVEEDORES)
-            )
-
-            if resultado["ok"] and resultado["tipo"] == "FACTURA":
-                datos = resultado["datos"]
-                datos["id_comunidad"] = id_com_factura
-
-                # ── Detectar periodo automáticamente por la fecha de la factura ──
-                # La factura puede ser de cualquier año; la insertamos en el periodo
-                # correcto independientemente del periodo seleccionado en la UI.
-                id_periodo_factura = self._detectar_o_crear_periodo_para_factura(
-                    con, gbd, datos, id_comunidad=id_com_factura
-                )
-                id_per_fallback = (self.id_periodo if id_com_factura == self.id_comunidad
-                                   else None)
-                datos["id_periodo"] = id_periodo_factura or id_per_fallback
-
-                id_fac = gbd.insertar_factura(con, datos)
-                if id_fac:
-                    gbd.marcar_archivo_procesado(con, nombre,
-                                                  resultado["hash_md5"], id_fac)
-                    dest = RUTA_PROCESADOS / nombre
-                    mover_seguro(ruta, dest, self.log)
-                    tipo = datos.get("tipo_suministro", "?")
-                    imp  = datos.get("importe_total", 0)
-                    self.log(f"  ✅ {nombre[:45]:<45} {tipo:<15} {imp:>9.2f} €", "ok")
-                    ok_count += 1
-                else:
-                    self.log(f"  ⚠️  {nombre} — duplicado en BD", "aviso")
-                    dup_count += 1
-
-            elif resultado["ok"] and resultado["tipo"] == "LECTURA_METRIGEST":
-                nvecs    = len(resultado["datos"].get("vecinos", []))
-                tipo_lec = resultado["datos"].get("tipo", "?")
-                self.log(f"  📊 {nombre[:45]:<45} LECTURA {tipo_lec} — {nvecs} vecinos", "info")
-
-                # Importar lecturas Metrigest automáticamente a la BD
-                if MOD.get("importar_lecturas_metrigest"):
-                    res_lec = MOD["importar_lecturas_metrigest"].importar_lecturas_pdf(
-                        ruta_pdf=str(ruta),
-                        ruta_bd=str(RUTA_BD),
-                        mover_procesado=True,
-                        ruta_proveedores=str(RUTA_PROVEEDORES),
-                        verbose=False,
-                    )
-                    if res_lec.get("ok"):
-                        ins = res_lec.get("lecturas_insertadas", 0)
-                        dup = res_lec.get("lecturas_duplicadas", 0)
-                        nf  = res_lec.get("vecinos_no_encontrados", [])
-                        self.log(
-                            f"     → {ins} lecturas insertadas, {dup} duplicadas"
-                            + (f", {len(nf)} vecinos no encontrados" if nf else ""),
-                            "ok" if ins > 0 else "aviso"
-                        )
-                        if nf:
-                            self.log(f"     → Sin match: {', '.join(str(v) for v in nf[:8])}", "aviso")
-                    else:
-                        self.log(f"     ❌ {res_lec.get('error','?')}", "error")
-                        # Aunque falle la inserción de lecturas, marcar como procesado
-                        gbd.marcar_archivo_procesado(con, nombre,
-                                                      resultado["hash_md5"],
-                                                      resultado="ok",
-                                                      notas=f"LECTURA {tipo_lec} (sin vecinos)")
-                else:
-                    # Módulo no disponible: solo marcar
-                    gbd.marcar_archivo_procesado(con, nombre,
-                                                  resultado["hash_md5"],
-                                                  resultado="ok",
-                                                  notas=f"LECTURA {tipo_lec}")
-                    self.log("     ⚠️  importar_lecturas_metrigest no disponible", "aviso")
-                ok_count += 1
-            else:
-                motivo = resultado.get('motivo', '?')
-                detalle = resultado.get('detalle', '')
-                # Mensajes de error más descriptivos
-                if motivo == "CUPS_NO_COINCIDE":
-                    cups_pdf = resultado.get('cups_pdf', '?')
-                    cups_esp = resultado.get('cups_esperado', '?')
-                    self.log(
-                        f"  ❌ {nombre[:40]:<40} CUPS incorrecto\n"
-                        f"       PDF tiene: {cups_pdf}\n"
-                        f"       Esperado:  {cups_esp}",
-                        "error"
-                    )
-                elif motivo == "COMUNIDAD_CONTRADICTORIA":
-                    self.log(
-                        f"  ❌ {nombre[:40]:<40} {motivo}\n"
-                        f"       {detalle}",
-                        "error"
-                    )
-                elif motivo == "SIN_TEXTO":
-                    self.log(
-                        f"  ❌ {nombre[:40]:<40} Sin texto extraíble\n"
-                        f"       (PDF escaneado — necesita OCR o Tesseract instalado)",
-                        "error"
-                    )
-                elif motivo == "PROVEEDOR_NO_IDENTIFICADO":
-                    self.log(
-                        f"  ❌ {nombre[:40]:<40} Proveedor no reconocido\n"
-                        f"       Revisa proveedores.json o renombra el archivo",
-                        "error"
-                    )
-                else:
-                    self.log(f"  ❌ {nombre[:45]:<45} {motivo}: {detalle[:60]}", "error")
-                err_count += 1
-
-        con.close()
-        self.log(f"\n  ✅ Procesados: {ok_count}  |  ⚠️  Duplicados: {dup_count}  |  ❌ Errores: {err_count}", "info")
-
-    def _actualizar_excel_impl(self):
-        """
-        Regenera el Excel Maestro COMPLETO desde la BD (todos los periodos).
-        La BD es la fuente de verdad; el Excel es un informe de salida.
-        El libro anterior queda en Excels_Maestros/backups/.
-        """
-        if not self._validar_seleccion():
-            return
-        try:
-            import excel_generator
-        except ImportError as e:
-            self.log(f"❌ No se pudo cargar excel_generator.py: {e}", "error")
-            return
-
-        self._estado("Regenerando Excel…", procesando=True)
-        self.log("━━━ REGENERAR EXCEL MAESTRO ━━━", "titulo")
-
-        codigo = self.comunidad_actual.get().split(" — ")[0].strip()
-        self.log(f"📊 Comunidad {codigo}: reconstruyendo libro completo desde la BD…", "info")
-
-        resultado = excel_generator.regenerar_excel_comunidad(
-            codigo,
-            ruta_bd=str(RUTA_BD),
-            ruta_excels=str(RUTA_EXCELS),
-            log=self.log,
-        )
-
-        if resultado["ok"]:
-            self.log(f"  ✅ {Path(resultado['archivo']).name} regenerado "
-                     f"({len(resultado['periodos_volcados'])} periodos, "
-                     f"{resultado['filas_escritas']} filas)", "ok")
-            if resultado.get("backup"):
-                self.log(f"  💾 Anterior guardado en backups/{Path(resultado['backup']).name}", "neutro")
-        else:
-            for err in resultado.get("errores", []):
-                self.log(f"  ❌ {err}", "error")
 
     def _progreso_expediente(self, stage, details):
         """Traduce hitos técnicos a actividad que puede seguir el despacho."""
@@ -2132,7 +1330,6 @@ class AppGestionFincas(ctk.CTk):
         def refresh():
             self._refrescar_lista_expedientes(select_case_id=case_id)
             self._refrescar_expediente()
-            self._actualizar_banner()
         self.after(0, refresh)
 
     def _importar_modelo_inicial_impl(self, master, owners=None, readings=None):
@@ -2245,39 +1442,6 @@ class AppGestionFincas(ctk.CTk):
         self._refrescar_despues_de_accion(self.id_expediente)
         self.after(0, lambda: self._ofrecer_abrir_carpeta(str(result.output_path)))
 
-    def _calcular_reparto_impl(self):
-        if not self._validar_seleccion():
-            return
-        if not MOD.get("motor_reparto") or not MOD.get("gestor_bd"):
-            self.log("❌ Módulo motor_reparto no disponible", "error")
-            return
-
-        self._estado("Calculando reparto…", procesando=True)
-        self.log("━━━ CALCULAR REPARTO ━━━", "titulo")
-
-        con = MOD["gestor_bd"].conectar(str(RUTA_BD))
-        resultado = MOD["motor_reparto"].calcular_reparto(
-            con=con,
-            id_comunidad=self.id_comunidad,
-            id_periodo=self.id_periodo,
-            sobrescribir=True
-        )
-        con.close()
-
-        if resultado.get("ok"):
-            rc = resultado["resumen_costes"]
-            rr = resultado["resumen_repartos"]
-            self.log(f"  ✅ Periodo: {resultado['periodo']}", "ok")
-            self.log(f"  👥 Vecinos procesados: {resultado['vecinos_procesados']}", "info")
-            self.log(f"  💶 Coste total ACS:   {rc['coste_total_acs']:>10.2f} €", "info")
-            self.log(f"  💶 Coste total CALEF: {rc['coste_total_cal']:>10.2f} €", "info")
-            self.log(f"  📊 Media por vecino ACS:   {rr['media_acs_vecino']:>8.2f} €", "neutro")
-            self.log(f"  📊 Media por vecino CALEF: {rr['media_cal_vecino']:>8.2f} €", "neutro")
-            self.log(f"  ✅ Registros guardados: {resultado['registros_guardados']}", "ok")
-            for aviso in resultado.get("avisos", [])[:5]:
-                self.log(f"  ⚠️  {aviso}", "aviso")
-        else:
-            self.log(f"  ❌ {resultado.get('error', 'Error desconocido')}", "error")
 
     def _dialogo_conceptos_cartas(self, concepts=None):
         """Pide partidas activas del expediente y recuerda la preferencia comunitaria."""
@@ -2354,253 +1518,9 @@ class AppGestionFincas(ctk.CTk):
             self.log("  ✓ Conceptos seleccionados: " + ", ".join(result["value"]), "info")
         return result["value"]
 
-    def _generar_cartas_impl(self, selected_concepts=None):
-        if not self._validar_seleccion():
-            return
-        if not MOD.get("carta_writer"):
-            self.log("❌ Módulo carta_writer no disponible", "error")
-            return
-        if not RUTA_PLANTILLA.exists():
-            self.log(f"❌ No se encuentra la plantilla: {RUTA_PLANTILLA}", "error")
-            return
 
-        self._estado("Generando cartas…", procesando=True)
-        self.log("━━━ GENERAR CARTAS ━━━", "titulo")
-        if selected_concepts:
-            self.log(f"  ▸ Conceptos incluidos: {', '.join(selected_concepts)}", "info")
 
-        nombre_periodo = self.periodo_actual.get()
-        carpeta_salida = RUTA_CARTAS / nombre_periodo
-        carpeta_salida.mkdir(parents=True, exist_ok=True)
 
-        resultado = MOD["carta_writer"].generar_todas_las_cartas(
-            ruta_bd=str(RUTA_BD),
-            id_comunidad=self.id_comunidad,
-            nombre_periodo=nombre_periodo,
-            ruta_plantilla=str(RUTA_PLANTILLA),
-            carpeta_salida=str(carpeta_salida),
-            selected_concepts=selected_concepts,
-        )
-
-        if resultado.get("ok"):
-            self.log(f"  ✅ {resultado['cartas_generadas']} cartas generadas", "ok")
-            self.log(f"  📁 Carpeta: {carpeta_salida}", "info")
-        else:
-            self.log(f"  ❌ {resultado.get('error','')}", "error")
-            for err in resultado.get("errores", [])[:10]:
-                self.log(f"     {err}", "error")
-
-        # Ofrecer abrir la carpeta
-        if resultado.get("cartas_generadas", 0) > 0:
-            self.after(0, lambda: self._ofrecer_abrir_carpeta(str(carpeta_salida)))
-
-    def _sincronizar_comunidades_impl(self):
-        """
-        Lee LISTADO_COMUNIDADES.xlsx (o LISTADO_COMUNIDADES.xlsx en la raíz del proyecto)
-        e inserta en la BD todas las comunidades que aún no estén registradas.
-        No toca comunidades ya existentes — solo añade las nuevas.
-        """
-        self._estado("Sincronizando comunidades…", procesando=True)
-        self.log("━━━ SINCRONIZAR COMUNIDADES ━━━", "titulo")
-
-        if not MOD.get("gestor_bd"):
-            self.log("❌ Módulo gestor_bd no disponible", "error")
-            return
-
-        # Buscar el archivo LISTADO en varias ubicaciones típicas
-        candidatos = [
-            BASE_DIR / "LISTADO_COMUNIDADES.xlsx",
-            BASE_DIR / "data_fuente" / "LISTADO_COMUNIDADES.xlsx",
-            BASE_DIR / "config" / "LISTADO_COMUNIDADES.xlsx",
-            Path(__file__).parent / "LISTADO_COMUNIDADES.xlsx",
-        ]
-        ruta_listado = next((p for p in candidatos if p.exists()), None)
-
-        if ruta_listado is None:
-            self.log("❌ Falta el archivo LISTADO_COMUNIDADES.xlsx", "error")
-            self.log("   👉 Copia tu listado de comunidades (Excel) en la carpeta del programa:", "aviso")
-            self.log(f"      {BASE_DIR}", "aviso")
-            self.log("      y renómbralo a LISTADO_COMUNIDADES.xlsx. Después vuelve a pulsar este botón.", "aviso")
-            return
-
-        self.log(f"📄 Leyendo: {ruta_listado.name}", "info")
-
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(str(ruta_listado), read_only=True, data_only=True)
-            ws = wb.active
-
-            # Detectar cabecera (fila 1)
-            cabecera = [str(c.value).strip().lower() if c.value else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
-
-            # Mapear columnas por nombre o por posición por defecto
-            col_codigo = next((i for i, h in enumerate(cabecera) if "num" in h or "codigo" in h or "empresa" in h), 0)
-            col_nombre = next((i for i, h in enumerate(cabecera) if "raz" in h or "nombre" in h or "social" in h), 1)
-            col_cif    = next((i for i, h in enumerate(cabecera) if "nif" in h or "cif" in h), 2)
-
-            gbd = MOD["gestor_bd"]
-            con = gbd.conectar(str(RUTA_BD))
-
-            nuevas = 0
-            ya_existentes = 0
-            errores = 0
-
-            for fila in ws.iter_rows(min_row=2, values_only=True):
-                if not fila or fila[col_codigo] is None:
-                    continue
-
-                codigo_raw = str(fila[col_codigo]).strip()
-                nombre_raw = str(fila[col_nombre]).strip() if fila[col_nombre] else f"COMUNIDAD {codigo_raw}"
-                cif_raw    = str(fila[col_cif]).strip()    if len(fila) > col_cif and fila[col_cif] else None
-
-                if not codigo_raw or codigo_raw.lower() in ("none", ""):
-                    continue
-
-                # Comprobar si ya existe
-                existe = con.execute(
-                    "SELECT id_comunidad FROM comunidades WHERE codigo=?", (codigo_raw,)
-                ).fetchone()
-
-                if existe:
-                    ya_existentes += 1
-                    # Actualizar CIF si faltaba
-                    if cif_raw:
-                        con.execute(
-                            "UPDATE comunidades SET cif=? WHERE codigo=? AND (cif IS NULL OR cif='')",
-                            (cif_raw, codigo_raw)
-                        )
-                    # Asegurar que tiene Excel aunque ya existiera en la BD
-                    self._crear_excel_si_no_existe(codigo_raw, nombre_raw)
-                    continue
-
-                try:
-                    gbd.obtener_o_crear_comunidad(con, codigo_raw, nombre_raw, cif=cif_raw)
-                    self.log(f"  ➕ {codigo_raw} — {nombre_raw[:50]}", "ok")
-                    nuevas += 1
-                    # Crear Excel maestro si no existe
-                    self._crear_excel_si_no_existe(codigo_raw, nombre_raw)
-                except Exception as e:
-                    self.log(f"  ❌ {codigo_raw}: {e}", "error")
-                    errores += 1
-
-            con.commit()
-            con.close()
-            wb.close()
-
-            self.log(
-                f"\n  ✅ Nuevas: {nuevas}  |  Ya existían: {ya_existentes}  |  Errores: {errores}",
-                "ok" if errores == 0 else "aviso"
-            )
-            if nuevas > 0:
-                self.after(0, self._cargar_comunidades)
-
-        except Exception as e:
-            self.log(f"❌ Error leyendo LISTADO: {e}", "error")
-
-    def _importar_excel_impl(self):
-        """
-        Lee las facturas del periodo activo desde el Excel Maestro
-        e inserta las que falten en la BD. Útil para periodos históricos
-        cuya información ya estaba en el Excel pero no fue importada por PDF.
-        """
-        if not self._validar_seleccion():
-            return
-        if not MOD.get("importar_excel_maestro"):
-            self.log("❌ Módulo importar_excel_maestro no disponible", "error")
-            return
-
-        self._estado("Importando desde Excel Maestro…", procesando=True)
-        self.log("━━━ IMPORTAR DESDE EXCEL MAESTRO ━━━", "titulo")
-
-        # Buscar el Excel de esta comunidad
-        codigo = self.comunidad_actual.get().split(" — ")[0]
-        nombre_periodo = self.periodo_actual.get()
-        posibles = list(RUTA_EXCELS.glob(f"*{codigo}*.xlsx"))
-        posibles = [p for p in posibles if "bak" not in p.name.lower()
-                    and "~" not in p.name
-                    and "PLANTILLA" not in p.name.upper()]
-
-        if not posibles:
-            self.log(f"❌ La comunidad {codigo} no tiene Excel Maestro todavía", "error")
-            self.log("   👉 Este botón importa datos DESDE un Excel ya existente.", "aviso")
-            self.log("      Si lo que quieres es crearlo, pulsa «Regenerar Excel»", "aviso")
-            self.log("      (lo genera desde la base de datos) y no hace falta importar nada.", "aviso")
-            return
-
-        ruta_excel = str(posibles[0])
-        self.log(f"📊 Leyendo: {Path(ruta_excel).name}", "info")
-        self.log(f"📅 Periodo: {nombre_periodo}", "info")
-
-        try:
-            resultado = MOD["importar_excel_maestro"].importar_excel_a_bd(
-                ruta_excel    = ruta_excel,
-                ruta_bd       = str(RUTA_BD),
-                id_comunidad  = self.id_comunidad,
-                id_periodo    = self.id_periodo,
-                nombre_año    = nombre_periodo,
-                verbose       = False,
-            )
-        except Exception as e:
-            self.log(f"❌ Error inesperado: {e}", "error")
-            return
-
-        if resultado.get("ok") or resultado.get("facturas_importadas", 0) > 0:
-            fi = resultado.get("facturas_importadas", 0)
-            fd = resultado.get("duplicadas", 0)
-            self.log(f"  ✅ {fi} factura(s) importadas, {fd} ya existían", "ok")
-            for hoja, det in resultado.get("detalle_por_hoja", {}).items():
-                n = det.get("importadas", 0)
-                d = det.get("duplicadas", 0)
-                e = det.get("errores", 0)
-                if n or d or e:
-                    self.log(f"     {hoja:<20} {n:>3} nuevas, {d:>3} dup, {e:>3} err",
-                             "ok" if e == 0 else "aviso")
-            for err in resultado.get("errores", [])[:5]:
-                self.log(f"  ⚠️  {err}", "aviso")
-            if fi > 0:
-                self.log(
-                    "\n  ℹ️  Facturas cargadas. Ejecuta ahora:\n"
-                    "      1. Calcular Reparto  →  para calcular cuotas\n"
-                    "      2. Generar Cartas    →  para crear los documentos",
-                    "info"
-                )
-                self.after(0, self._actualizar_banner)
-        else:
-            err = resultado.get("error", "Sin detalles")
-            self.log(f"  ❌ {err}", "error")
-            for e in resultado.get("errores", [])[:5]:
-                self.log(f"     {e}", "aviso")
-
-    def _todo_en_uno_impl(self):
-        """
-        Ejecuta el flujo completo con el pipeline headless (el mismo código
-        que el modo desatendido por línea de comandos):
-          ingesta entrada/ → BD → reparto → Excel regenerado → cartas.
-        """
-        try:
-            import pipeline
-        except ImportError as e:
-            self.log(f"❌ No se pudo cargar pipeline.py: {e}", "error")
-            return
-
-        self._estado("Procesando todo…", procesando=True)
-        codigo = None
-        try:
-            codigo = self.comunidad_actual.get().split(" — ")[0].strip() or None
-        except Exception:
-            pass
-
-        resultado = pipeline.procesar_todo(
-            codigo_comunidad=codigo,
-            hacer_reparto=True,
-            hacer_cartas=True,
-            log_callback=self.log,
-        )
-
-        if resultado.get("ok"):
-            self.log("\n✅ Proceso completo finalizado", "ok")
-        else:
-            self.log("\n⚠️ Proceso finalizado con incidencias — revisa el log", "aviso")
 
     # -----------------------------------------------------------------------
     # GESTIÓN DE EXCELS POR COMUNIDAD
@@ -2652,7 +1572,6 @@ class AppGestionFincas(ctk.CTk):
         for btn in self.botones.values():
             btn.configure(state="disabled")
         for selector in (getattr(self, "cb_comunidad", None),
-                         getattr(self, "cb_periodo", None),
                          getattr(self, "cb_expediente", None)):
             if selector is not None:
                 selector.configure(state="disabled")
@@ -2661,14 +1580,10 @@ class AppGestionFincas(ctk.CTk):
         for btn in self.botones.values():
             btn.configure(state="normal")
         for selector in (getattr(self, "cb_comunidad", None),
-                         getattr(self, "cb_periodo", None),
                          getattr(self, "cb_expediente", None)):
             if selector is not None:
                 selector.configure(state="normal")
 
-    def _abrir_entrada(self):
-        os.startfile(str(RUTA_ENTRADA)) if sys.platform == "win32" else \
-            os.system(f"xdg-open '{RUTA_ENTRADA}'")
 
     def _abrir_salidas(self):
         ruta = RUTA_CARTAS
@@ -2722,446 +1637,7 @@ class AppGestionFincas(ctk.CTk):
         except tk.TclError:
             pass
 
-    def _dialogo_seleccionar_periodo_inicio(self):
-        """
-        Diálogo que aparece al arrancar el programa.
-        Permite elegir rango de fechas exacto (día/mes/año) para el periodo de trabajo.
-        Si ya hay un periodo seleccionado para la comunidad activa, lo precarga.
-        """
-        if not MOD.get("gestor_bd") or not RUTA_BD.exists():
-            return  # Sin BD no podemos hacer nada útil
 
-        dialogo = self._preparar_dialogo("Seleccionar Periodo de Trabajo", 580, 520)
-
-        MESES = ["Ene","Feb","Mar","Abr","May","Jun",
-                 "Jul","Ago","Sep","Oct","Nov","Dic"]
-
-        # ── Cabecera ─────────────────────────────────────────────────────────
-        ctk.CTkLabel(dialogo, text="SELECCIONAR PERIODO DE TRABAJO",
-                     font=UIM.fuente(13, "bold"), fg_color=C["primario"],
-                     text_color="#FFFFFF", corner_radius=0, height=42
-                     ).pack(fill="x")
-
-        ctk.CTkLabel(dialogo,
-                     text="Define el rango exacto del periodo que quieres gestionar.\n"
-                          "Las facturas y lecturas se filtrarán por estos días exactos.\n"
-                          "El consumo se calculará proporcionalmente al día.",
-                     font=UIM.fuente(11), text_color=C["texto_sec"],
-                     justify="center").pack(pady=(12, 4))
-
-        # ── Comunidad ────────────────────────────────────────────────────────
-        frm_com = ctk.CTkFrame(dialogo, fg_color="transparent")
-        frm_com.pack(fill="x", padx=24, pady=4)
-        ctk.CTkLabel(frm_com, text="Comunidad:", font=UIM.fuente(12),
-                     text_color=C["texto"], width=140,
-                     anchor="w").pack(side="left")
-
-        var_comunidad = tk.StringVar(value=self.comunidad_actual.get())
-        opciones_com  = list(getattr(self, "_ids_comunidad", {}).keys()) or [""]
-        cb_com = UIM.ComboModerno(frm_com, variable=var_comunidad,
-                                  values=opciones_com, width=340, height=34)
-        cb_com.pack(side="left")
-
-        # ── Periodos existentes ───────────────────────────────────────────────
-        frm_per = ctk.CTkFrame(dialogo, fg_color="transparent")
-        frm_per.pack(fill="x", padx=24, pady=4)
-        ctk.CTkLabel(frm_per, text="Periodo existente:", font=UIM.fuente(12),
-                     text_color=C["texto"], width=140,
-                     anchor="w").pack(side="left")
-        var_per_existente = tk.StringVar(value="— Nuevo periodo —")
-        cb_per_existente  = UIM.ComboModerno(frm_per, variable=var_per_existente,
-                                             values=["— Nuevo periodo —"],
-                                             width=260, height=34)
-        cb_per_existente.pack(side="left", padx=(0, 8))
-        ctk.CTkLabel(frm_per, text="(o define uno nuevo abajo)",
-                     font=UIM.fuente(10),
-                     text_color=C["texto_sec"]).pack(side="left")
-
-        # Actualizar lista de periodos al cambiar comunidad
-        _periodos_cache: dict[str, dict] = {}
-
-        def _actualizar_periodos(*_):
-            sel_com = var_comunidad.get()
-            id_com  = getattr(self, "_ids_comunidad", {}).get(sel_com)
-            if not id_com:
-                return
-            try:
-                con = MOD["gestor_bd"].conectar(str(RUTA_BD))
-                rows = con.execute(
-                    "SELECT id_periodo, nombre, fecha_inicio, fecha_fin FROM periodos "
-                    "WHERE id_comunidad=? ORDER BY fecha_inicio DESC",
-                    (id_com,)
-                ).fetchall()
-                con.close()
-                _periodos_cache.clear()
-                opts = ["— Nuevo periodo —"]
-                for r in rows:
-                    fi = r["fecha_inicio"] or ""
-                    ff = r["fecha_fin"]    or "abierto"
-                    etiq = f"{r['nombre']}  ({fi} → {ff})"
-                    opts.append(etiq)
-                    _periodos_cache[etiq] = {
-                        "id":    r["id_periodo"],
-                        "nombre": r["nombre"],
-                        "inicio": r["fecha_inicio"] or "",
-                        "fin":    r["fecha_fin"]    or "",
-                    }
-                cb_per_existente.configure(values=opts)
-                var_per_existente.set(opts[1] if len(opts) > 1 else opts[0])
-                _precargar_desde_existente()
-            except Exception:
-                pass
-
-        var_comunidad.trace_add("write", _actualizar_periodos)
-
-        # ── Separador ────────────────────────────────────────────────────────
-        ctk.CTkFrame(dialogo, fg_color=C["borde"], height=1).pack(
-            fill="x", padx=16, pady=8)
-
-        def _crear_selector_fecha(parent, label_text: str,
-                                   dia_def: int, mes_def: int, anio_def: int):
-            frm = ctk.CTkFrame(parent, fg_color="transparent")
-            frm.pack(fill="x", padx=24, pady=5)
-            ctk.CTkLabel(frm, text=label_text, font=UIM.fuente(11, "bold"),
-                         text_color=C["primario"], width=190,
-                         anchor="w").pack(side="left")
-            var_dia  = tk.StringVar(value=str(dia_def).zfill(2))
-            var_mes  = tk.StringVar(value=MESES[mes_def - 1])
-            var_anio = tk.StringVar(value=str(anio_def))
-            frm_sel  = ctk.CTkFrame(frm, fg_color="transparent")
-            frm_sel.pack(side="left")
-            estilo = dict(state="readonly", height=30, font=UIM.fuente(12),
-                          dropdown_font=UIM.fuente(12),
-                          border_color=C["borde"], button_color=C["primario"],
-                          button_hover_color=C["primario_hover"])
-            anio_act = datetime.now().year
-            ctk.CTkComboBox(frm_sel, variable=var_dia,
-                            values=[str(d).zfill(2) for d in range(1, 32)],
-                            width=66, **estilo).pack(side="left", padx=(0, 4))
-            ctk.CTkComboBox(frm_sel, variable=var_mes,
-                            values=MESES, width=74,
-                            **estilo).pack(side="left", padx=(0, 4))
-            ctk.CTkComboBox(frm_sel, variable=var_anio,
-                            values=[str(a) for a in range(2015, anio_act + 3)],
-                            width=82, **estilo).pack(side="left")
-            return var_dia, var_mes, var_anio
-
-        def _vars_a_fecha(vd, vm, va) -> str:
-            mes_num = MESES.index(vm.get()) + 1
-            return f"{va.get()}-{mes_num:02d}-{vd.get()}"
-
-        now       = datetime.now()
-        anio_ini  = now.year - 1 if now.month < 9 else now.year
-
-        ctk.CTkLabel(dialogo, text="Fecha de INICIO del periodo:",
-                     font=UIM.fuente(11), text_color=C["texto_sec"],
-                     anchor="w").pack(anchor="w", padx=24)
-        vd_ini, vm_ini, va_ini = _crear_selector_fecha(
-            dialogo, "  Día  /  Mes  /  Año:", 1, 9, anio_ini)
-
-        ctk.CTkFrame(dialogo, fg_color=C["borde"], height=1).pack(
-            fill="x", padx=16, pady=4)
-        ctk.CTkLabel(dialogo, text="Fecha de FIN del periodo:",
-                     font=UIM.fuente(11), text_color=C["texto_sec"],
-                     anchor="w").pack(anchor="w", padx=24)
-        vd_fin, vm_fin, va_fin = _crear_selector_fecha(
-            dialogo, "  Día  /  Mes  /  Año:", 31, 8, anio_ini + 1)
-
-        # ── Nombre y resumen ─────────────────────────────────────────────────
-        frm_nom = ctk.CTkFrame(dialogo, fg_color="transparent")
-        frm_nom.pack(fill="x", padx=24, pady=(8, 0))
-        ctk.CTkLabel(frm_nom, text="Nombre:", font=UIM.fuente(12),
-                     text_color=C["texto"], width=140,
-                     anchor="w").pack(side="left")
-        var_nombre = tk.StringVar(value=f"{anio_ini}-{anio_ini+1}")
-        ctk.CTkEntry(frm_nom, textvariable=var_nombre,
-                     font=UIM.fuente(12), width=150, height=32,
-                     border_color=C["borde"]).pack(side="left", padx=(0, 12))
-
-        lbl_dur = ctk.CTkLabel(frm_nom, text="", font=UIM.fuente(11),
-                               text_color=C["primario"])
-        lbl_dur.pack(side="left")
-
-        def _actualizar_dur(*_):
-            try:
-                from datetime import date as _d
-                ini = _d.fromisoformat(_vars_a_fecha(vd_ini, vm_ini, va_ini))
-                fin = _d.fromisoformat(_vars_a_fecha(vd_fin, vm_fin, va_fin))
-                dias = (fin - ini).days
-                meses = round(dias / 30.44, 1)
-                lbl_dur.configure(
-                    text=f"→ {dias} días ({meses} meses)",
-                    text_color=C["exito"] if dias > 0 else C["alerta"]
-                )
-            except Exception:
-                lbl_dur.configure(text="")
-
-        for v in (vd_ini, vm_ini, va_ini, vd_fin, vm_fin, va_fin):
-            v.trace_add("write", _actualizar_dur)
-        _actualizar_dur()
-
-        def _precargar_desde_existente(*_):
-            """Rellena los selectores con las fechas del periodo seleccionado."""
-            etiq = var_per_existente.get()
-            info = _periodos_cache.get(etiq)
-            if not info:
-                return
-            var_nombre.set(info["nombre"])
-            for fecha_str, vd, vm, va in [
-                (info["inicio"], vd_ini, vm_ini, va_ini),
-                (info["fin"],    vd_fin, vm_fin, va_fin),
-            ]:
-                if not fecha_str or len(fecha_str) < 10:
-                    continue
-                try:
-                    partes = fecha_str[:10].split("-")
-                    va.set(partes[0])
-                    vm.set(MESES[int(partes[1]) - 1])
-                    vd.set(partes[2].zfill(2))
-                except Exception:
-                    pass
-
-        var_per_existente.trace_add("write", _precargar_desde_existente)
-
-        # Cargar periodos de la comunidad actual al abrir
-        _actualizar_periodos()
-
-        # ── Botones ───────────────────────────────────────────────────────────
-        frm_bots = ctk.CTkFrame(dialogo, fg_color="transparent")
-        frm_bots.pack(pady=14)
-
-        def _aplicar():
-            sel_com = var_comunidad.get()
-            id_com  = getattr(self, "_ids_comunidad", {}).get(sel_com)
-            if not id_com:
-                messagebox.showwarning("Sin comunidad", "Selecciona una comunidad.")
-                return
-            nombre = var_nombre.get().strip()
-            if not nombre:
-                messagebox.showwarning("Sin nombre", "Escribe un nombre para el periodo.")
-                return
-            try:
-                from datetime import date as _d
-                f_ini = _vars_a_fecha(vd_ini, vm_ini, va_ini)
-                f_fin = _vars_a_fecha(vd_fin, vm_fin, va_fin)
-                if _d.fromisoformat(f_fin) <= _d.fromisoformat(f_ini):
-                    messagebox.showerror("Fechas inválidas",
-                                         "La fecha de fin debe ser posterior al inicio.")
-                    return
-
-                con = MOD["gestor_bd"].conectar(str(RUTA_BD))
-                # Cambiar comunidad si hace falta
-                if sel_com != self.comunidad_actual.get():
-                    self.comunidad_actual.set(sel_com)
-                    self.id_comunidad = id_com
-                    self._on_comunidad_seleccionada()
-
-                id_per = MOD["gestor_bd"].obtener_o_crear_periodo(
-                    con, id_com, nombre, f_ini)
-                con.execute(
-                    "UPDATE periodos SET fecha_fin=?, fecha_inicio=?, estado='abierto' "
-                    "WHERE id_periodo=?",
-                    (f_fin, f_ini, id_per)
-                )
-                con.commit()
-                con.close()
-
-                dias = (_d.fromisoformat(f_fin) - _d.fromisoformat(f_ini)).days
-                self.log(
-                    f"📅 Periodo activo: {nombre}  |  {f_ini} → {f_fin}  ({dias} días)",
-                    "titulo"
-                )
-                self._on_comunidad_seleccionada()
-                self.cb_periodo.set(nombre)
-                self._on_periodo_seleccionado()
-                dialogo.destroy()
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
-
-        ctk.CTkButton(frm_bots, text="✅  Trabajar con este periodo",
-                      command=_aplicar,
-                      height=38, corner_radius=10,
-                      font=UIM.fuente(13, "bold"),
-                      fg_color=C["primario"],
-                      hover_color=C["primario_hover"]).pack(side="left", padx=8)
-
-        ctk.CTkButton(frm_bots, text="Omitir",
-                      command=dialogo.destroy,
-                      width=80, height=38, corner_radius=10,
-                      font=UIM.fuente(12),
-                      fg_color="transparent",
-                      hover_color=C["acento_suave"],
-                      text_color=C["texto_sec"]).pack(side="left")
-
-    def _nuevo_periodo(self):
-        """
-        Diálogo para crear o seleccionar un periodo con fechas exactas (día/mes/año).
-        Soporta periodos de cualquier duración — 8 meses, 10 meses, año completo, etc.
-        """
-        dialogo = self._preparar_dialogo("Definir Periodo de Regularización", 520, 440)
-
-        # ── Cabecera ─────────────────────────────────────────────────────────
-        ctk.CTkLabel(dialogo, text="NUEVO PERIODO",
-                     font=UIM.fuente(13, "bold"), fg_color=C["primario"],
-                     text_color="#FFFFFF", height=38).pack(fill="x")
-
-        ctk.CTkLabel(dialogo,
-                     text="Define el rango exacto. Las facturas y lecturas se filtrarán\n"
-                          "por estos días, calculando consumo proporcional al día.",
-                     font=UIM.fuente(10), text_color=C["texto_sec"],
-                     justify="center").pack(pady=(12, 6))
-
-        # ── Nombre ───────────────────────────────────────────────────────────
-        frm_nombre = ctk.CTkFrame(dialogo, fg_color="transparent")
-        frm_nombre.pack(fill="x", padx=24, pady=4)
-        ctk.CTkLabel(frm_nombre, text="Nombre del periodo:", font=UIM.fuente(12),
-                     text_color=C["texto"], width=170,
-                     anchor="w").pack(side="left")
-        ent_nombre = ctk.CTkEntry(frm_nombre, font=UIM.fuente(12),
-                                  width=150, height=32,
-                                  border_color=C["borde"])
-        ent_nombre.insert(0, "2024-2025")
-        ent_nombre.pack(side="left")
-
-        # ── Función auxiliar para crear un selector de fecha ─────────────────
-        MESES = ["Ene","Feb","Mar","Abr","May","Jun",
-                 "Jul","Ago","Sep","Oct","Nov","Dic"]
-
-        def _crear_selector_fecha(parent, label_text: str, dia_def: int,
-                                   mes_def: int, anio_def: int):
-            """Crea una fila con selector de día, mes y año. Devuelve variables."""
-            frm = ctk.CTkFrame(parent, fg_color="transparent")
-            frm.pack(fill="x", padx=24, pady=6)
-
-            ctk.CTkLabel(frm, text=label_text, font=UIM.fuente(12),
-                         text_color=C["texto"], width=170,
-                         anchor="w").pack(side="left")
-
-            var_dia  = tk.StringVar(value=str(dia_def).zfill(2))
-            var_mes  = tk.StringVar(value=MESES[mes_def - 1])
-            var_anio = tk.StringVar(value=str(anio_def))
-
-            frm_sel = ctk.CTkFrame(frm, fg_color="transparent")
-            frm_sel.pack(side="left")
-
-            estilo = dict(state="readonly", height=30, font=UIM.fuente(12),
-                          dropdown_font=UIM.fuente(12),
-                          border_color=C["borde"], button_color=C["primario"],
-                          button_hover_color=C["primario_hover"])
-
-            # Día
-            dias = [str(d).zfill(2) for d in range(1, 32)]
-            ctk.CTkComboBox(frm_sel, variable=var_dia, values=dias,
-                            width=66, **estilo).pack(side="left", padx=(0, 4))
-
-            # Mes
-            ctk.CTkComboBox(frm_sel, variable=var_mes, values=MESES,
-                            width=74, **estilo).pack(side="left", padx=(0, 4))
-
-            # Año
-            anio_actual = datetime.now().year
-            anios = [str(a) for a in range(2015, anio_actual + 3)]
-            ctk.CTkComboBox(frm_sel, variable=var_anio, values=anios,
-                            width=82, **estilo).pack(side="left")
-
-            return var_dia, var_mes, var_anio
-
-        def _vars_a_fecha(var_dia, var_mes, var_anio) -> str:
-            mes_num = MESES.index(var_mes.get()) + 1
-            return f"{var_anio.get()}-{mes_num:02d}-{var_dia.get()}"
-
-        now = datetime.now()
-        anio_ini = now.year - 1 if now.month < 9 else now.year
-
-        # ── Separador ────────────────────────────────────────────────────────
-        ctk.CTkFrame(dialogo, fg_color=C["borde"], height=1).pack(
-            fill="x", padx=16, pady=4)
-        ctk.CTkLabel(dialogo, text="Fecha de INICIO (lectura inicial del periodo):",
-                     font=UIM.fuente(11, "bold"), text_color=C["primario"],
-                     anchor="w").pack(anchor="w", padx=24)
-
-        vd_ini, vm_ini, va_ini = _crear_selector_fecha(
-            dialogo, "  Día / Mes / Año:", 1, 9, anio_ini)
-
-        ctk.CTkFrame(dialogo, fg_color=C["borde"], height=1).pack(
-            fill="x", padx=16, pady=4)
-        ctk.CTkLabel(dialogo, text="Fecha de FIN (lectura final del periodo):",
-                     font=UIM.fuente(11, "bold"), text_color=C["primario"],
-                     anchor="w").pack(anchor="w", padx=24)
-
-        vd_fin, vm_fin, va_fin = _crear_selector_fecha(
-            dialogo, "  Día / Mes / Año:", 31, 8, anio_ini + 1)
-
-        # ── Etiqueta de resumen ───────────────────────────────────────────────
-        lbl_resumen = ctk.CTkLabel(dialogo, text="", font=UIM.fuente(11),
-                                   text_color=C["primario"])
-        lbl_resumen.pack(pady=(4, 0))
-
-        def _actualizar_resumen(*_):
-            try:
-                f_ini = _vars_a_fecha(vd_ini, vm_ini, va_ini)
-                f_fin = _vars_a_fecha(vd_fin, vm_fin, va_fin)
-                from datetime import date as _d
-                ini = _d.fromisoformat(f_ini)
-                fin = _d.fromisoformat(f_fin)
-                dias = (fin - ini).days
-                meses = round(dias / 30.44, 1)
-                lbl_resumen.configure(
-                    text=f"Duración: {dias} días  ≈  {meses} meses",
-                    text_color=C["exito"] if dias > 0 else C["alerta"]
-                )
-            except Exception:
-                lbl_resumen.configure(text="")
-
-        for v in (vd_ini, vm_ini, va_ini, vd_fin, vm_fin, va_fin):
-            v.trace_add("write", _actualizar_resumen)
-        _actualizar_resumen()
-
-        # ── Botón Crear ───────────────────────────────────────────────────────
-        def _crear():
-            nombre = ent_nombre.get().strip()
-            if not nombre:
-                messagebox.showwarning("Faltan datos", "Escribe un nombre para el periodo.")
-                return
-            if not self.id_comunidad:
-                messagebox.showwarning("Sin comunidad", "Selecciona una comunidad primero.")
-                return
-            try:
-                f_ini = _vars_a_fecha(vd_ini, vm_ini, va_ini)
-                f_fin = _vars_a_fecha(vd_fin, vm_fin, va_fin)
-                from datetime import date as _d
-                if _d.fromisoformat(f_fin) <= _d.fromisoformat(f_ini):
-                    messagebox.showerror("Fechas inválidas",
-                                         "La fecha de fin debe ser posterior al inicio.")
-                    return
-                con = MOD["gestor_bd"].conectar(str(RUTA_BD))
-                id_per = MOD["gestor_bd"].obtener_o_crear_periodo(
-                    con, self.id_comunidad, nombre, f_ini
-                )
-                con.execute(
-                    "UPDATE periodos SET fecha_fin=?, estado='abierto' WHERE id_periodo=?",
-                    (f_fin, id_per)
-                )
-                con.commit()
-                con.close()
-                dias = (_d.fromisoformat(f_fin) - _d.fromisoformat(f_ini)).days
-                self.log(
-                    f"✅ Periodo '{nombre}' creado: {f_ini} → {f_fin} ({dias} días)",
-                    "ok"
-                )
-                self._on_comunidad_seleccionada()
-                self.cb_periodo.set(nombre)
-                self._on_periodo_seleccionado()
-                dialogo.destroy()
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
-
-        ctk.CTkButton(dialogo, text="✅  Crear Periodo",
-                      command=_crear,
-                      height=38, corner_radius=10,
-                      font=UIM.fuente(13, "bold"),
-                      fg_color=C["primario"],
-                      hover_color=C["primario_hover"]).pack(pady=14)
 
     def _nueva_comunidad(self):
         """Ofrece el registro rápido existente o el alta guiada desde fuentes."""
@@ -3353,13 +1829,10 @@ class AppGestionFincas(ctk.CTk):
                 # Only discard live selections after a verified replacement exists.
                 self.id_comunidad = self.id_periodo = None
                 self.comunidad_actual.set("")
-                self.periodo_actual.set("")
-                self._ids_comunidad, self._ids_periodo = {}, {}
+                self._ids_comunidad = {}
                 self.cb_comunidad.configure(values=[])
-                self.cb_periodo.configure(values=[])
                 self._limpiar_contexto_expediente()
                 self._cargar_comunidades()
-                self._actualizar_banner()
                 ui = MOD.get("expedient_ui")
                 if ui:
                     self._actualizar_workspace(ui.guided_workspace_state(

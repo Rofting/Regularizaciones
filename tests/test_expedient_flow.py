@@ -1272,5 +1272,75 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertEqual(self.community_id, selected_case.community_id)
 
 
+
+class SourceReevaluationTest(unittest.TestCase):
+    """Repetir el análisis con el Excel ya generado reabre sólo si cambia algo."""
+
+    setUp = ExpedientFlowTest.setUp
+    tearDown = ExpedientFlowTest.tearDown
+
+    def _advanced_case_with_invoice(self, status):
+        case_ingestion.add_analysed_document_to_case(
+            self.connection, self.case.id_case, source_path=self.source_path,
+            archive_root=self.archive_root,
+            analysis=SourceAnalysis.invoice({
+                "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31", "importe_total": "10.00",
+            }, confidence="medium"),
+        )
+        self.connection.execute(
+            "UPDATE regularization_cases SET estado=? WHERE id_case=?", (status, self.case.id_case),
+        )
+        self.connection.commit()
+
+    def _status(self):
+        return self.connection.execute(
+            "SELECT estado FROM regularization_cases WHERE id_case=?", (self.case.id_case,),
+        ).fetchone()[0]
+
+    def test_changed_sources_return_a_calculated_case_to_review(self):
+        self._advanced_case_with_invoice("deliveries_generated")
+        result = case_ingestion.reevaluate_case_sources(
+            self.connection, self.case.id_case, archive_root=self.archive_root,
+            analyser=lambda _path: SourceAnalysis.invoice({
+                "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31", "importe_total": "99.00",
+            }, confidence="medium"),
+        )
+        self.assertTrue(result.changed)
+        self.assertTrue(result.reopened)
+        self.assertEqual("deliveries_generated", result.previous_status)
+        self.assertEqual("under_review", self._status())
+
+    def test_unchanged_sources_keep_the_generated_outputs_valid(self):
+        self._advanced_case_with_invoice("calculated")
+        analysis = SourceAnalysis.invoice({
+            "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31", "importe_total": "10.00",
+        }, confidence="medium")
+        case_ingestion.reanalyze_case_documents(
+            self.connection, self.case.id_case, archive_root=self.archive_root,
+            analyser=lambda _path: analysis,
+        )
+        self.connection.execute(
+            "UPDATE regularization_cases SET estado='calculated' WHERE id_case=?", (self.case.id_case,),
+        )
+        result = case_ingestion.reevaluate_case_sources(
+            self.connection, self.case.id_case, archive_root=self.archive_root,
+            analyser=lambda _path: analysis,
+        )
+        self.assertFalse(result.changed)
+        self.assertFalse(result.reopened)
+        self.assertEqual("calculated", self._status())
+
+    def test_forced_review_reopens_without_changes(self):
+        self._advanced_case_with_invoice("reconciled")
+        analysis = SourceAnalysis.invoice({
+            "fecha_inicio": "2026-01-01", "fecha_fin": "2026-01-31", "importe_total": "10.00",
+        }, confidence="medium")
+        result = case_ingestion.reevaluate_case_sources(
+            self.connection, self.case.id_case, archive_root=self.archive_root,
+            analyser=lambda _path: analysis, force_review=True,
+        )
+        self.assertTrue(result.reopened)
+        self.assertEqual("under_review", self._status())
+
 if __name__ == "__main__":
     unittest.main()

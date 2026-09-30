@@ -250,21 +250,59 @@ def _group_letter_concepts(concepts: list[dict[str, Any]]) -> list[dict[str, Any
     return ordinary + extras
 
 
+_GRAPH_SERIES = (
+    # concept_key, tipo de lectura, unidad, título en la carta
+    ("acs_variable", "ACS", "m³", "Agua caliente sanitaria"),
+    ("heating_variable", "CALEFACCION", "kWh", "Calefacción"),
+)
+
+
 def _consumption_graphs(
     connection: sqlite3.Connection,
     case: sqlite3.Row,
     owners: list[dict[str, Any]],
 ) -> dict[int, dict[str, Any]]:
-    """Usa consumos efectivos repartidos, nunca diferencias brutas negativas."""
+    """Usa consumos efectivos repartidos, nunca diferencias brutas negativas.
+
+    Devuelve, por propietario, una serie por servicio con consumo (ACS y
+    calefacción). Las claves de primer nivel reproducen la serie principal para
+    los lectores anteriores de este diccionario.
+    """
+    per_series = [
+        (title, _series_graphs(connection, case, owners, key, reading_type, unit))
+        for key, reading_type, unit, title in _GRAPH_SERIES
+    ]
+    graphs: dict[int, dict[str, Any]] = {}
+    for owner in owners:
+        owner_id = int(owner["id_propietario"])
+        series = [
+            {**values[owner_id], "title": title}
+            for title, values in per_series
+            if values[owner_id]["neighbor_consumptions"] or values[owner_id]["history"]
+        ]
+        primary = dict(per_series[0][1][owner_id])
+        primary["series"] = series
+        graphs[owner_id] = primary
+    return graphs
+
+
+def _series_graphs(
+    connection: sqlite3.Connection,
+    case: sqlite3.Row,
+    owners: list[dict[str, Any]],
+    concept_key: str,
+    reading_type: str,
+    unit: str,
+) -> dict[int, dict[str, Any]]:
     current = connection.execute(
         """SELECT r.id_propietario,r.consumption
              FROM owner_concept_results r
              JOIN propietarios p ON p.id_propietario=r.id_propietario
-            WHERE r.id_periodo=? AND r.concept_key='acs_variable'
+            WHERE r.id_periodo=? AND r.concept_key=?
               AND p.id_comunidad=? AND p.activo=1 AND p.tipo_unidad='vivienda'
               AND r.consumption IS NOT NULL AND r.consumption>=0
             ORDER BY r.id_propietario""",
-        (case["id_periodo"], case["id_comunidad"]),
+        (case["id_periodo"], concept_key, case["id_comunidad"]),
     ).fetchall()
     consumption = {
         int(row["id_propietario"]): float(row["consumption"]) for row in current
@@ -276,9 +314,10 @@ def _consumption_graphs(
         """SELECT l.id_propietario,l.fecha_lectura,l.valor_acumulado
            FROM period_readings l JOIN propietarios p ON p.id_propietario=l.id_propietario
            WHERE p.id_comunidad=? AND p.activo=1 AND p.tipo_unidad='vivienda'
-             AND l.id_periodo=? AND l.tipo='ACS' AND l.fecha_lectura IN (?,?)
+             AND l.id_periodo=? AND l.tipo=? AND l.fecha_lectura IN (?,?)
            ORDER BY l.id_propietario,l.fecha_lectura""",
-        (case["id_comunidad"], case["id_periodo"], case["fecha_inicio"], case["fecha_fin"]),
+        (case["id_comunidad"], case["id_periodo"], reading_type,
+         case["fecha_inicio"], case["fecha_fin"]),
     ).fetchall()
     legacy_values: dict[int, dict[str, float]] = {}
     for row in legacy_current:
@@ -300,11 +339,11 @@ def _consumption_graphs(
             """SELECT per.nombre,r.consumption
                FROM owner_concept_results r
                JOIN periodos per ON per.id_periodo=r.id_periodo
-               WHERE r.id_propietario=? AND r.concept_key='acs_variable'
+               WHERE r.id_propietario=? AND r.concept_key=?
                  AND per.id_comunidad=? AND per.id_periodo<>?
                  AND r.consumption IS NOT NULL AND r.consumption>=0
                ORDER BY per.fecha_inicio""",
-            (owner_id, case["id_comunidad"], case["id_periodo"]),
+            (owner_id, concept_key, case["id_comunidad"], case["id_periodo"]),
         ).fetchall()
         history_by_period = {
             row["nombre"]: float(row["consumption"]) for row in historical
@@ -314,14 +353,15 @@ def _consumption_graphs(
                       fin.valor_acumulado AS final_value
                FROM periodos per
                JOIN period_readings ini ON ini.id_periodo=per.id_periodo
-                   AND ini.id_propietario=? AND ini.tipo='ACS'
+                   AND ini.id_propietario=? AND ini.tipo=?
                    AND ini.fecha_lectura=per.fecha_inicio
                JOIN period_readings fin ON fin.id_periodo=per.id_periodo
-                   AND fin.id_propietario=? AND fin.tipo='ACS'
+                   AND fin.id_propietario=? AND fin.tipo=?
                    AND fin.fecha_lectura=per.fecha_fin
                WHERE per.id_comunidad=? AND per.id_periodo<>?
                ORDER BY per.fecha_inicio""",
-            (owner_id, owner_id, case["id_comunidad"], case["id_periodo"]),
+            (owner_id, reading_type, owner_id, reading_type,
+             case["id_comunidad"], case["id_periodo"]),
         ).fetchall()
         for row in legacy_history:
             if row["nombre"] in history_by_period:
@@ -330,12 +370,14 @@ def _consumption_graphs(
             if difference >= 0:
                 history_by_period[row["nombre"]] = difference
         graphs[owner_id] = {
-            "owner_consumption": consumption.get(owner_id, 0.0),
+            # ``None`` distingue «sin lectura» de un consumo real de cero.
+            "owner_consumption": consumption.get(owner_id),
             "neighbor_consumptions": neighbors,
             "history": [
                 (name, value) for name, value in history_by_period.items()
             ],
-            "unit": "m³",
+            "current_label": case["period_name"] if "period_name" in case.keys() else None,
+            "unit": unit,
         }
     return graphs
 
