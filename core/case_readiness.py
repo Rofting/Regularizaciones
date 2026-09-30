@@ -416,16 +416,38 @@ def evaluate_case_readiness(
             "Falta un reparto final completado y conciliado.",
             "calculate_distribution",
         ))
-    elif connection.execute(
-        """SELECT 1 FROM reconciliations
-           WHERE id_periodo=? AND status<>'cuadrado' LIMIT 1""",
-        (case["id_periodo"],),
-    ).fetchone() is not None:
-        blockers.append(ReadinessBlocker(
-            "UNRECONCILED_DISTRIBUTION", "letters",
-            "El reparto contiene conceptos que no cuadran al céntimo.",
-            "calculate_distribution",
-        ))
+    else:
+        if profile is not None:
+            try:
+                current_distribution_hash = calculate_case_input_hash(
+                    connection,
+                    id_case=int(case["id_case"]),
+                    project_root=root,
+                    profile=profile,
+                )
+            except (ExportBlockedError, ValueError) as error:
+                blockers.append(ReadinessBlocker(
+                    "INVALID_DISTRIBUTION_INPUTS", "letters",
+                    f"No se pueden comprobar las entradas del reparto: {error}",
+                    "calculate_distribution",
+                ))
+            else:
+                if distribution["input_sha256"] != current_distribution_hash:
+                    blockers.append(ReadinessBlocker(
+                        "STALE_DISTRIBUTION", "letters",
+                        "Las entradas cambiaron desde el último reparto final.",
+                        "calculate_distribution",
+                    ))
+        if connection.execute(
+            """SELECT 1 FROM reconciliations
+               WHERE id_periodo=? AND status<>'cuadrado' LIMIT 1""",
+            (case["id_periodo"],),
+        ).fetchone() is not None:
+            blockers.append(ReadinessBlocker(
+                "UNRECONCILED_DISTRIBUTION", "letters",
+                "El reparto contiene conceptos que no cuadran al céntimo.",
+                "calculate_distribution",
+            ))
 
     return CaseReadinessReport(int(case["id_case"]), tuple(blockers))
 
