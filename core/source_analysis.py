@@ -482,45 +482,33 @@ def classify_headers(
     return SourceAnalysis.unknown(locator=locator)
 
 
-def _tabular_headers(path: Path) -> tuple[tuple[object, ...], SourceLocator | None]:
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
-            sample = handle.read(4096)
-            handle.seek(0)
-            try:
-                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-            except csv.Error:
-                dialect = csv.excel
-            headers = next(csv.reader(handle, dialect), [])
-        return tuple(headers), None
-    if suffix == ".xlsx":
-        from openpyxl import load_workbook
-        workbook = load_workbook(path, read_only=True, data_only=True)
-        try:
-            sheet = workbook.active
-            headers = tuple(cell.value for cell in next(sheet.iter_rows(max_row=1), ()))
-            return headers, SourceLocator(sheet=sheet.title, cell="A1") if headers else None
-        finally:
-            workbook.close()
-    if suffix == ".xls":
-        import xlrd
-        workbook = xlrd.open_workbook(path)
-        sheet = workbook.sheet_by_index(0)
-        headers = tuple(sheet.row_values(0)) if sheet.nrows else ()
-        return headers, SourceLocator(sheet=sheet.name, cell="A1") if headers else None
-    raise ValueError(f"Formato tabular no compatible: {suffix}")
-
-
 def analyse_tabular(path: Path) -> SourceAnalysis:
-    """Extract explicit rows; incomplete or ambiguous tables remain reviewable."""
+    """Extract explicit rows; incomplete or ambiguous tables remain reviewable.
+
+    Every sheet is tried (active one first): reports often keep the data on a
+    second sheet behind a cover page. The first recognised table wins; when none
+    is, the first sheet's diagnostic is reported.
+    """
     try:
         reference = _reference_workbook_analysis(path)
         if reference is not None:
             return reference
-        rows, sheet = _tabular_rows(path)
+        first_failure: SourceAnalysis | None = None
+        for rows, sheet in _tabular_sheets(path):
+            result = _analyse_rows(rows, sheet)
+            if result.kind != "unknown":
+                return result
+            first_failure = first_failure or result
+        return first_failure or SourceAnalysis.unknown("El archivo no contiene filas.")
+    except (OSError, ValueError, csv.Error, ImportError, TypeError) as error:
+        return SourceAnalysis.unknown(str(error))
+
+
+def _analyse_rows(rows, sheet) -> SourceAnalysis:
+    locator = None
+    try:
         for index, headers in enumerate(rows[:30]):
-            keys = [_normalise_header(value).replace("_", " ") for value in headers]
+            keys = [_header_key(value) for value in headers]
             locator = SourceLocator(sheet=sheet, cell=f"A{index + 1}",
                                     fragment=" | ".join(str(v or "") for v in headers)[:1000])
             from importar_lecturas_xls import reading_columns
@@ -563,21 +551,37 @@ def analyse_tabular(path: Path) -> SourceAnalysis:
                     {"propietarios": _string_value(legacy_owners)}, locator=locator,
                 )
             reading_keys = {
-                "vivienda": ("vivienda", "propiedad", "codigo vivienda"),
-                "tipo": ("tipo", "servicio", "suministro"),
-                "fecha_ant": ("fecha ant", "fecha anterior", "fecha inicio"),
-                "fecha_act": ("fecha act", "fecha actual", "fecha fin"),
-                "val_ant": ("val ant", "lectura anterior", "lectura inicial"),
-                "val_act": ("val act", "lectura actual", "lectura final"),
+                "vivienda": ("vivienda", "propiedad", "codigo vivienda", "inmueble", "piso"),
+                "tipo": ("tipo", "servicio", "suministro", "tipo servicio", "tipo suministro"),
+                "fecha_ant": (
+                    "fecha ant", "fecha anterior", "fecha inicio", "fecha lectura anterior",
+                    "fecha lectura ant", "fecha inicial",
+                ),
+                "fecha_act": (
+                    "fecha act", "fecha actual", "fecha fin", "fecha lectura actual",
+                    "fecha lectura act", "fecha final",
+                ),
+                "val_ant": (
+                    "val ant", "lectura anterior", "lectura inicial", "lect ant",
+                    "lectura ant", "valor anterior",
+                ),
+                "val_act": (
+                    "val act", "lectura actual", "lectura final", "lect act",
+                    "lectura act", "valor actual",
+                ),
             }
             owner_keys = {
                 "codigo_vivienda": ("fdenominacion", "vivienda", "propiedad", "codigo vivienda"),
-                "nombre_propietario": ("nombre", "propietario", "nombre propietario"),
+                "nombre_propietario": (
+                    "nombre", "propietario", "nombre propietario", "titular",
+                    "nombre y apellidos", "apellidos y nombre",
+                ),
                 "coeficiente": (
                     "coeficiente", "participacion", "entero participacion",
-                    "enteros participacion", "enteros de participacion",
+                    "enteros participacion", "enteros de participacion", "coef",
+                    "coeficiente participacion", "coeficiente de participacion",
                 ),
-                "email": ("email", "correo"),
+                "email": ("email", "e mail", "correo", "correo electronico", "mail"),
             }
             reading_columns = _matching_columns(keys, reading_keys)
             owner_columns = _matching_columns(keys, owner_keys)
@@ -619,14 +623,29 @@ def analyse_tabular(path: Path) -> SourceAnalysis:
             "No se ha podido extraer una tabla completa; revisa cabeceras, fechas, servicio y valores.",
             locator=SourceLocator(sheet=sheet, cell="A1", fragment=" | ".join(str(v or "") for v in headers)[:1000]),
         )
-    except (OSError, ValueError, csv.Error, ImportError, TypeError) as error:
-        return SourceAnalysis.unknown(str(error), locator=locals().get("locator"))
+    except (ValueError, TypeError) as error:
+        return SourceAnalysis.unknown(str(error), locator=locator)
+
+
+def _header_key(value: object) -> str:
+    """Comparable header: no accents, units in brackets or punctuation."""
+    text = _normalise_header(value)
+    text = re.sub(r"[\(\[][^)\]]*[)\]]", " ", text)
+    text = re.sub(r"[^a-z0-9%]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _matching_columns(keys, aliases):
     columns = {}
     for field, names in aliases.items():
         matches = [index for index, key in enumerate(keys) if key in names]
+        if not matches:
+            # "Lectura anterior m3" or "Fecha fin periodo" still name the
+            # field; exact headers always take precedence over these.
+            matches = [
+                index for index, key in enumerate(keys)
+                if any(key.startswith(f"{name} ") for name in names)
+            ]
         if len(matches) > 1:
             raise ValueError(f"Cabeceras ambiguas para {field}; confirma qué columna corresponde")
         if matches:
@@ -793,10 +812,20 @@ def _reference_workbook_analysis(path: Path) -> SourceAnalysis | None:
 def _tabular_number(value):
     if value is None or isinstance(value, bool) or str(value).strip() == "":
         raise ValueError("Falta un valor numérico en la tabla")
-    text = str(value).strip()
-    if "," in text:
-        text = text.replace(".", "").replace(",", ".")
-    number = float(text)
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = re.sub(r"(?i)\s*(?:m3|m³|kwh|€|eur|l)\s*$", "", str(value)).strip().replace(" ", "")
+        if "," in text and "." in text:
+            if text.rfind(",") > text.rfind("."):
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "")
+        elif "," in text:
+            text = text.replace(".", "").replace(",", ".")
+        elif re.fullmatch(r"\d{1,3}(?:\.\d{3}){2,}", text):
+            text = text.replace(".", "")
+        number = float(text)
     if not math.isfinite(number) or number < 0:
         raise ValueError("Hay un valor numérico inválido en la tabla")
     return number
@@ -805,44 +834,62 @@ def _tabular_number(value):
 def _tabular_date(value):
     if isinstance(value, (date, datetime)):
         return value.strftime("%Y-%m-%d")
-    for format in ("%Y-%m-%d", "%d/%m/%Y"):
+    text = str(value).strip()
+    for format in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
+                   "%d/%m/%y", "%d-%m-%y", "%d.%m.%y"):
         try:
-            return datetime.strptime(str(value).strip(), format).date().isoformat()
+            return datetime.strptime(text, format).date().isoformat()
         except ValueError:
             pass
     raise ValueError("La fecha de lectura no es inequívoca")
 
 
-def _tabular_rows(path):
-    if path.suffix.lower() == ".csv":
-        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
-            sample = handle.read(4096)
-            handle.seek(0)
+def _sniff_csv(handle):
+    sample = handle.read(4096)
+    handle.seek(0)
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv.Error:
+        return csv.excel
+
+
+def _tabular_sheets(path):
+    """Yield ``(rows, sheet_name)`` for each sheet, the active one first."""
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        for encoding in ("utf-8-sig", "cp1252"):
             try:
-                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-            except csv.Error:
-                dialect = csv.excel
-            return list(csv.reader(handle, dialect)), None
-    if path.suffix.lower() == ".xlsx":
+                with path.open("r", encoding=encoding, newline="") as handle:
+                    yield list(csv.reader(handle, _sniff_csv(handle))), None
+                return
+            except UnicodeDecodeError:
+                continue
+        raise ValueError("No se puede leer la codificación del CSV")
+    elif suffix == ".xlsx":
         from openpyxl import load_workbook
         workbook = load_workbook(path, read_only=True, data_only=True)
         try:
-            sheet = workbook.active
-            return list(sheet.iter_rows(values_only=True)), sheet.title
+            active = workbook.active
+            sheets = [active] + [item for item in workbook.worksheets if item is not active]
+            for sheet in sheets:
+                yield list(sheet.iter_rows(values_only=True)), sheet.title
         finally:
             workbook.close()
-    if path.suffix.lower() == ".xls":
+    elif suffix == ".xls":
         import xlrd
         workbook = xlrd.open_workbook(path)
         try:
-            sheet = workbook.sheet_by_index(0)
-            rows = [[xlrd.xldate.xldate_as_datetime(cell.value, workbook.datemode)
-                     if cell.ctype == xlrd.XL_CELL_DATE else cell.value
-                     for cell in sheet.row(index)] for index in range(sheet.nrows)]
-            return rows, sheet.name
+            order = [workbook.sheet_by_index(0)]
+            order += [workbook.sheet_by_index(i) for i in range(1, workbook.nsheets)]
+            for sheet in order:
+                rows = [[xlrd.xldate.xldate_as_datetime(cell.value, workbook.datemode)
+                         if cell.ctype == xlrd.XL_CELL_DATE else cell.value
+                         for cell in sheet.row(index)] for index in range(sheet.nrows)]
+                yield rows, sheet.name
         finally:
             workbook.release_resources()
-    raise ValueError("Formato tabular no compatible")
+    else:
+        raise ValueError("Formato tabular no compatible")
 
 
 def analyse_source(path: Path, *, community_code: str, pdf_processor=None,

@@ -152,5 +152,52 @@ class ProviderRegistryTest(unittest.TestCase):
         )
 
 
+class ProviderResolutionRobustnessTest(unittest.TestCase):
+    def registry(self, **profiles):
+        return provider_registry_from_payload({"proveedores": profiles})
+
+    def profile(self, **overrides):
+        base = {
+            "aliases": [], "tax_ids": [], "document_types": ["invoice"],
+            "service_family": "MANTENIMIENTO",
+        }
+        base.update(overrides)
+        return base
+
+    def test_alias_is_found_when_the_pdf_glued_the_words_together(self):
+        registry = self.registry(ACME=self.profile(aliases=["Ascensores Acme"]))
+        match = resolve_provider(registry, "FACTURA de ASCENSORESACME S.L.", "f.pdf", "invoice")
+        self.assertEqual("ACME", match.provider_key)
+
+    def test_short_aliases_are_not_matched_inside_other_words(self):
+        registry = self.registry(TU=self.profile(aliases=["Tu Luz"]))
+        self.assertIsNone(resolve_provider(registry, "ESTU LUZ BRILLANTE", "f.pdf", "invoice"))
+
+    def test_tax_id_with_separators_matches_but_not_inside_longer_tokens(self):
+        registry = self.registry(ACME=self.profile(tax_ids=["B50123456"]))
+        self.assertEqual(
+            "ACME", resolve_provider(registry, "CIF: B-50.123.456", "f.pdf", "invoice").provider_key
+        )
+        self.assertIsNone(resolve_provider(registry, "Ref ZB501234567 pago", "f.pdf", "invoice"))
+
+    def test_excluded_signature_vetoes_a_tax_id_match(self):
+        registry = self.registry(
+            ACME=self.profile(tax_ids=["B50123456"], excluded_signatures=["Energia XXI"])
+        )
+        self.assertIsNone(
+            resolve_provider(registry, "Energía XXI CIF B50123456", "f.pdf", "invoice")
+        )
+
+    def test_two_tax_ids_are_disambiguated_by_the_issuer_signature(self):
+        registry = self.registry(
+            ISSUER=self.profile(tax_ids=["B50123456"], aliases=["Comercial Norte"]),
+            DISTRIBUTOR=self.profile(tax_ids=["A28123456"], aliases=["Distribuidora Sur"]),
+        )
+        match = resolve_provider(
+            registry, "Comercial Norte CIF B50123456 distribuidora CIF A28123456", "f.pdf", "invoice"
+        )
+        self.assertEqual("ISSUER", match.provider_key)
+
+
 if __name__ == "__main__":
     unittest.main()

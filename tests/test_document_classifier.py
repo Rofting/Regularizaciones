@@ -87,5 +87,31 @@ class DocumentClassifierTest(unittest.TestCase):
         self.assertEqual("unknown", classify_document("", "scan_001.pdf").kind)
 
 
+class DocumentClassifierPassingMentionsTest(unittest.TestCase):
+    INVOICE = (
+        "FACTURA Nº F-9 Fecha factura 01/04/2026 Base imponible 100,00 IVA 21,00 "
+        "Total 121,00 € Vencimiento 15/04/2026 "
+    )
+
+    def test_invoice_paid_by_direct_debit_stays_an_invoice(self):
+        result = classify_document(self.INVOICE + "x " * 400 + "Forma de pago: adeudo SEPA", "f9.pdf")
+        self.assertEqual("invoice", result.kind)
+
+    def test_invoice_referencing_a_quote_or_delivery_note_stays_an_invoice(self):
+        filler = "x " * 400
+        text = self.INVOICE + filler + "según presupuesto 123 y albarán 45"
+        self.assertEqual("invoice", classify_document(text, "f9.pdf").kind)
+
+    def test_word_abono_alone_does_not_make_a_credit_note(self):
+        result = classify_document(self.INVOICE + "Cuota de abono mensual", "f9.pdf")
+        self.assertEqual("invoice", result.kind)
+        credit = classify_document("FACTURA DE ABONO A-1 IVA Total -121,00", "a1.pdf")
+        self.assertEqual("credit_note", credit.kind)
+
+    def test_header_keyword_still_wins_for_a_real_quote_with_totals(self):
+        text = "PRESUPUESTO P-8 Factura proforma Base imponible 100 IVA 21 Total 121"
+        self.assertEqual("quote", classify_document(text, "p8.pdf").kind)
+
+
 if __name__ == "__main__":
     unittest.main()
