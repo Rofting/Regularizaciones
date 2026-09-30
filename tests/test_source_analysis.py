@@ -1254,5 +1254,69 @@ class SourceAnalysisTest(unittest.TestCase):
         self.assertTrue(result["ok"])
 
 
+class TabularRobustnessTest(unittest.TestCase):
+    def workbook(self, directory, sheets):
+        from openpyxl import Workbook
+        book = Workbook()
+        book.remove(book.active)
+        for title, rows in sheets:
+            sheet = book.create_sheet(title)
+            for row in rows:
+                sheet.append(row)
+        path = Path(directory) / "datos.xlsx"
+        book.save(path)
+        return path
+
+    def test_data_on_a_later_sheet_is_found_behind_a_cover_sheet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.workbook(directory, [
+                ("Portada", [["Informe de la comunidad"]]),
+                ("Datos", [["Vivienda", "Nombre", "Coeficiente (%)"], ["1A", "Ana", "1,5"]]),
+            ])
+            analysis = source_analysis.analyse_tabular(path)
+        self.assertEqual("owners", analysis.kind)
+
+    def test_headers_with_units_and_extra_words_still_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.workbook(directory, [("Lecturas", [
+                ["Vivienda", "Servicio", "Fecha lectura anterior", "Fecha lectura actual",
+                 "Lectura anterior (m3)", "Lectura actual (m3)"],
+                ["1A", "ACS", "01/01/26", "01/02/26", "1.234,5 m3", "1,250.75"],
+            ])])
+            analysis = source_analysis.analyse_tabular(path)
+        self.assertEqual("reading", analysis.kind)
+        rows = json.loads(analysis.candidates["vecinos"])
+        self.assertEqual(
+            ("2026-01-01", 1234.5, 1250.75),
+            (rows[0]["fecha_ant"], rows[0]["val_ant"], rows[0]["val_act"]),
+        )
+
+    def test_exact_header_wins_over_a_longer_header_with_the_same_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.workbook(directory, [("Lecturas", [
+                ["Vivienda", "Tipo", "Tipo contador", "Fecha ant", "Fecha act", "Val ant", "Val act"],
+                ["1A", "ACS", "X", "2026-01-01", "2026-02-01", 1, 2],
+            ])])
+            analysis = source_analysis.analyse_tabular(path)
+        self.assertEqual("reading", analysis.kind)
+
+    def test_cp1252_csv_is_readable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "propietarios.csv"
+            path.write_bytes("Vivienda;Nombre;Coeficiente\n1A;José Muñoz;1,5\n".encode("cp1252"))
+            analysis = source_analysis.analyse_tabular(path)
+        self.assertEqual("owners", analysis.kind)
+        self.assertIn("Muñoz", analysis.candidates["propietarios"])
+
+    def test_number_parser_handles_both_decimal_conventions(self):
+        parse = source_analysis._tabular_number
+        self.assertEqual(1234.5, parse("1.234,5"))
+        self.assertEqual(1234.56, parse("1,234.56"))
+        self.assertEqual(1234567.0, parse("1.234.567"))
+        self.assertEqual(12.5, parse("12,5 m3"))
+        with self.assertRaises(ValueError):
+            parse("-3")
+
+
 if __name__ == "__main__":
     unittest.main()

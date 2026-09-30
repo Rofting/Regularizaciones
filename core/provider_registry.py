@@ -165,14 +165,46 @@ def load_provider_registry(path: str | Path) -> Mapping[str, ProviderProfile]:
     return provider_registry_from_payload(payload)
 
 
-def _signature_matches(pattern: str, raw_text: str, normalized_text: str) -> bool:
-    try:
-        if re.search(pattern, raw_text, re.IGNORECASE):
-            return True
-    except re.error:
-        pass
+def _compact(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", _normalize_words(value))
+
+
+def _signature_matches(
+    pattern: str,
+    raw_text: str,
+    normalized_text: str,
+    compact_text: str = "",
+) -> bool:
+    # Plain-text signatures are matched on word boundaries below; only real
+    # regular expressions need the raw search.
+    if re.search(r"[\\\[\](){}?*+|^$.]", pattern):
+        try:
+            if re.search(pattern, raw_text, re.IGNORECASE):
+                return True
+        except re.error:
+            pass
     normalized_pattern = _normalize_words(pattern)
-    return bool(normalized_pattern and normalized_pattern in normalized_text)
+    if normalized_pattern and re.search(
+        rf"(?<![A-Z0-9]){re.escape(normalized_pattern)}(?![A-Z0-9])", normalized_text
+    ):
+        return True
+    # PDF columns often glue words together ("ENDESAENERGIA") or break them
+    # with stray spaces. Compare without separators, but only for signatures
+    # long enough not to appear inside unrelated words.
+    if re.search(r"[\\\[\](){}?*+|^$]", pattern):
+        return False
+    compact_pattern = re.sub(r"[^A-Z0-9]", "", normalized_pattern)
+    return bool(
+        compact_text and len(compact_pattern) >= 7 and compact_pattern in compact_text
+    )
+
+
+def _tax_id_in_text(tax_id: str, normalized_text: str) -> bool:
+    """Find a tax id tolerating separators ("A-12.345.678") but not longer tokens."""
+    separated = r"[\s.\-]?".join(re.escape(char) for char in tax_id)
+    return bool(
+        re.search(rf"(?<![A-Z0-9]){separated}(?![A-Z0-9])", normalized_text)
+    )
 
 
 def resolve_provider(
@@ -183,8 +215,13 @@ def resolve_provider(
 ) -> ProviderMatch | None:
     raw_document = f"{filename or ''}\n{text or ''}"
     normalized_document = _normalize_words(raw_document)
-    compact_document = re.sub(r"[^A-Z0-9]", "", raw_document.upper())
+    compact_document = re.sub(r"[^A-Z0-9]", "", normalized_document)
     kind = str(document_kind or "").lower()
+
+    def matches(pattern: str) -> bool:
+        return _signature_matches(
+            pattern, raw_document, normalized_document, compact_document
+        )
 
     compatible = [
         profile for profile in registry.values() if kind in profile.document_types
@@ -193,9 +230,17 @@ def resolve_provider(
     fiscal_matches: list[tuple[ProviderProfile, str]] = []
     for profile in compatible:
         for tax_id in profile.tax_ids:
-            if tax_id in compact_document:
+            if _tax_id_in_text(tax_id, normalized_document):
                 fiscal_matches.append((profile, tax_id))
-    if len(fiscal_matches) == 1:
+    # An exclusion signature ("Energía XXI") vetoes the provider even when its
+    # tax id is printed, e.g. by a reseller quoting the distributor.
+    fiscal_matches = [
+        (profile, tax_id)
+        for profile, tax_id in fiscal_matches
+        if not any(matches(pattern) for pattern in profile.excluded_signatures)
+    ]
+    fiscal_keys = {profile.key for profile, _ in fiscal_matches}
+    if len(fiscal_keys) == 1:
         profile, tax_id = fiscal_matches[0]
         return ProviderMatch(
             profile.key,
@@ -203,33 +248,30 @@ def resolve_provider(
             "provider:tax-id:v1",
             (tax_id,),
         )
-    if len({profile.key for profile, _ in fiscal_matches}) > 1:
-        return None
+    # Several tax ids (issuer plus a distributor or bank named in the footer):
+    # let the textual signatures choose among them instead of giving up.
+    pool = (
+        [profile for profile in compatible if profile.key in fiscal_keys]
+        if fiscal_keys
+        else compatible
+    )
 
     candidates: list[tuple[int, ProviderProfile, tuple[str, ...], bool]] = []
-    for profile in compatible:
-        if any(
-            _signature_matches(pattern, raw_document, normalized_document)
-            for pattern in profile.excluded_signatures
-        ):
+    for profile in pool:
+        if any(matches(pattern) for pattern in profile.excluded_signatures):
             continue
 
-        aliases = tuple(
-            alias
-            for alias in profile.aliases
-            if _signature_matches(alias, raw_document, normalized_document)
-        )
+        aliases = tuple(alias for alias in profile.aliases if matches(alias))
         if not aliases:
             continue
 
-        required_ok = all(
-            _signature_matches(pattern, raw_document, normalized_document)
-            for pattern in profile.required_signatures
-        )
+        required_ok = all(matches(pattern) for pattern in profile.required_signatures)
         if profile.required_signatures and not required_ok:
             continue
 
         score = 100 + (20 * len(aliases)) + (30 if required_ok and profile.required_signatures else 0)
+        if profile.key in fiscal_keys:
+            score += 50
         candidates.append((score, profile, aliases, required_ok))
 
     if not candidates:

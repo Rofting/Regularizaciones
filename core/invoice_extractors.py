@@ -2,24 +2,56 @@
 
 Only labelled values are accepted.  Every value carries its rule, confidence
 and local text fragment so low-confidence guesses never silently reach a case.
+
+Amounts are collected as *candidates* and the combination that satisfies
+``base + IVA = total`` wins; that arithmetic check is what lets the extractor
+skip subtotals, percentages and unrelated figures that share a label.
 """
 
 from __future__ import annotations
 
+import itertools
 import re
-from dataclasses import dataclass, field
-from datetime import datetime
+import unicodedata
+from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import Callable, Iterator, Mapping
 
 from provider_registry import ProviderProfile
 
 
-EXTRACTOR_VERSION = "invoice-fields-v1"
-_DATE = r"(?P<value>\d{1,2}[./-]\d{1,2}[./-]\d{2,4})"
-_MONEY = r"(?P<value>-?\d{1,3}(?:\.\d{3})*(?:,\d{2})|-?\d+(?:[.,]\d{2}))"
-_QUANTITY = r"(?P<value>-?\d+(?:[.,]\d+)?)"
+EXTRACTOR_VERSION = "invoice-fields-v2"
+
+_MONTHS = {
+    "enero": 1, "ene": 1, "febrero": 2, "feb": 2, "marzo": 3, "mar": 3,
+    "abril": 4, "abr": 4, "mayo": 5, "may": 5, "junio": 6, "jun": 6,
+    "julio": 7, "jul": 7, "agosto": 8, "ago": 8, "septiembre": 9,
+    "setiembre": 9, "sept": 9, "sep": 9, "octubre": 10, "oct": 10,
+    "noviembre": 11, "nov": 11, "diciembre": 12, "dic": 12,
+}
+_MONTH_NAMES = "|".join(sorted(_MONTHS, key=len, reverse=True))
+_DATE_NUMERIC = r"\d{1,2}\s?[./-]\s?\d{1,2}\s?[./-]\s?(?:\d{4}|\d{2})(?!\d)"
+_DATE_ISO = r"\d{4}-\d{2}-\d{2}"
+_DATE_TEXT = (
+    rf"\d{{1,2}}\s+(?:de\s+)?(?:{_MONTH_NAMES})\.?\s+(?:de\s+)?(?:\d{{4}}|\d{{2}})(?!\d)"
+)
+_DATE = rf"(?:{_DATE_ISO}|{_DATE_NUMERIC}|{_DATE_TEXT})"
+_RANGE_SEPARATOR = r"\s*(?:a|al|hasta(?:\s+el)?|y(?:\s+el)?|-|–|—)\s*"
+
+# 1.234,56 | 1234,56 | 1,234.56 | 1234.56, optionally with a trailing minus.
+_MONEY_CORE = (
+    r"-?(?:\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2})-?"
+)
+_MONEY_RE = re.compile(rf"(?<![\d.,])({_MONEY_CORE})(?![\d])(?!\s?%)")
+_QUANTITY = r"(?P<value>-?\d{1,3}(?:\.\d{3})+(?:,\d+)?|-?\d+(?:[.,]\d+)?)"
+_TOKEN = r"(?=[A-Z0-9/._-]*\d)[A-Z0-9][A-Z0-9/._-]{1,30}"
+_CUPS_RE = re.compile(
+    r"\bES\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?[A-Z]{2}(?:\s?\d\s?[A-Z])?\b",
+    re.IGNORECASE,
+)
+_FLAGS = re.IGNORECASE | re.MULTILINE
 
 
 @dataclass(frozen=True)
@@ -45,24 +77,69 @@ class ExtractionBundle:
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
 
 
+@dataclass(frozen=True)
+class _Candidate:
+    value: Decimal
+    fragment: str
+    confidence: str = "high"
+
+
+def _strip_accents(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
 def _iso_date(value: str) -> str | None:
-    cleaned = value.strip().replace(".", "/").replace("-", "/")
-    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+    """Parse numeric, ISO and "1 de marzo de 2026" dates; reject non-dates."""
+    cleaned = _strip_accents(value).strip().lower().rstrip(".")
+    parsed: date | None = None
+    if re.fullmatch(_DATE_ISO, cleaned):
         try:
-            return datetime.strptime(cleaned, fmt).date().isoformat()
+            parsed = date.fromisoformat(cleaned)
         except ValueError:
-            continue
-    return None
+            return None
+    else:
+        textual = re.fullmatch(
+            rf"(\d{{1,2}})\s+(?:de\s+)?({_MONTH_NAMES})\.?\s+(?:de\s+)?(\d{{4}}|\d{{2}})",
+            cleaned,
+        )
+        if textual:
+            day, month, year = int(textual[1]), _MONTHS[textual[2]], textual[3]
+        else:
+            numeric = re.fullmatch(
+                r"(\d{1,2})\s?[./-]\s?(\d{1,2})\s?[./-]\s?(\d{4}|\d{2})", cleaned
+            )
+            if not numeric:
+                return None
+            day, month, year = int(numeric[1]), int(numeric[2]), numeric[3]
+        year_number = int(year) + (2000 if len(year) == 2 else 0)
+        try:
+            parsed = date(year_number, month, day)
+        except ValueError:
+            return None
+    if not 2000 <= parsed.year <= 2100:
+        return None
+    return parsed.isoformat()
 
 
 def _decimal(value: str) -> Decimal | None:
+    """Parse Spanish (1.234,56) and English (1,234.56) money, incl. ``12,00-``."""
     cleaned = value.strip().replace(" ", "")
-    if "," in cleaned:
-        cleaned = cleaned.replace(".", "").replace(",", ".")
+    negative = cleaned.endswith("-") or cleaned.startswith("-")
+    cleaned = cleaned.strip("-")
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        head, _, tail = cleaned.rpartition(",")
+        cleaned = f"{head.replace(',', '')}.{tail}" if len(tail) <= 2 else cleaned.replace(",", "")
     try:
-        return Decimal(cleaned)
+        number = Decimal(cleaned)
     except InvalidOperation:
         return None
+    return -number if negative else number
 
 
 def _quantity(value: str) -> str | None:
@@ -77,34 +154,323 @@ def _quantity(value: str) -> str | None:
         number = Decimal(cleaned)
     except InvalidOperation:
         return None
-    return format(number, "f").rstrip("0").rstrip(".") if "." in format(number, "f") else format(number, "f")
+    rendered = format(number, "f")
+    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
 def _evidence(
     field_name: str,
     value: str,
-    match: re.Match[str] | None,
+    fragment: re.Match[str] | str | None,
     *,
     confidence: str = "high",
     family: str = "standard_spanish_invoice",
     source: str = "text",
+    rule: str = "v1",
 ) -> FieldEvidence:
-    fragment = match.group(0).strip()[:500] if match is not None else ""
+    if isinstance(fragment, re.Match):
+        fragment = fragment.group(0)
     return FieldEvidence(
         value=value,
         confidence=confidence,
         source=source,
-        locator={"fragment": fragment},
-        rule_id=f"{family}:{field_name}:v1",
+        locator={"fragment": " ".join((fragment or "").split())[:500]},
+        rule_id=f"{family}:{field_name}:{rule}",
     )
 
 
-def _first_match(patterns: tuple[str, ...], text: str) -> re.Match[str] | None:
+def _iter_matches(patterns: tuple[str, ...], text: str) -> Iterator[re.Match[str]]:
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
-        if match:
-            return match
-    return None
+        yield from re.finditer(pattern, text, _FLAGS)
+
+
+def _first_match(patterns: tuple[str, ...], text: str) -> re.Match[str] | None:
+    return next(_iter_matches(patterns, text), None)
+
+
+# ── Dates ────────────────────────────────────────────────────────────────
+
+_PERIOD_LABEL = (
+    r"(?:per[ií]odo(?:\s+de)?(?:\s+(?:facturaci[oó]n|facturado|consumo|lectura|liquidaci[oó]n))?"
+    r"|facturaci[oó]n|consumo|servicio|fechas?\s+de\s+(?:consumo|facturaci[oó]n))"
+)
+_PERIOD_PATTERNS: tuple[tuple[str, str], ...] = (
+    (
+        rf"\b{_PERIOD_LABEL}\b[^\d\n]{{0,35}}(?P<start>{_DATE}){_RANGE_SEPARATOR}(?P<end>{_DATE})",
+        "high",
+    ),
+    (
+        rf"\bdesde(?:\s+el)?\s+(?P<start>{_DATE})\s+(?:hasta|a)(?:\s+el)?\s+(?P<end>{_DATE})",
+        "high",
+    ),
+    (rf"\bentre\s+el\s+(?P<start>{_DATE})\s+y\s+el\s+(?P<end>{_DATE})", "high"),
+    (
+        rf"\bfecha\s+(?:de\s+)?inicio\b[^\d\n]{{0,15}}(?P<start>{_DATE})"
+        rf"[\s\S]{{0,80}}?\bfecha\s+(?:de\s+)?(?:fin|final|t[eé]rmino)\b[^\d\n]{{0,15}}(?P<end>{_DATE})",
+        "high",
+    ),
+    # Unlabelled "del 01/03/2026 al 31/03/2026" is common but could also be a
+    # contract term, so it is proposed with lower confidence.
+    (rf"\bdel\s+(?P<start>{_DATE})\s+al\s+(?P<end>{_DATE})", "medium"),
+)
+
+_INVOICE_DATE_PATTERNS: tuple[tuple[str, str], ...] = (
+    (
+        rf"\b(?:fecha(?:\s+de)?|emitida(?:\s+el)?)\s+(?:emisi[oó]n|expedici[oó]n|factura(?:ci[oó]n)?)"
+        rf"(?:\s+(?:de\s+)?(?:la\s+)?factura)?\s*[:\-]?\s*(?P<value>{_DATE})",
+        "high",
+    ),
+    (rf"\bfactura\b[^\n]{{0,60}}?\b(?:de\s+)?fecha\s*[:\-]?\s*(?P<value>{_DATE})", "high"),
+    (rf"\bemitida\s+el\s+(?P<value>{_DATE})", "high"),
+    (rf"^\s*fecha\s*[:\-]?\s*(?P<value>{_DATE})", "medium"),
+)
+
+_NUMBER_PATTERNS = (
+    rf"\bn[uú]mero\s+de\s+factura\s*[:\-#]?\s*(?P<value>{_TOKEN})",
+    rf"\bn[º°o.]{{1,2}}\s*(?:de\s*)?(?:factura|fra\.?)\s*[:\-#]?\s*(?P<value>{_TOKEN})",
+    rf"\bfactura\s*(?:n[º°o.]{{1,2}}|n[uú]m(?:ero)?\.?)\s*[:\-#]?\s*(?P<value>{_TOKEN})",
+    rf"\bfra\.?\s*(?:n[º°o.]{{1,2}})?\s*[:\-#]?\s*(?P<value>{_TOKEN})",
+    rf"\bfactura\s*[:\-#]?\s*(?P<value>{_TOKEN})",
+)
+
+
+def _extract_period(text: str, family: str, fields: dict[str, FieldEvidence], diagnostics: list[str]) -> None:
+    for pattern, confidence in _PERIOD_PATTERNS:
+        for match in re.finditer(pattern, text, _FLAGS):
+            start = _iso_date(match.group("start"))
+            end = _iso_date(match.group("end"))
+            if not start or not end:
+                continue
+            if end < start:
+                diagnostics.append("period_inverted")
+                continue
+            fields["fecha_inicio"] = _evidence(
+                "fecha_inicio", start, match, confidence=confidence, family=family
+            )
+            fields["fecha_fin"] = _evidence(
+                "fecha_fin", end, match, confidence=confidence, family=family
+            )
+            return
+
+
+def _extract_invoice_date(text: str, family: str, fields: dict[str, FieldEvidence]) -> None:
+    for pattern, confidence in _INVOICE_DATE_PATTERNS:
+        for match in re.finditer(pattern, text, _FLAGS):
+            value = _iso_date(match.group("value"))
+            if value:
+                fields["fecha_factura"] = _evidence(
+                    "fecha_factura", value, match, confidence=confidence, family=family
+                )
+                return
+
+
+def _extract_number(text: str, family: str, fields: dict[str, FieldEvidence]) -> None:
+    for match in _iter_matches(_NUMBER_PATTERNS, text):
+        value = match.group("value").strip(".,-/_")
+        if len(value) < 2 or re.fullmatch(_DATE, value, re.IGNORECASE):
+            continue
+        fields["num_factura"] = _evidence("num_factura", value, match, family=family)
+        return
+
+
+# ── Amounts ──────────────────────────────────────────────────────────────
+
+_EXCLUDED_TOTAL = (
+    r"(?!\s*(?:iva\b|base\b|impuesto|energ|potencia|consumo|t[eé]rmino|periodo|kwh|"
+    r"l[ií]nea|cuota|descuento|dto))"
+)
+_BASE_LABELS = (
+    r"base\s+imponible|base\s+imp\.?|importe\s+(?:sin|antes\s+de)\s+(?:iva|impuestos)|"
+    r"total\s+(?:sin|antes\s+de)\s+(?:iva|impuestos)|total\s+base|subtotal"
+)
+_IVA_LABELS = (
+    r"(?:cuota\s+(?:de\s+)?)?(?:iva|i\.v\.a\.?)|impuesto\s+sobre\s+el\s+valor\s+a[ñn]adido|"
+    r"total\s+iva"
+)
+_TOTAL_STRONG = (
+    rf"\btotal\s+(?:a\s+pagar|a\s+abonar|factura|importe(?:\s+factura)?|general|"
+    rf"(?:\(?iva\s+incluido\)?))\b",
+    r"\bimporte\s+(?:total|a\s+pagar|de\s+la\s+factura|factura)\b",
+    r"\btotal\s+(?:eur|euros|€)",
+    r"\ba\s+pagar\b",
+)
+_TOTAL_WEAK = rf"\btotal\b{_EXCLUDED_TOTAL}"
+
+
+def _money_in(segment: str) -> list[tuple[str, Decimal]]:
+    found = []
+    for match in _MONEY_RE.finditer(segment):
+        value = _decimal(match.group(1))
+        if value is not None:
+            found.append((match.group(1), value))
+    return found
+
+
+def _candidates_after_label(
+    label_pattern: str,
+    text: str,
+    *,
+    prefer: str = "first",
+    confidence: str = "high",
+) -> list[_Candidate]:
+    """Money figures following a label on its line or, failing that, the next line."""
+    lines = text.splitlines()
+    result: list[_Candidate] = []
+    for index, line in enumerate(lines):
+        for label in re.finditer(label_pattern, line, re.IGNORECASE):
+            tail = line[label.end():]
+            amounts = _money_in(tail)
+            fragment = line[label.start():]
+            if not amounts and index + 1 < len(lines):
+                nxt = lines[index + 1]
+                amounts = _money_in(nxt)
+                fragment = f"{line.strip()} {nxt.strip()}"
+            ordered = list(reversed(amounts)) if prefer == "last" else amounts
+            for _, value in ordered:
+                result.append(_Candidate(value, fragment.strip()[:500], confidence))
+            break
+    return result
+
+
+def _summary_table_candidates(text: str) -> dict[str, _Candidate]:
+    """Read ``Base imponible | Cuota IVA | Total`` header rows with values below."""
+    lines = text.splitlines()
+    token_re = re.compile(
+        r"(?P<base>base\s+imponible|base)|(?P<iva>cuota(?:\s+de)?(?:\s+iva)?|(?<![%\w])iva)|"
+        r"(?P<total>total(?:\s+factura)?|importe\s+total)",
+        re.IGNORECASE,
+    )
+    for index, line in enumerate(lines[:-1]):
+        if not re.search(r"base", line, re.IGNORECASE) or not re.search(r"\biva\b|cuota", line, re.IGNORECASE):
+            continue
+        if _money_in(line):
+            continue
+        labels = []
+        for token in token_re.finditer(line):
+            name = token.lastgroup
+            before = line[max(0, token.start() - 2):token.start()]
+            if name == "iva" and "%" in before:
+                continue
+            if not labels or labels[-1] != name:
+                labels.append(name)
+        for offset in (1, 2):
+            if index + offset >= len(lines):
+                break
+            values = _money_in(lines[index + offset])
+            if len(labels) >= 2 and len(values) == len(labels):
+                fragment = f"{line.strip()} {lines[index + offset].strip()}"[:500]
+                return {
+                    name: _Candidate(values[position][1], fragment, "medium")
+                    for position, name in enumerate(labels)
+                }
+    return {}
+
+
+def _reconciles(base: Decimal, iva: Decimal, total: Decimal) -> bool:
+    return abs(base + iva - total) <= Decimal("0.02")
+
+
+def _select_amounts(
+    base: list[_Candidate], iva: list[_Candidate], total: list[_Candidate]
+) -> tuple[dict[str, _Candidate], bool | None]:
+    """Choose one candidate per field; ``True`` means base+IVA=total was verified."""
+    if base and iva and total:
+        for b, i, t in itertools.product(base[:6], iva[:6], total[:6]):
+            if _reconciles(b.value, i.value, t.value):
+                return {"base_imponible": b, "iva": i, "importe_total": t}, True
+        return {
+            "base_imponible": base[0],
+            "iva": iva[0],
+            "importe_total": total[0],
+        }, False
+    chosen = {}
+    for name, items in (("base_imponible", base), ("iva", iva), ("importe_total", total)):
+        if items:
+            chosen[name] = items[0]
+    return chosen, None
+
+
+def _extract_amounts(
+    text: str, family: str, fields: dict[str, FieldEvidence], diagnostics: list[str]
+) -> None:
+    table = _summary_table_candidates(text)
+    base = _candidates_after_label(_BASE_LABELS, text)
+    iva = _candidates_after_label(rf"\b(?:{_IVA_LABELS})\b", text, prefer="last")
+    total: list[_Candidate] = []
+    for pattern in _TOTAL_STRONG:
+        total.extend(_candidates_after_label(pattern, text, prefer="last"))
+    weak = _candidates_after_label(_TOTAL_WEAK, text, prefer="last", confidence="medium")
+    total.extend(item for item in weak if item not in total)
+    # Table figures go first: a header row followed by its values is the most
+    # positional evidence available.
+    if table.get("base"):
+        base.insert(0, table["base"])
+    if table.get("iva"):
+        iva.insert(0, table["iva"])
+    if table.get("total"):
+        total.insert(0, table["total"])
+
+    chosen, verified = _select_amounts(base, iva, total)
+    for name, candidate in chosen.items():
+        confidence = candidate.confidence
+        rule = "v1"
+        if name == "importe_total":
+            if verified is True:
+                confidence, rule = "high", "reconciled:v1"
+            elif verified is False:
+                confidence, rule = "low", "not-reconciled:v1"
+                diagnostics.append("total_not_reconciled")
+            elif candidate.confidence == "high":
+                confidence = "medium"
+        elif verified is True:
+            confidence = "high"
+        elif verified is False:
+            confidence = "medium"
+        fields[name] = _evidence(
+            name,
+            format(candidate.value, ".2f"),
+            candidate.fragment,
+            confidence=confidence,
+            family=family,
+            rule=rule,
+        )
+
+
+# ── Service type, CUPS ───────────────────────────────────────────────────
+
+_SERVICE_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("ELECTRICIDAD", r"\b(?:electricidad|energ[ií]a\s+el[eé]ctrica|t[eé]rmino\s+de\s+potencia|kwh\s+el[eé]ctric)"),
+    ("GASOLEO", r"\bgas[oó]leo\b"),
+    ("GAS", r"\b(?:gas\s+natural|suministro\s+de\s+gas|tur\s+gas|t[eé]rmino\s+fijo\s+gas|hidrocarburos)\b"),
+    ("AGUA", r"\b(?:suministro\s+de\s+agua|abastecimiento|alcantarillado|saneamiento|canon\s+del?\s+agua|consumo\s+de\s+agua)\b"),
+    ("ASCENSORES", r"\b(?:ascensor(?:es)?|elevador(?:es)?)\b"),
+    ("LIMPIEZA", r"\blimpieza\b"),
+    ("MANTENIMIENTO", r"\bmantenimiento\b"),
+)
+
+
+def infer_service_family(text: str) -> tuple[str, str] | None:
+    """Guess the supply type from keywords when no provider profile applies."""
+    folded = _strip_accents(text or "")
+    counts = []
+    for family, pattern in _SERVICE_KEYWORDS:
+        hits = re.findall(_strip_accents(pattern), folded, re.IGNORECASE)
+        if hits:
+            counts.append((len(hits), family, hits[0]))
+    if not counts:
+        return None
+    counts.sort(key=lambda item: -item[0])
+    # Two services with the same weight are ambiguous: better to ask.
+    if len(counts) > 1 and counts[0][0] == counts[1][0]:
+        return None
+    return counts[0][1], counts[0][2]
+
+
+def _extract_cups(text: str, family: str, fields: dict[str, FieldEvidence]) -> None:
+    match = _CUPS_RE.search(text)
+    if match:
+        value = re.sub(r"\s", "", match.group(0)).upper()
+        fields["cups"] = _evidence("cups", value, match, family=family)
 
 
 def _extract_common(profile: ProviderProfile, text: str) -> ExtractionBundle:
@@ -112,106 +478,10 @@ def _extract_common(profile: ProviderProfile, text: str) -> ExtractionBundle:
     fields: dict[str, FieldEvidence] = {}
     diagnostics: list[str] = []
 
-    period = _first_match(
-        (
-            rf"\b(?:periodo|per[ií]odo|periodo de facturaci[oó]n|periodo de consumo)"
-            rf"[^\d]{{0,35}}{_DATE}\s*(?:a|al|hasta|-)\s*"
-            rf"(?P<end>\d{{1,2}}[./-]\d{{1,2}}[./-]\d{{2,4}})",
-            rf"\bdesde\s+{_DATE}\s+(?:a|hasta)\s+"
-            rf"(?P<end>\d{{1,2}}[./-]\d{{1,2}}[./-]\d{{2,4}})",
-        ),
-        text,
-    )
-    if period:
-        start = _iso_date(period.group("value"))
-        end = _iso_date(period.group("end"))
-        if start and end:
-            fields["fecha_inicio"] = _evidence(
-                "fecha_inicio", start, period, family=family
-            )
-            fields["fecha_fin"] = _evidence("fecha_fin", end, period, family=family)
-
-    invoice_date = _first_match(
-        (
-            rf"\bfecha(?:\s+de)?\s+(?:emisi[oó]n(?:\s+de)?\s+)?(?:factura\s*)?[:\-]?\s*{_DATE}",
-            rf"\bfactura[^\n]{{0,40}}\bfecha\s*[:\-]?\s*{_DATE}",
-        ),
-        text,
-    )
-    if invoice_date:
-        value = _iso_date(invoice_date.group("value"))
-        if value:
-            fields["fecha_factura"] = _evidence(
-                "fecha_factura", value, invoice_date, family=family
-            )
-
-    number = _first_match(
-        (
-            r"\b(?:n[º°o.]?\s*(?:de\s*)?)?factura\s*(?:n[º°o.]?\s*)?[:\-]?\s*(?P<value>[A-Z0-9][A-Z0-9/._-]{1,30})",
-        ),
-        text,
-    )
-    if number:
-        fields["num_factura"] = _evidence(
-            "num_factura", number.group("value"), number, family=family
-        )
-
-    amount_matches: dict[str, re.Match[str] | None] = {
-        "base_imponible": _first_match(
-            (rf"\bbase\s+imponible\b[^\d-]{{0,20}}{_MONEY}\s*(?:€|eur)?",), text
-        ),
-        "iva": _first_match(
-            (rf"\biva(?:\s*\(?\d{{1,2}}(?:[.,]\d+)?\s*%\)?)?\b[^\d-]{{0,35}}{_MONEY}\s*(?:€|eur)?",),
-            text,
-        ),
-        "importe_total": _first_match(
-            (
-                rf"\btotal\s+(?:a\s+pagar|factura|importe)\b[^\d-]{{0,25}}{_MONEY}\s*(?:€|eur)?",
-                rf"\bimporte\s+total\b[^\d-]{{0,25}}{_MONEY}\s*(?:€|eur)?",
-                rf"\btotal\b[^\d-]{{0,15}}{_MONEY}\s*(?:€|eur)",
-            ),
-            text,
-        ),
-    }
-    decimal_values: dict[str, Decimal] = {}
-    for field_name, match in amount_matches.items():
-        if match is None:
-            continue
-        value = _decimal(match.group("value"))
-        if value is None:
-            continue
-        decimal_values[field_name] = value
-        confidence = "medium" if field_name == "importe_total" else "high"
-        fields[field_name] = _evidence(
-            field_name,
-            format(value, ".2f"),
-            match,
-            confidence=confidence,
-            family=family,
-        )
-
-    if {"base_imponible", "iva", "importe_total"}.issubset(decimal_values):
-        expected = decimal_values["base_imponible"] + decimal_values["iva"]
-        total = decimal_values["importe_total"]
-        if abs(expected - total) <= Decimal("0.02"):
-            current = fields["importe_total"]
-            fields["importe_total"] = FieldEvidence(
-                current.value,
-                "high",
-                current.source,
-                current.locator,
-                f"{family}:importe_total:reconciled:v1",
-            )
-        else:
-            current = fields["importe_total"]
-            fields["importe_total"] = FieldEvidence(
-                current.value,
-                "low",
-                current.source,
-                current.locator,
-                f"{family}:importe_total:not-reconciled:v1",
-            )
-            diagnostics.append("total_not_reconciled")
+    _extract_period(text, family, fields, diagnostics)
+    _extract_invoice_date(text, family, fields)
+    _extract_number(text, family, fields)
+    _extract_amounts(text, family, fields, diagnostics)
 
     if profile.service_family:
         fields["tipo_suministro"] = _evidence(
@@ -221,6 +491,13 @@ def _extract_common(profile: ProviderProfile, text: str) -> ExtractionBundle:
             family=family,
             source="provider_profile",
         )
+    else:
+        inferred = infer_service_family(text)
+        if inferred:
+            fields["tipo_suministro"] = _evidence(
+                "tipo_suministro", inferred[0], inferred[1],
+                confidence="medium", family=family, source="text_keywords",
+            )
     return ExtractionBundle(fields, tuple(diagnostics))
 
 
@@ -233,7 +510,9 @@ def _add_quantity(
 ) -> ExtractionBundle:
     match = _first_match(
         (
-            rf"\bconsumo(?:\s+total)?\b[^\d-]{{0,35}}{_QUANTITY}\s*{unit_pattern}\b",
+            rf"\b(?:consumo(?:\s+(?:total|facturado|real|medido|registrado))?|"
+            rf"energ[ií]a\s+consumida|volumen(?:\s+facturado)?)\b[^\d\n-]{{0,35}}"
+            rf"{_QUANTITY}\s*{unit_pattern}(?![\w³])",
         ),
         text,
     )
@@ -249,17 +528,25 @@ def _add_quantity(
     return ExtractionBundle(fields, bundle.diagnostics)
 
 
+def _with_cups(bundle: ExtractionBundle, text: str, profile: ProviderProfile) -> ExtractionBundle:
+    fields = dict(bundle.fields)
+    _extract_cups(text, profile.extractor_family, fields)
+    return ExtractionBundle(fields, bundle.diagnostics)
+
+
 def _extract_standard(profile: ProviderProfile, text: str) -> ExtractionBundle:
     return _extract_common(profile, text)
 
 
 def _extract_electricity(profile: ProviderProfile, text: str) -> ExtractionBundle:
-    return _add_quantity(_extract_common(profile, text), text, profile, "consumo_kwh", r"kwh")
+    bundle = _add_quantity(_extract_common(profile, text), text, profile, "consumo_kwh", r"kwh")
+    return _with_cups(bundle, text, profile)
 
 
 def _extract_gas_fuel(profile: ProviderProfile, text: str) -> ExtractionBundle:
     result = _add_quantity(_extract_common(profile, text), text, profile, "consumo_kwh", r"kwh")
-    return _add_quantity(result, text, profile, "consumo_m3", r"m(?:3|³)")
+    result = _add_quantity(result, text, profile, "consumo_m3", r"m(?:3|³)")
+    return _with_cups(result, text, profile)
 
 
 def _extract_water(profile: ProviderProfile, text: str) -> ExtractionBundle:
@@ -288,4 +575,5 @@ __all__ = [
     "ExtractionBundle",
     "FieldEvidence",
     "extract_invoice_fields",
+    "infer_service_family",
 ]

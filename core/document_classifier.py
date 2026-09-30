@@ -73,31 +73,55 @@ def _looks_like_invoice(text: str) -> tuple[bool, tuple[str, ...]]:
         r"\bFACTURA\b",
         r"\bFACTURA\s*(?:N[OU]|NUMERO|N[º°])\b",
         r"\bN[º°]\s*FACTURA\b",
+        r"\bNUMERO DE FACTURA\b",
+        r"\bFACTURA SIMPLIFICADA\b",
+        r"\bINVOICE\b",
     )
     structure_markers = _contains(
         text,
         r"\bBASE IMPONIBLE\b",
         r"\bIVA\b",
         r"\bTOTAL(?:\s+A\s+PAGAR)?\b",
-        r"\bFECHA(?:\s+DE)?\s+FACTURA\b",
+        r"\bIMPORTE TOTAL\b",
+        r"\bFECHA(?:\s+DE)?\s+(?:EMISION\s+(?:DE\s+)?)?FACTURA\b",
+        r"\bFECHA DE EMISION\b",
         r"\bPERIODO\s+(?:DE\s+)?FACTURACION\b",
         r"\bVENCIMIENTO\b",
+        r"\bCUOTA IVA\b",
+        r"\bNIF\b",
+        r"\bCIF\b",
     )
     return bool(invoice_markers and len(structure_markers) >= 2), (
         invoice_markers + structure_markers
     )
 
 
+# Words that usually head a non-invoice document but also appear in passing
+# inside real invoices ("pago mediante adeudo SEPA", "según presupuesto 123").
+# They only classify the document when no complete invoice structure exists or
+# when they sit in the header, where a document states what it is.
+_HEADER_CHARS = 500
+_SOFT_RULES = frozenset({"quote", "delivery_note", "bank_receipt", "report"})
+
+
 def classify_document(text: str, filename: str) -> DocumentClassification:
     normalized = normalize_detection_text(f"{filename or ''}\n{text or ''}")
     if not normalize_detection_text(text):
         return _classification("unknown", "low", "unknown", ())
+    header = normalized[:_HEADER_CHARS]
+    is_invoice, invoice_evidence = _looks_like_invoice(normalized)
 
     explicit_rules = (
         (
             "credit_note",
             "credit-note",
-            (r"\bFACTURA RECTIFICATIVA\b", r"\bNOTA DE CREDITO\b", r"\bABONO\b"),
+            (
+                r"\bFACTURA RECTIFICATIVA\b",
+                r"\bNOTA DE CREDITO\b",
+                r"\bNOTA DE ABONO\b",
+                r"\bFACTURA DE ABONO\b",
+                r"\bFACTURA ABONO\b",
+            ),
         ),
         (
             "owners",
@@ -107,7 +131,7 @@ def classify_document(text: str, filename: str) -> DocumentClassification:
         (
             "quote",
             "quote",
-            (r"\bPRESUPUESTO\b", r"\bOFERTA (?:COMERCIAL|ECONOMICA)\b"),
+            (r"\bPRESUPUESTO\b", r"\bOFERTA (?:COMERCIAL|ECONOMICA)\b", r"\bPROFORMA\b"),
         ),
         (
             "delivery_note",
@@ -121,6 +145,7 @@ def classify_document(text: str, filename: str) -> DocumentClassification:
                 r"\bJUSTIFICANTE DE (?:TRANSFERENCIA|PAGO)\b",
                 r"\bORDEN DE TRANSFERENCIA\b",
                 r"\bADEUDO SEPA\b",
+                r"\bCOMPROBANTE DE (?:TRANSFERENCIA|PAGO)\b",
             ),
         ),
         (
@@ -130,11 +155,11 @@ def classify_document(text: str, filename: str) -> DocumentClassification:
         ),
     )
     for kind, rule_suffix, patterns in explicit_rules:
-        evidence = _contains(normalized, *patterns)
+        scope = header if kind in _SOFT_RULES and is_invoice else normalized
+        evidence = _contains(scope, *patterns)
         if evidence:
             return _classification(kind, "high", rule_suffix, evidence)
 
-    is_invoice, invoice_evidence = _looks_like_invoice(normalized)
     if is_invoice:
         return _classification("invoice", "high", "invoice", invoice_evidence)
 

@@ -15,10 +15,12 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 
-# v2 invalidates early cached failures created before the bundled OCR path was
+# v3 also reads up to six pages of embedded text (totals on later pages).
+# v2 invalidated early cached failures created before the bundled OCR path was
 # available. A document is re-read once and subsequent reanalyses reuse the
 # successful text instead of falling back to the slow legacy reader forever.
-TEXT_EXTRACTOR_VERSION = "document-text-v2"
+TEXT_EXTRACTOR_VERSION = "document-text-v3"
+_TEXT_PDF_MAX_PAGES = 6
 
 
 @dataclass(frozen=True)
@@ -151,7 +153,9 @@ def _default_extract(path: Path, max_pages: int) -> TextExtraction:
         import pdfplumber
 
         with pdfplumber.open(path) as pdf:
-            for number, page in enumerate(pdf.pages[:max_pages], start=1):
+            # Embedded text is cheap to read, and totals often sit on a later
+            # page; only the slow OCR path is limited to ``max_pages``.
+            for number, page in enumerate(pdf.pages[:max(max_pages, _TEXT_PDF_MAX_PAGES)], start=1):
                 page_text = page.extract_text() or ""
                 if page_text.strip():
                     text_parts.append(page_text)
