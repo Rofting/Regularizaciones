@@ -11,6 +11,7 @@ if str(CORE_DIR) not in sys.path:
 from consumption_charts import (
     FIVE_BAND_LABELS,
     consumption_band,
+    adaptive_step,
     consumption_bands,
     render_consumption_charts,
 )
@@ -46,6 +47,27 @@ class ConsumptionChartsTest(unittest.TestCase):
             self.assertEqual(target, result)
             self.assertGreater(target.stat().st_size, 1000)
 
+
+    def test_adaptive_step_spreads_high_consumptions_over_the_five_bands(self):
+        values = [15 + index * 3.1 for index in range(40)]  # 15–136 m³
+        step = adaptive_step(values)
+        bands = consumption_bands(values, step=step)
+        counts = [sum(low <= value < high for value in values) for low, high in bands]
+        self.assertTrue(all(count > 0 for count in counts), counts)
+        self.assertLess(max(counts), len(values) * 0.5)
+        self.assertEqual(10.0, adaptive_step([]))
+        self.assertEqual(1500.0, adaptive_step([800, 5800, 6000]))
+
+    def test_renders_series_title_current_period_and_missing_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "calefaccion.png"
+            result = render_consumption_charts(
+                target, owner_consumption=None, neighbor_consumptions=[800, 2400, 5100],
+                history=[("2024-2025", 2900)], unit="kWh", title="Calefacción",
+                current_label="2025-2026",
+            )
+            self.assertEqual(target, result)
+            self.assertGreater(target.stat().st_size, 1000)
 
 if __name__ == "__main__":
     unittest.main()

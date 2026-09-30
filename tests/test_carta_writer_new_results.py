@@ -49,5 +49,33 @@ class CartaWriterNewResultsTest(unittest.TestCase):
         self.assertEqual(25.0, rows[0]["acs"]["importe_real"])
 
 
+
+class CartaChartsTest(unittest.TestCase):
+    def test_each_consumption_series_gets_its_own_chart(self):
+        from docx import Document
+        from carta_writer import generar_carta
+
+        series = [
+            {"title": "Agua caliente sanitaria", "owner_consumption": 72.4,
+             "neighbor_consumptions": [20, 50, 72.4, 110], "history": [("2024-2025", 65)],
+             "current_label": "2025-2026", "unit": "m³"},
+            {"title": "Calefacción", "owner_consumption": 3120,
+             "neighbor_consumptions": [900, 3120, 5000], "history": [],
+             "current_label": "2025-2026", "unit": "kWh"},
+        ]
+        data = {
+            "vecino": {"nombre": "Ana", "vivienda": "1A"},
+            "periodo": {"nombre": "2025-2026", "fecha_inicio": "2025-09-01", "fecha_fin": "2026-08-31"},
+            "total": {"cobrado": 0, "real": 0, "diferencia": 0},
+            "conceptos": [{"label": "ACS", "importe_cobrado": 10, "importe_real": 12, "diferencia": 2}],
+            "consumo_grafica": {"series": series},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "carta.docx"
+            generar_carta(data, str(PROJECT_ROOT / "plantillas" / "Plantilla_Cartas.docx"), str(output))
+            document = Document(str(output))
+            self.assertEqual(2, len(document.inline_shapes))
+            self.assertIn("COMPARATIVA DE CONSUMO", "\n".join(p.text for p in document.paragraphs))
+
 if __name__ == "__main__":
     unittest.main()

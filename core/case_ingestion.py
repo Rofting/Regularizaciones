@@ -1307,3 +1307,77 @@ def reanalyze_case_documents(
             _open_issue_count(connection, case_id),
         ))
     return tuple(results)
+
+
+_ADVANCED_CASE_STATUSES = frozenset(
+    {"ready_for_calculation", "calculated", "reconciled", "deliveries_generated", "closed"}
+)
+
+
+@dataclass(frozen=True)
+class SourceReevaluation:
+    """Resultado de reevaluar las fuentes de un expediente ya avanzado."""
+
+    results: tuple[IngestionResult, ...]
+    changed: bool
+    reopened: bool
+    previous_status: str
+
+
+def _sources_fingerprint(connection: sqlite3.Connection, case_id: int) -> tuple:
+    """Estado comparable de lo que el análisis puede cambiar (sin marcas de tiempo)."""
+    documents = connection.execute(
+        """SELECT id_document,document_kind,status,eligibility_status,provider_key
+             FROM source_documents WHERE id_case=? ORDER BY id_document""",
+        (case_id,),
+    ).fetchall()
+    candidates = connection.execute(
+        """SELECT c.id_document,c.field_name,c.value,c.validation_status
+             FROM extraction_candidates c
+             JOIN source_documents d ON d.id_document=c.id_document
+            WHERE d.id_case=? ORDER BY c.id_document,c.field_name""",
+        (case_id,),
+    ).fetchall()
+    issues = connection.execute(
+        """SELECT id_document,code,field_name,detected_value FROM review_issues
+            WHERE id_case=? AND status='open' ORDER BY id_document,code,field_name""",
+        (case_id,),
+    ).fetchall()
+    return tuple(tuple(row) for row in documents), tuple(
+        tuple(row) for row in candidates
+    ), tuple(tuple(row) for row in issues)
+
+
+def reevaluate_case_sources(
+    connection: sqlite3.Connection,
+    case_id: int,
+    *,
+    force_review: bool = False,
+    analyser: Callable[[Path], SourceAnalysis] | None = None,
+    archive_root: str | Path | None = None,
+) -> SourceReevaluation:
+    """Reanaliza las fuentes y, si algo cambia, devuelve el expediente a revisión.
+
+    Un Excel, reparto o lote de cartas ya generado deja de ser válido cuando
+    sus fuentes cambian. Las ejecuciones anteriores se conservan en el
+    historial; sólo la etapa actual retrocede a «En revisión» para que la
+    interfaz vuelva a pedir confirmar fuentes y regenerar lo que dependa de
+    ellas. Con ``force_review`` se reabre aunque no haya cambios, para que el
+    usuario pueda revisar o corregir datos ya confirmados.
+    """
+    status_row = connection.execute(
+        "SELECT estado FROM regularization_cases WHERE id_case=?", (case_id,)
+    ).fetchone()
+    if status_row is None:
+        raise LookupError("El expediente no existe")
+    previous_status = str(status_row["estado"])
+    before = _sources_fingerprint(connection, case_id)
+    results = reanalyze_case_documents(
+        connection, case_id, analyser=analyser, archive_root=archive_root,
+    )
+    changed = before != _sources_fingerprint(connection, case_id)
+    reopened = False
+    if previous_status in _ADVANCED_CASE_STATUSES and (changed or force_review):
+        expedient_service.set_case_status(connection, case_id, "under_review")
+        reopened = True
+    return SourceReevaluation(results, changed, reopened, previous_status)

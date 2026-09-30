@@ -6,7 +6,7 @@ import sys
 import tkinter as tk
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypeVar
@@ -21,6 +21,7 @@ import community_onboarding
 import document_review
 import expedient_service
 import gestor_bd
+import period_selection
 import source_batch
 import ui_moderna as UIM
 from expedient_models import ReviewIssue
@@ -224,6 +225,9 @@ class GuidedWorkspaceState:
     detail: str
     steps: tuple[GuidedStep, ...]
     blockers: tuple[case_readiness.ReadinessBlocker, ...] = ()
+    # Acciones que rehacen una etapa ya superada (reevaluar fuentes, regenerar
+    # Excel...). Cada repetición conserva las ejecuciones previas en el historial.
+    repeat_actions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -333,8 +337,8 @@ def guided_workspace_state(
         active_step, next_action = "cartas", "abrir_salidas"
         headline = "Cartas generadas"
         detail = (
-            "Puedes abrir las salidas o repetir Excel, reparto o cartas. "
-            "Cada repetición conserva las ejecuciones anteriores en el historial."
+            "Puedes abrir las salidas o repetir cualquier etapa: reevaluar fuentes, "
+            "Excel, reparto o cartas. Cada repetición conserva las anteriores en el historial."
         )
     elif document_count <= 0 or case_status in {"draft", "gathering_sources", ""}:
         active_step, next_action = "fuentes", "anadir_fuentes"
@@ -376,7 +380,35 @@ def guided_workspace_state(
         detail=detail,
         steps=steps,
         blockers=blockers,
+        repeat_actions=(
+            () if not has_case
+            # Con requisitos pendientes, lo ya generado no es coherente con las
+            # fuentes: sólo tiene sentido volver a leerlas.
+            else tuple(
+                item for item in repeat_actions_for_status(case_status)
+                if not blockers or item in {"reevaluar_fuentes"}
+            )
+        ),
     )
+
+
+# Etapas ya superadas que pueden repetirse desde cada estado. El servicio de
+# flujo sigue validando cada acción; esto sólo decide qué botones mostrar.
+_REPEATABLE_BY_STATUS = {
+    "ready_for_calculation": ("reevaluar_fuentes", "anadir_fuentes"),
+    "calculated": ("reevaluar_fuentes", "anadir_fuentes", "generar_excel"),
+    "reconciled": ("reevaluar_fuentes", "anadir_fuentes", "generar_excel", "calcular_reparto"),
+    "deliveries_generated": (
+        "reevaluar_fuentes", "anadir_fuentes", "generar_excel", "calcular_reparto", "generar_cartas",
+    ),
+    "closed": (
+        "reevaluar_fuentes", "anadir_fuentes", "generar_excel", "calcular_reparto", "generar_cartas",
+    ),
+}
+
+
+def repeat_actions_for_status(case_status: str) -> tuple[str, ...]:
+    return _REPEATABLE_BY_STATUS.get(case_status, ())
 
 
 def _is_hidden_source_path(path: Path) -> bool:
@@ -447,9 +479,11 @@ def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
             proposal = community_discovery.build_global_intake(paths)
             candidates = community_discovery.discover_communities(paths)
         except Exception as error:
+            message = str(error)
+
             def failed():
                 app._estado("No se pudo analizar la carpeta", procesando=False)
-                messagebox.showerror("No se pudo analizar la carpeta", str(error), parent=app)
+                messagebox.showerror("No se pudo analizar la carpeta", message, parent=app)
             app.after(0, failed)
             return
         app.after(0, lambda: _show_detected_communities(
@@ -551,11 +585,13 @@ def _show_detected_communities(
                     )
                     created.append((community_id, candidate))
             except Exception as error:
+                message = str(error)
+
                 def failed():
                     app._estado("No se pudieron crear las comunidades", procesando=False)
                     for widget in footer.winfo_children():
                         widget.configure(state="normal")
-                    messagebox.showerror("No se pudieron crear las comunidades", str(error), parent=dialog)
+                    messagebox.showerror("No se pudieron crear las comunidades", message, parent=dialog)
                 app.after(0, failed)
                 return
             finally:
@@ -1595,81 +1631,189 @@ def _packed_field(parent, label: str, *, placeholder: str = ""):
     return entry
 
 
+def _existing_period_cases(connection, community_id: int, exclude_case_id: int | None):
+    return [
+        period_selection.ExistingCase(case.name, case.start_date, case.end_date)
+        for case in expedient_service.list_cases(connection, community_id)
+        if case.id_case != exclude_case_id
+    ]
+
+
 def open_create_case_dialog(app: "AppGestionFincas") -> None:
+    open_case_period_dialog(app)
+
+
+def open_case_period_dialog(app: "AppGestionFincas", case_id: int | None = None) -> None:
+    """Crea un expediente o cambia sus fechas desde una única ventana.
+
+    Ofrece atajos (continuar el último expediente, ejercicio, año, trimestre,
+    mes), acepta fechas escritas de varias formas, propone un nombre y avisa
+    en vivo de solapes o duraciones sospechosas antes de guardar.
+    """
     if not getattr(app, "id_comunidad", None):
         messagebox.showwarning(
             "Comunidad requerida",
             "Selecciona una comunidad antes de crear un expediente.",
         )
         return
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        current = expedient_service.get_case(connection, case_id) if case_id else None
+        existing = _existing_period_cases(connection, app.id_comunidad, case_id)
+    finally:
+        connection.close()
+    editing = current is not None
 
-    dialog = _dialog(app, "Nuevo expediente", 500, 470)
+    dialog = _dialog(app, "Cambiar fechas" if editing else "Nuevo expediente", 560, 640)
     content = ctk.CTkFrame(
-        dialog,
-        fg_color=C["panel"],
-        corner_radius=16,
-        border_width=1,
-        border_color=C["borde"],
+        dialog, fg_color=C["panel"], corner_radius=16, border_width=1, border_color=C["borde"],
     )
     content.pack(fill="both", expand=True, padx=18, pady=18)
-    content.grid_columnconfigure(0, weight=1)
     ctk.CTkLabel(
         content,
-        text="Abre un expediente",
-        font=UIM.fuente(20, "bold"),
-        text_color=C["texto"],
-    ).grid(row=0, column=0, sticky="w", padx=22, pady=(22, 1))
+        text="Cambiar fechas del expediente" if editing else "Nuevo expediente",
+        font=UIM.fuente(20, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=22, pady=(20, 1))
     ctk.CTkLabel(
         content,
-        text="Define el intervalo real que vas a revisar.",
-        font=UIM.fuente(11),
-        text_color=C["texto_sec"],
-    ).grid(row=1, column=0, sticky="w", padx=22, pady=(0, 4))
+        text=(
+            "Si cambian las fechas, el expediente vuelve a revisión para comprobar qué "
+            "facturas y lecturas entran en el nuevo intervalo."
+            if editing else
+            "Elige un atajo o escribe las fechas del intervalo que vas a regularizar."
+        ),
+        font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=490, justify="left",
+    ).pack(anchor="w", padx=22, pady=(0, 8))
 
-    name = _field(content, "Nombre", 2, placeholder="Ej. Regularización enero")
-    start = _field(content, "Fecha inicial", 4, placeholder="DD/MM/AAAA")
-    end = _field(content, "Fecha final", 6, placeholder="DD/MM/AAAA")
+    start_var = tk.StringVar(value=period_selection.format_date(current.start_date) if editing else "")
+    end_var = tk.StringVar(value=period_selection.format_date(current.end_date) if editing else "")
+    name_var = tk.StringVar(value=current.name if editing else "")
+    name_state = {"auto": not editing}
+
+    presets = period_selection.period_presets(date.today(), existing)
+    ctk.CTkLabel(
+        content, text="ATAJOS", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=22, pady=(4, 4))
+    chips = ctk.CTkFrame(content, fg_color="transparent")
+    chips.pack(fill="x", padx=18)
+    chips.grid_columnconfigure((0, 1), weight=1)
+
+    def apply_preset(preset):
+        start_var.set(period_selection.format_date(preset.start))
+        end_var.set(period_selection.format_date(preset.end))
+
+    for index, preset in enumerate(presets):
+        ctk.CTkButton(
+            chips, text=preset.label, command=lambda item=preset: apply_preset(item),
+            height=30, corner_radius=8, font=UIM.fuente(10),
+            **UIM.secondary_button_kwargs(),
+        ).grid(row=index // 2, column=index % 2, sticky="ew", padx=4, pady=3)
+
+    dates = ctk.CTkFrame(content, fg_color="transparent")
+    dates.pack(fill="x", padx=22, pady=(10, 0))
+    dates.grid_columnconfigure((0, 1), weight=1)
+    entries = {}
+    for column, (label, variable) in enumerate((("Fecha inicial", start_var), ("Fecha final", end_var))):
+        ctk.CTkLabel(
+            dates, text=label.upper(), font=UIM.fuente(10, "bold"), text_color=C["texto_sec"],
+        ).grid(row=0, column=column, sticky="w", padx=(0 if column == 0 else 8, 0), pady=(0, 4))
+        entry = ctk.CTkEntry(
+            dates, textvariable=variable, height=38, corner_radius=9,
+            border_color=C["borde"], fg_color=C["panel_2"], text_color=C["texto"],
+            placeholder_text="DD/MM/AAAA", font=UIM.fuente(12),
+        )
+        entry.grid(row=1, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
+        entries[label] = entry
+    ctk.CTkLabel(
+        content, text="También vale 1/9/25, 2025-09-01 o «1 septiembre 2025».",
+        font=UIM.fuente(10), text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=22, pady=(3, 0))
+
+    ctk.CTkLabel(
+        content, text="NOMBRE", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=22, pady=(12, 4))
+    name_entry = ctk.CTkEntry(
+        content, textvariable=name_var, height=38, corner_radius=9,
+        border_color=C["borde"], fg_color=C["panel_2"], text_color=C["texto"],
+        placeholder_text="Se propone a partir de las fechas", font=UIM.fuente(12),
+    )
+    name_entry.pack(fill="x", padx=22)
+    name_entry.bind("<Key>", lambda _event: name_state.update(auto=False))
+
+    summary = ctk.CTkLabel(
+        content, text="", font=UIM.fuente(11, "bold"), text_color=C["primario"],
+        wraplength=490, justify="left", anchor="w",
+    )
+    summary.pack(fill="x", padx=22, pady=(12, 0))
+    notes = ctk.CTkLabel(
+        content, text="", font=UIM.fuente(10), text_color=C["aviso"],
+        wraplength=490, justify="left", anchor="w",
+    )
+    notes.pack(fill="x", padx=22, pady=(2, 0))
+    parsed: dict[str, object] = {}
+
+    def refresh(*_args):
+        parsed.clear()
+        try:
+            end_date = period_selection.parse_user_date(end_var.get(), reference_year=date.today().year)
+            try:
+                start_date = period_selection.parse_user_date(start_var.get())
+            except ValueError:
+                # «1/9» sin año: el del final, o el anterior si quedaría después.
+                start_date = period_selection.parse_user_date(
+                    start_var.get(), reference_year=end_date.year,
+                )
+                if start_date > end_date:
+                    start_date = start_date.replace(year=start_date.year - 1)
+        except ValueError as error:
+            has_text = start_var.get().strip() or end_var.get().strip()
+            summary.configure(text=str(error) if has_text else "", text_color=C["texto_sec"])
+            notes.configure(text="")
+            save_button.configure(state="disabled")
+            return
+        errors, warnings = period_selection.validate_range(start_date, end_date, existing)
+        if errors:
+            summary.configure(text=errors[0], text_color=C["alerta"])
+            notes.configure(text="")
+            save_button.configure(state="disabled")
+            return
+        parsed.update(start=start_date, end=end_date)
+        summary.configure(
+            text=period_selection.describe_range(start_date, end_date), text_color=C["primario"],
+        )
+        notes.configure(text="\n".join(f"⚠ {item}" for item in warnings))
+        if name_state["auto"]:
+            name_var.set(period_selection.default_case_name(start_date, end_date))
+        save_button.configure(state="normal")
 
     actions = ctk.CTkFrame(content, fg_color="transparent")
-    actions.grid(row=8, column=0, sticky="ew", padx=22, pady=(22, 18))
+    actions.pack(side="bottom", fill="x", padx=22, pady=(12, 18))
     ctk.CTkButton(
-        actions,
-        text="Cancelar",
-        command=dialog.destroy,
-        height=38,
-        corner_radius=9,
-        fg_color="transparent",
-        border_width=1,
-        border_color=C["borde"],
-        hover_color=C["acento_suave"],
-        text_color=C["texto_sec"],
+        actions, text="Cancelar", command=dialog.destroy, height=38, corner_radius=9,
+        fg_color="transparent", border_width=1, border_color=C["borde"],
+        hover_color=C["acento_suave"], text_color=C["texto_sec"],
     ).pack(side="right")
 
     def save():
-        try:
-            start_date = datetime.strptime(start.get().strip(), "%d/%m/%Y").date()
-            end_date = datetime.strptime(end.get().strip(), "%d/%m/%Y").date()
-        except ValueError:
-            messagebox.showwarning(
-                "Fecha no válida", "Usa el formato DD/MM/AAAA."
-            )
+        if "start" not in parsed:
             return
-        if end_date < start_date:
-            messagebox.showwarning(
-                "Rango no válido",
-                "La fecha de fin debe ser posterior o igual a la de inicio.",
-            )
-            return
-
+        start_date, end_date = parsed["start"], parsed["end"]
+        name = name_var.get().strip() or period_selection.default_case_name(start_date, end_date)
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
-            case = expedient_service.create_case(
-                connection,
-                app.id_comunidad,
-                name=name.get().strip(),
-                start_date=start_date,
-                end_date=end_date,
-            )
+            if editing:
+                case = expedient_service.update_case_dates(
+                    connection, current.id_case, name=name,
+                    start_date=start_date, end_date=end_date,
+                )
+            else:
+                case = expedient_service.create_case(
+                    connection, app.id_comunidad, name=name,
+                    start_date=start_date, end_date=end_date,
+                )
+        except ValueError as error:
+            messagebox.showwarning("No se pudo guardar", str(error), parent=dialog)
+            return
         finally:
             connection.close()
         app.id_expediente = case.id_case
@@ -1678,22 +1822,29 @@ def open_create_case_dialog(app: "AppGestionFincas") -> None:
         app._refrescar_lista_expedientes(select_case_id=case.id_case)
         app._refrescar_expediente()
         duration = (end_date - start_date).days + 1
-        app.log(
-            f"Expediente '{case.name}' creado · {duration} día(s) incluidos",
-            "ok",
-        )
+        if not editing:
+            app.log(f"Expediente '{case.name}' creado · {duration} día(s) incluidos", "ok")
+            return
+        app.log(f"Fechas de '{case.name}' actualizadas · {duration} día(s)", "ok")
+        dates_changed = (current.start_date, current.end_date) != (start_date, end_date)
+        if dates_changed and getattr(app, "_accion_reanalizar_fuentes", None) and messagebox.askyesno(
+            "Fechas actualizadas",
+            "¿Quieres reevaluar ahora las fuentes para comprobar qué facturas y "
+            "lecturas entran en el nuevo intervalo?",
+            parent=app,
+        ):
+            app._accion_reanalizar_fuentes()
 
-    ctk.CTkButton(
-        actions,
-        text="Crear expediente",
-        command=save,
-        height=38,
-        corner_radius=9,
-        font=UIM.fuente(12, "bold"),
-        fg_color=C["primario"],
-        hover_color=C["primario_hover"],
-    ).pack(side="right", padx=(0, 8))
-    name.focus_set()
+    save_button = ctk.CTkButton(
+        actions, text="Guardar fechas" if editing else "Crear expediente", command=save,
+        height=38, corner_radius=9, font=UIM.fuente(12, "bold"),
+        fg_color=C["primario"], hover_color=C["primario_hover"], state="disabled",
+    )
+    save_button.pack(side="right", padx=(0, 8))
+    start_var.trace_add("write", refresh)
+    end_var.trace_add("write", refresh)
+    refresh()
+    entries["Fecha inicial"].focus_set()
 
 
 def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:

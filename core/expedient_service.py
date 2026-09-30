@@ -166,6 +166,56 @@ def list_cases(connection: sqlite3.Connection, community_id: int) -> tuple[Regul
     return tuple(case_from_row(row) for row in rows)
 
 
+def update_case_dates(
+    connection: sqlite3.Connection,
+    case_id: int,
+    *,
+    name: str,
+    start_date: date,
+    end_date: date,
+) -> RegularizationCase:
+    """Cambia nombre y fechas de un expediente y de su período ligado.
+
+    Las facturas y lecturas ya aplicadas siguen asociadas al mismo período, pero
+    su pertenencia al nuevo intervalo debe revisarse: si el expediente había
+    avanzado, vuelve a «En revisión» para confirmar fuentes y regenerar el Excel.
+    """
+    if end_date < start_date:
+        raise ValueError("La fecha de fin debe ser posterior o igual a la fecha de inicio")
+    clean_name = name.strip()
+    if not clean_name:
+        raise ValueError("El expediente necesita un nombre")
+    with _transaction(connection):
+        case = get_case(connection, case_id)
+        if case.period_id is not None:
+            clash = connection.execute(
+                """SELECT 1 FROM periodos
+                   WHERE id_comunidad=? AND nombre=? AND id_periodo<>?""",
+                (case.community_id, clean_name, case.period_id),
+            ).fetchone()
+            if clash is not None:
+                raise ValueError(f"Ya existe otro período llamado {clean_name!r}")
+            connection.execute(
+                """UPDATE periodos SET nombre=?, fecha_inicio=?, fecha_fin=?
+                   WHERE id_periodo=?""",
+                (clean_name, start_date.isoformat(), end_date.isoformat(), case.period_id),
+            )
+        connection.execute(
+            """UPDATE regularization_cases
+               SET nombre=?, fecha_inicio=?, fecha_fin=?, updated_at=datetime('now')
+               WHERE id_case=?""",
+            (clean_name, start_date.isoformat(), end_date.isoformat(), case_id),
+        )
+        dates_changed = (case.start_date, case.end_date) != (start_date, end_date)
+        if dates_changed and case.status in {
+            "ready_for_calculation", "calculated", "reconciled",
+            "deliveries_generated", "closed",
+        }:
+            _update_case_status(connection, case_id, case.status, "under_review")
+        row = _case_row(connection, case_id)
+    return case_from_row(row)
+
+
 def link_case_to_period(connection: sqlite3.Connection, id_case: int) -> int:
     """Enlaza un expediente a un periodo con la misma comunidad y fechas."""
     with _transaction(connection):
