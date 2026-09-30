@@ -26,7 +26,10 @@ from excel_profiles import (
     load_profile,
 )
 from excel_validation import validate_workbook, workbook_fingerprint
-from office_recalculation import LibreOfficeRecalculator, WorkbookRecalculator
+from office_recalculation import (
+    LibreOfficeRecalculator, WorkbookRecalculator,
+    restore_design_with_calculated_values,
+)
 
 
 class ExportBlockedError(ValueError):
@@ -1400,8 +1403,17 @@ def generate_official_excel(
         _emit(progress, "recalculate", id_export_run=run_id)
         _set_run(connection, run_id, "recalculating")
         engine = recalculator or LibreOfficeRecalculator()
+        before_recalculation = work_directory / "before_recalculation.xlsx"
+        if isinstance(engine, LibreOfficeRecalculator):
+            shutil.copy2(temporary_path, before_recalculation)
         engine.recalculate(temporary_path, work_directory)
-        _restore_missing_ooxml_parts(template, temporary_path)
+        if isinstance(engine, LibreOfficeRecalculator):
+            validate_workbook(
+                temporary_path, profile, _expected_totals(connection, case, profile),
+            )
+            restore_design_with_calculated_values(before_recalculation, temporary_path)
+        else:
+            _restore_missing_ooxml_parts(template, temporary_path)
 
         _emit(progress, "reconcile", id_export_run=run_id)
         validate_workbook(

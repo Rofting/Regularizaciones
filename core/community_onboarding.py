@@ -10,11 +10,14 @@ import sqlite3
 import tempfile
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping
 
 from openpyxl import load_workbook
 
+import case_ingestion
+import document_review
 import excel_generator
 import expedient_service
 import gestor_bd
@@ -26,6 +29,7 @@ from excel_profiles import (
 )
 from lector_pdf import extraer_texto
 from meter_reading_sources import ReadingObservation, excel_observations
+from source_analysis import SourceAnalysis, analyse_source
 
 
 _EXCEL_SUFFIXES = frozenset({".xls", ".xlsx"})
@@ -459,7 +463,11 @@ def confirm_onboarding(
 
     root = Path(project_root).resolve()
     archives = Path(archive_root).resolve()
-    payload = build_profile_payload(draft, answers)
+    configuration = resolve_onboarding_configuration(draft, answers)
+    payload = build_profile_payload(draft, configuration)
+    invoice_decisions = {
+        item.source_sha256: item for item in configuration.invoice_decisions
+    }
     _verify_source_fingerprints(draft.sources)
     key = str(payload["key"])
     profile_path = runtime_profile_path(key, root)
@@ -556,7 +564,7 @@ def confirm_onboarding(
                         case_id,
                         source_path=source.path,
                         archive_root=archives,
-                        document_kind=source.kind,
+                        document_kind="invoice" if source.kind == "invoice_pdf" else source.kind,
                     )
                 except Exception:
                     for recovered in _new_source_document_rows(
@@ -568,6 +576,50 @@ def confirm_onboarding(
                 if created:
                     document_ids.append(document.id_document)
                     archived_paths.append(document.archived_path)
+                if source.kind == "invoice_pdf":
+                    decision = invoice_decisions[source.sha256]
+                    parsed = analyse_source(
+                        document.archived_path,
+                        community_code=draft.community_code,
+                        connection=connection,
+                    )
+                    candidates = dict(parsed.candidates) if parsed.kind == "invoice" else {}
+                    amount_text = re.sub(r"[^\d,.-]", "", decision.amount)
+                    if "," in amount_text and "." in amount_text:
+                        decimal_mark = max(amount_text.rfind(","), amount_text.rfind("."))
+                        amount_text = (
+                            re.sub(r"[,.]", "", amount_text[:decimal_mark])
+                            + "." + amount_text[decimal_mark + 1:]
+                        )
+                    elif "," in amount_text:
+                        amount_text = amount_text.replace(",", ".")
+                    try:
+                        amount = Decimal(amount_text)
+                    except InvalidOperation as error:
+                        raise ValueError("El importe confirmado de la factura no es válido") from error
+                    candidates.update({
+                        "proveedor": decision.provider,
+                        "tipo_suministro": decision.concept,
+                        "importe_total": str(amount),
+                    })
+                    analysed = SourceAnalysis.invoice(
+                        candidates, locator=parsed.locator, confidence="medium",
+                        provider_key=parsed.provider_key,
+                    )
+                    case_ingestion.add_analysed_document_to_case(
+                        connection, case_id,
+                        source_path=document.archived_path,
+                        archive_root=archives,
+                        analysis=analysed,
+                    )
+                    document_review.record_candidates(
+                        connection, document.id_document,
+                        {key: candidates[key] for key in (
+                            "proveedor", "tipo_suministro", "importe_total"
+                        )},
+                        source="onboarding", validation_status="validated",
+                    )
+                    case_ingestion.ensure_pending_source_issues(connection, case_id)
 
         return OnboardingResult(
             community_id=community_id,

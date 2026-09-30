@@ -993,6 +993,36 @@ class CommunityOnboardingTest(unittest.TestCase):
             project_root=self.project_root,
         ).key)
 
+    def test_invoice_selected_during_onboarding_requires_review_before_calculation(self):
+        result = community_onboarding.confirm_onboarding(
+            self.connection, **self._confirmation_arguments()
+        )
+        invoice = self.connection.execute(
+            """SELECT id_document,document_kind,classification_confidence,status
+               FROM source_documents WHERE original_name='invoice.pdf'"""
+        ).fetchone()
+        self.assertEqual("invoice", invoice["document_kind"])
+        self.assertEqual("medium", invoice["classification_confidence"])
+        self.assertNotEqual("validated", invoice["status"])
+        self.assertEqual(0, self.connection.execute(
+            "SELECT COUNT(*) FROM facturas"
+        ).fetchone()[0])
+        candidates = dict(self.connection.execute(
+            "SELECT field_name,value FROM extraction_candidates WHERE id_document=?",
+            (invoice["id_document"],),
+        ).fetchall())
+        self.assertEqual("Proveedor confirmado", candidates["proveedor"])
+        self.assertEqual("100.00", candidates["importe_total"])
+        self.assertTrue(self.connection.execute(
+            """SELECT 1 FROM review_issues WHERE id_document=? AND status='open'
+               AND field_name IN ('fecha_inicio','fecha_fin')""",
+            (invoice["id_document"],),
+        ).fetchone())
+        with self.assertRaisesRegex(ValueError, "incidencia|pendiente"):
+            document_review.validate_case_ready(
+                self.connection, result.case_id, self.project_root,
+            )
+
     def test_onboarded_runtime_profile_installs_bootstrap_template_for_long_code(self):
         draft = community_onboarding.OnboardingDraft(
             community_code="1234",
