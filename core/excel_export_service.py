@@ -518,6 +518,18 @@ def _input_hash(
             (case["id_comunidad"],),
         ),
     }
+    # Lo cobrado a los vecinos alimenta el «importe cobrado» del análisis: si
+    # cambia una cuota, el Excel y el reparto dejan de estar al día. Sólo se
+    # incluye cuando existe, para no invalidar huellas de comunidades sin cuotas.
+    fees = _query_dicts(
+        connection,
+        """SELECT servicio,concepto,fecha,importe,consumo,fecha_inicio,fecha_fin
+           FROM cuotas_servicio WHERE id_comunidad=? AND id_periodo=?
+           ORDER BY servicio,concepto,fecha""",
+        (case["id_comunidad"], period_id),
+    )
+    if fees:
+        payload["fees"] = fees
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

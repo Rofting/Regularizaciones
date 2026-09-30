@@ -13,10 +13,13 @@ Hay dos clases de apunte, las mismas que el despacho lleva a mano:
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+
+from period_selection import MONTH_NAMES, parse_user_date
 
 
 SERVICIOS = ("ACS", "CALEFACCION")
@@ -36,9 +39,20 @@ class ResumenCuotas:
 
 
 def _importe(valor: object, etiqueta: str) -> Decimal:
+    """Acepta 1234,5 · 1.234,50 · 1234.50 · 1,234.50 y un «€» final."""
+    texto = str(valor).strip().replace("€", "").replace(" ", "").replace("\xa0", "")
+    if "," in texto and "." in texto:
+        if texto.rfind(",") > texto.rfind("."):
+            texto = texto.replace(".", "").replace(",", ".")
+        else:
+            texto = texto.replace(",", "")
+    elif "," in texto:
+        texto = texto.replace(",", ".")
+    elif re.fullmatch(r"-?\d{1,3}(?:\.\d{3})+", texto):
+        texto = texto.replace(".", "")
     try:
-        importe = Decimal(str(valor).strip().replace(",", "."))
-    except (ArithmeticError, ValueError, AttributeError):
+        importe = Decimal(texto)
+    except (ArithmeticError, ValueError):
         raise ValueError(f"{etiqueta} debe ser un número") from None
     if not importe.is_finite():
         raise ValueError(f"{etiqueta} debe ser un número")
@@ -47,9 +61,51 @@ def _importe(valor: object, etiqueta: str) -> Decimal:
 
 def _fecha(valor: str, etiqueta: str) -> str:
     try:
-        return date.fromisoformat(str(valor)[:10]).isoformat()
+        return date.fromisoformat(str(valor).strip()[:10]).isoformat()
     except ValueError:
-        raise ValueError(f"{etiqueta} no es una fecha válida (aaaa-mm-dd)") from None
+        pass
+    try:
+        return parse_user_date(str(valor)).isoformat()
+    except ValueError:
+        raise ValueError(f"{etiqueta} no es una fecha válida (dd/mm/aaaa)") from None
+
+
+def parse_mes(valor: str) -> str:
+    """Primer día del mes escrito como 2026-01, 01/2026, 1/26, «enero 2026» o «ene-26»."""
+    texto = " ".join(str(valor or "").strip().lower().split())
+    numerico = re.fullmatch(r"(\d{4})[-/.](\d{1,2})(?:[-/.]\d{1,2})?", texto)
+    if numerico:
+        año, mes = int(numerico[1]), int(numerico[2])
+    else:
+        invertido = re.fullmatch(r"(\d{1,2})[-/.](\d{2}|\d{4})", texto)
+        nombre = re.fullmatch(r"([a-záéíóú]+)\.?[\s/-]+(?:de\s+)?(\d{2}|\d{4})", texto)
+        if invertido:
+            mes, crudo = int(invertido[1]), invertido[2]
+        elif nombre and nombre[1] in _MESES:
+            mes, crudo = _MESES[nombre[1]], nombre[2]
+        else:
+            raise ValueError(f"No se entiende el mes «{valor}». Usa MM/AAAA.")
+        año = int(crudo) + (2000 if len(crudo) == 2 else 0)
+    if not 1 <= mes <= 12:
+        raise ValueError(f"El mes «{valor}» no existe.")
+    return date(año, mes, 1).isoformat()
+
+
+_MESES = {
+    nombre: indice
+    for indice, completo in enumerate(MONTH_NAMES, start=1)
+    for nombre in (completo, completo[:3])
+}
+_MESES.update({"sept": 9, "setiembre": 9})
+
+
+def viviendas_facturables(connection: sqlite3.Connection, community_id: int) -> int:
+    """Viviendas activas entre las que se reparte la cuota fija."""
+    return int(connection.execute(
+        """SELECT COUNT(*) FROM propietarios
+           WHERE id_comunidad=? AND activo=1 AND COALESCE(tipo_unidad,'vivienda')='vivienda'""",
+        (community_id,),
+    ).fetchone()[0])
 
 
 def meses_del_periodo(fecha_inicio: str, fecha_fin: str) -> list[str]:
@@ -107,12 +163,15 @@ def generar_cuotas_mensuales(
     servicio: str,
     tramos: list[tuple[str, object]],
     notas: str | None = None,
+    reemplazar: bool = True,
 ) -> int:
     """Crea una cuota fija por mes a partir de los tramos de importe.
 
-    ``tramos`` son pares (mes desde el que aplica, importe mensual), como los
-    lleva el despacho: 400 € desde agosto y 300 € desde enero. Cada mes del
-    período recibe el importe del último tramo que ya haya empezado.
+    ``tramos`` son pares (mes desde el que aplica, importe mensual total de la
+    comunidad), como los lleva el despacho: 400 € desde agosto y 300 € desde
+    enero. Cada mes del período recibe el importe del último tramo que ya haya
+    empezado. Con ``reemplazar`` se borran antes las cuotas fijas anteriores,
+    para que un cambio de tramos o de fechas no deje meses sobrantes.
     """
     periodo = connection.execute(
         "SELECT fecha_inicio,fecha_fin FROM periodos WHERE id_periodo=?", (period_id,)
@@ -123,10 +182,13 @@ def generar_cuotas_mensuales(
         raise ValueError("Indica al menos un importe mensual")
 
     ordenados = sorted(
-        (( _fecha(desde, "El mes del tramo"), _importe(importe, "El importe mensual"))
-         for desde, importe in tramos),
+        ((parse_mes(desde), _importe(importe, "El importe mensual")) for desde, importe in tramos),
         key=lambda tramo: tramo[0],
     )
+    if any(importe < 0 for _, importe in ordenados):
+        raise ValueError("El importe mensual no puede ser negativo")
+    if reemplazar:
+        borrar_fijas(connection, community_id=community_id, period_id=period_id, servicio=servicio)
     creadas = 0
     for mes in meses_del_periodo(periodo["fecha_inicio"], periodo["fecha_fin"]):
         vigentes = [importe for desde, importe in ordenados if desde[:7] <= mes[:7]]
@@ -139,6 +201,17 @@ def generar_cuotas_mensuales(
         )
         creadas += 1
     return creadas
+
+
+def borrar_fijas(
+    connection: sqlite3.Connection, *, community_id: int, period_id: int, servicio: str,
+) -> int:
+    cursor = connection.execute(
+        """DELETE FROM cuotas_servicio
+           WHERE id_comunidad=? AND id_periodo=? AND servicio=? AND concepto='fija'""",
+        (community_id, period_id, servicio),
+    )
+    return cursor.rowcount
 
 
 def resumen(
