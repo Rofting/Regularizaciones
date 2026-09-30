@@ -50,7 +50,10 @@ class PresetTest(unittest.TestCase):
         self.assertEqual((date(2026, 1, 20), date(2026, 1, 29)), (first.start, first.end))
 
     def test_default_presets_cover_fiscal_year_calendar_year_and_month(self):
-        presets = {item.key: item for item in period_presets(date(2026, 9, 30))}
+        presets = {
+            item.key: item
+            for item in period_presets(date(2026, 9, 30), fiscal_start_month=9)
+        }
         self.assertEqual((date(2025, 9, 1), date(2026, 8, 31)),
                          (presets["last_fiscal"].start, presets["last_fiscal"].end))
         self.assertEqual((date(2025, 1, 1), date(2025, 12, 31)),
@@ -59,6 +62,11 @@ class PresetTest(unittest.TestCase):
                          (presets["last_quarter"].start, presets["last_quarter"].end))
         self.assertEqual((date(2026, 8, 1), date(2026, 8, 31)),
                          (presets["last_month"].start, presets["last_month"].end))
+
+    def test_calendar_year_offices_get_no_split_fiscal_year(self):
+        keys = [item.key for item in period_presets(date(2026, 9, 30))]
+        self.assertNotIn("last_fiscal", keys)
+        self.assertIn("current_year", keys)
 
     def test_presets_are_not_duplicated(self):
         previous = [ExistingCase("2024-2025", date(2024, 9, 1), date(2025, 8, 31))]

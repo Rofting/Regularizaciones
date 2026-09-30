@@ -786,15 +786,15 @@ if __name__ == "__main__":
     con = conectar(RUTA_TEST)
 
     # Insertar datos de prueba mínimos
-    id_com = obtener_o_crear_comunidad(con, "644", "Séptimo Sello", "H99258139")
+    id_com = obtener_o_crear_comunidad(con, "001", "Comunidad de prueba", "H12345674")
     id_per = obtener_o_crear_periodo(con, id_com, "2023-2024", "2023-09-01")
     con.execute("UPDATE periodos SET fecha_fin='2024-08-31' WHERE id_periodo=?", (id_per,))
 
     # 3 vecinos de prueba
     vecinos_test = [
-        ("SS22 BAJO IZDA", "SILVIA MORER",  0.676),
-        ("SS22 BAJO DCHA", "JAVIER REDONDO", 0.752),
-        ("SS22 1 IZDA",    "JESUS LORENZO",  0.752),
+        ("BL1 BAJO IZDA", "VECINO UNO",  0.676),
+        ("BL1 BAJO DCHA", "VECINO DOS",  0.752),
+        ("BL1 1 IZDA",    "VECINO TRES", 0.752),
     ]
     ids_v = []
     for cod, nom, coef in vecinos_test:

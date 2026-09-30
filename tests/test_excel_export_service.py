@@ -922,5 +922,40 @@ class HeatingSeasonTest(unittest.TestCase):
                 _season_boundary(invalido, "05-31")
 
 
+
+class SupplyIdentityTest(unittest.TestCase):
+    def test_supply_address_and_cups_come_from_the_community_and_its_invoices(self):
+        import sqlite3
+        from openpyxl import Workbook
+        from excel_export_service import _write_supply_identity
+
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            """CREATE TABLE comunidades (id_comunidad INTEGER, direccion TEXT);
+               CREATE TABLE source_documents (id_document INTEGER, id_case INTEGER,
+                   document_kind TEXT, status TEXT);
+               CREATE TABLE extraction_candidates (id_document INTEGER, field_name TEXT, value TEXT);
+               INSERT INTO comunidades VALUES (1, 'Calle Mayor 5');
+               INSERT INTO source_documents VALUES (10, 7, 'invoice', 'validated');
+               INSERT INTO extraction_candidates VALUES (10, 'tipo_suministro', 'GAS');
+               INSERT INTO extraction_candidates VALUES (10, 'cups', 'ES 0217 9000 0000 0001 AB');"""
+        )
+        workbook = Workbook()
+        gas = workbook.active
+        gas.title = "GAS"
+        gas["C4"], gas["C5"] = "MONASTERIO DE POBLET 30", "ES0208330332121001LR"
+        electricity = workbook.create_sheet("ELECTRICIDAD")
+        electricity["C4"] = "Dirección escrita a mano"
+        case = {"id_case": 7, "id_comunidad": 1, "comunidad_nombre": "CP Ejemplo"}
+
+        _write_supply_identity(connection, workbook, case)
+
+        self.assertEqual(("Calle Mayor 5", "ES0217900000000001AB"), (gas["C4"].value, gas["C5"].value))
+        # Lo que la comunidad escribió en su propia plantilla se respeta.
+        self.assertEqual("Dirección escrita a mano", electricity["C4"].value)
+        self.assertIn(electricity["C5"].value, (None, ""))
+        connection.close()
+
 if __name__ == "__main__":
     unittest.main()

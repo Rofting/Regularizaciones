@@ -28,12 +28,15 @@ class LetterIdentity:
     logo_path: Path | None = None
 
 
-def load_community_letter_identity(project_root: Path, community_code: str) -> LetterIdentity:
-    """Carga una identidad opcional y segura para las cartas de una comunidad.
+def load_community_letter_identity(
+    project_root: Path, community_code: str, office=None,
+) -> LetterIdentity:
+    """Carga la identidad de las cartas de una comunidad.
 
-    El archivo no contiene datos de reparto y puede instalarse en cada despacho:
-    ``config/letter_identities.json``. Un logo sólo se acepta si queda dentro
-    del proyecto para impedir que una configuración abra rutas arbitrarias.
+    Parte de los datos del despacho (``office``, guardados en su base) y
+    admite excepciones por comunidad en ``config/letter_identities.json``. Un
+    logo sólo se acepta si queda dentro del proyecto para impedir que una
+    configuración abra rutas arbitrarias.
     """
     root = Path(project_root).resolve()
     defaults = {
@@ -42,6 +45,15 @@ def load_community_letter_identity(project_root: Path, community_code: str) -> L
         "signature": "La Administración",
         "city": "",
     }
+    office_logo = None
+    if office is not None and office.configured:
+        defaults.update({
+            "office_name": office.name.strip(),
+            "footer": office.letter_footer or defaults["footer"],
+            "signature": office.letter_signature,
+            "city": office.city.strip(),
+        })
+        office_logo = office.logo_path or None
     path = root / "config" / "letter_identities.json"
     if path.is_file():
         try:
@@ -62,9 +74,9 @@ def load_community_letter_identity(project_root: Path, community_code: str) -> L
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError(f"{key} debe ser un texto no vacío")
                 defaults[key] = value.strip()
-        logo_raw = configured.get("logo_path")
+        logo_raw = configured.get("logo_path", office_logo)
     else:
-        logo_raw = None
+        logo_raw = office_logo
 
     logo_path = None
     if logo_raw is not None:

@@ -337,7 +337,14 @@ def _community_tax_ids(connection: sqlite3.Connection | None) -> set[str]:
         rows = connection.execute("SELECT cif FROM comunidades WHERE cif IS NOT NULL").fetchall()
     except sqlite3.OperationalError:
         return set()
-    return {re.sub(r"[^A-Z0-9]", "", str(row[0]).upper()) for row in rows}
+    result = {re.sub(r"[^A-Z0-9]", "", str(row[0]).upper()) for row in rows}
+    # El CIF del propio despacho aparece en facturas dirigidas «a la atención
+    # del administrador»: nunca es el del emisor.
+    from office_settings import load_office_settings
+    office_tax_id = load_office_settings(connection).tax_id
+    if office_tax_id:
+        result.add(office_tax_id)
+    return result
 
 
 def learn_issuer_tax_id(

@@ -14,6 +14,15 @@ from openpyxl.utils.cell import range_boundaries
 from openpyxl.utils.cell import coordinate_from_string
 
 from excel_profiles import ExcelProfile
+from fixed_costs import FIXED_COST_CELLS
+
+
+SUPPLY_IDENTITY_CELLS = {
+    "GAS": ("C4", "C5"),
+    "ELECTRICIDAD": ("C4", "C5"),
+    # Rótulo del período de lecturas del modelo común.
+    "LECTURAS ACS M3": ("P6",),
+}
 
 
 FORMULA_ERRORS = frozenset({
@@ -69,6 +78,10 @@ def _mutable_addresses(profile: ExcelProfile) -> dict[str, set[str]]:
         for row in range(int(table["start_row"]), int(table["end_row"]) + 1):
             for column in (*_input_columns(table).values(), *table.get("derived_columns", {}).values()):
                 result.setdefault(sheet_name, set()).add(f"{column}{row}")
+    # Dirección y CUPS de las hojas de suministro: identidad de la comunidad
+    # que el exportador rellena en cualquier perfil (ver _write_supply_identity).
+    for sheet_name, addresses in (*SUPPLY_IDENTITY_CELLS.items(), *FIXED_COST_CELLS.items()):
+        result.setdefault(sheet_name, set()).update(addresses)
     if profile.key == "658_acs_v1":
         # Enlaces históricos añadidos por el exportador sin cambiar el JSON
         # v1 que ya está registrado por huella en bases de datos existentes.

@@ -818,8 +818,8 @@ def _create_reading_issue(
 def _normalizar_vivienda(codigo: str) -> str:
     """
     Normaliza el código de vivienda para comparación robusta.
-    'SS22 BAJO IZDA' → 'SS22BAJOIZDA'
-    'SS22 1 IZDA' → 'SS221IZDA'
+    'BL1 BAJO IZDA' → 'BL1BAJOIZDA'
+    'BL1 1 IZDA' → 'BL11IZDA'
     """
     # Quitar espacios, puntos, º
     return re.sub(r'[\s\.º°]', '', codigo.upper())

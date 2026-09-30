@@ -203,7 +203,7 @@ class ProviderResolutionRobustnessTest(unittest.TestCase):
 class TaxIdTest(unittest.TestCase):
     def test_control_digit_validation(self):
         from provider_registry import valid_spanish_tax_id
-        for value in ("A95758389", "B50000009", "12345678Z", "X1234567L", "Q2826000H", "H99258139"):
+        for value in ("A95758389", "B50000009", "12345678Z", "X1234567L", "Q2826000H", "H12345674"):
             with self.subTest(value=value):
                 self.assertTrue(valid_spanish_tax_id(value))
         for value in ("A95758388", "B50000000", "12345678A", "Q28260008"):
@@ -212,12 +212,12 @@ class TaxIdTest(unittest.TestCase):
 
     def test_find_tax_ids_accepts_separators_and_skips_invalid_tokens(self):
         from provider_registry import find_tax_ids
-        text = "CIF: A-95.758.389 · cliente H99258139 · ref B50000000 · IBAN ES12 3456"
-        self.assertEqual(("A95758389", "H99258139"), find_tax_ids(text))
+        text = "CIF: A-95.758.389 · cliente H12345674 · ref B50000000 · IBAN ES12 3456"
+        self.assertEqual(("A95758389", "H12345674"), find_tax_ids(text))
 
     def test_community_tax_id_with_separators_is_found_by_the_pdf_reader(self):
         from lector_pdf import extraer_cif_pdf
-        self.assertEqual("H99258139", extraer_cif_pdf("Comunidad N.I.F. H-99.258.139"))
+        self.assertEqual("H12345674", extraer_cif_pdf("Comunidad N.I.F. H-12.345.674"))
         self.assertIsNone(extraer_cif_pdf("Proveedor B50000009"))
 
     def test_catalog_lookup_by_display_name_or_alias(self):
@@ -230,6 +230,50 @@ class TaxIdTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual("ACME", profile_for_name(registry, value).key)
         self.assertIsNone(profile_for_name(registry, "Otro"))
+
+
+class OfficeCatalogLayerTest(unittest.TestCase):
+    BASE = {"proveedores": {
+        "ACME": {"aliases": ["ACME"], "document_types": ["invoice"], "tipo_suministro": "GAS",
+                 "regex": {"importe_total": "a"}},
+        "OTRO": {"aliases": ["OTRO"], "document_types": ["invoice"]},
+    }}
+
+    def test_office_layer_adds_completes_and_disables_providers(self):
+        from provider_registry import merge_catalogs
+        merged = merge_catalogs(self.BASE, {
+            "desactivados": ["otro"],
+            "proveedores": {
+                "acme": {"regex": {"fecha_inicio": "b"}, "cups_comunidades": {"7": "ES1"}},
+                "LOCAL": {"aliases": ["LOCAL SL"], "document_types": ["invoice"]},
+            },
+        })["proveedores"]
+        self.assertEqual({"ACME", "LOCAL"}, set(merged))
+        self.assertEqual({"importe_total": "a", "fecha_inicio": "b"}, merged["ACME"]["regex"])
+        self.assertEqual("GAS", merged["ACME"]["tipo_suministro"])
+        self.assertEqual({"7": "ES1"}, merged["ACME"]["cups_comunidades"])
+
+    def test_registry_and_pdf_reader_load_the_office_layer_next_to_the_catalog(self):
+        import json
+        from lector_pdf import cargar_proveedores
+        from provider_registry import load_provider_registry
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "proveedores.json"
+            base.write_text(json.dumps(self.BASE), encoding="utf-8")
+            (Path(directory) / "proveedores_despacho.json").write_text(json.dumps(
+                {"proveedores": {"LOCAL": {"aliases": ["LOCAL SL"], "document_types": ["invoice"]}}}
+            ), encoding="utf-8")
+            self.assertIn("LOCAL", load_provider_registry(base))
+            self.assertIn("LOCAL", cargar_proveedores(str(base))["proveedores"])
+
+    def test_product_catalog_carries_no_community_data(self):
+        import json
+        from provider_registry import OFFICE_ONLY_KEYS
+        payload = json.loads((PROJECT_ROOT / "config" / "proveedores.json").read_text(encoding="utf-8"))
+        for key, provider in payload["proveedores"].items():
+            for field in OFFICE_ONLY_KEYS:
+                with self.subTest(provider=key, field=field):
+                    self.assertNotIn(field, provider)
 
 if __name__ == "__main__":
     unittest.main()

@@ -53,8 +53,8 @@ def cargar_proveedores(ruta_json: str | None = None) -> dict:
             os.path.dirname(os.path.dirname(__file__)), "config", "proveedores.json"
         )
         ruta_json = legacy_path if os.path.exists(legacy_path) else project_config
-    with open(ruta_json, encoding="utf-8") as f:
-        return json.load(f)
+    from provider_registry import load_catalog_payload
+    return load_catalog_payload(ruta_json)
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +155,8 @@ def extraer_cif_pdf(texto: str) -> str | None:
     """
     Extrae el CIF/NIF de la comunidad del texto del PDF.
     El CIF aparece en todas las facturas, generalmente como:
-      'NIF: H99258139', 'CIF / NIF: H99258139', 'H99258139'
-    Formato CIF de comunidad: letra + 8 dígitos (ej: H99258139).
+      'NIF: H12345674', 'CIF / NIF: H12345674', 'H12345674'
+    Formato CIF de comunidad: letra + 8 dígitos (ej: H12345674).
     """
     patrones = [
         r'NIF\s*/?\s*CIF[:\s]+([A-Z][0-9]{8})',
@@ -169,7 +169,7 @@ def extraer_cif_pdf(texto: str) -> str | None:
         m = re.search(patron, texto, re.IGNORECASE)
         if m:
             return m.group(1).upper()
-    # CIF escrito con separadores («H-99.258.139»): se aceptan sólo los que
+    # CIF escrito con separadores («H-12.345.674»): se aceptan sólo los que
     # superan el dígito de control y son de entidades sin ánimo de lucro.
     from provider_registry import find_tax_ids
     for letras in ("H", "EJG"):
@@ -1268,7 +1268,7 @@ def extraer_lecturas_metrigest(texto_paginas: list[str], config: dict) -> dict:
     """
     Extrae lecturas individuales de todos los vecinos de un resumen Metrigest.
     Formato real (dos líneas por vecino):
-      Línea 1: 'SS22 BAJO IZDA - SILVIA MORER AGUARON 6,00 € 0,00 € 6,00 €'
+      Línea 1: 'BL1 BAJO IZDA - NOMBRE APELLIDOS 6,00 € 0,00 € 6,00 €'
       Línea 2: 'ACS 30/01/2026 1,00 02/03/2026 2,00 1,00 M3 6,00 € 6,00 €'
     """
     import re as _re

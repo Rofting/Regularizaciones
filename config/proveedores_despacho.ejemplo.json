@@ -1,0 +1,23 @@
+{
+  "_descripcion": "Ejemplo de capa del despacho. Cópialo como proveedores_despacho.json y deja solo lo que necesites.",
+  "desactivados": [
+    "CLAVE_DE_UN_PROVEEDOR_QUE_NO_USES"
+  ],
+  "proveedores": {
+    "MI_PROVEEDOR_LOCAL": {
+      "nombre_display": "Mantenimientos Ejemplo S.L.",
+      "tipo_suministro": "MANTENIMIENTO",
+      "firmas_identificacion": [
+        "MANTENIMIENTOS EJEMPLO"
+      ],
+      "tax_ids": [
+        "B00000000"
+      ]
+    },
+    "ENDESA_LUZ_COMUNIDAD": {
+      "cups_comunidades": {
+        "101": "ES0000000000000000XX0F"
+      }
+    }
+  }
+}
