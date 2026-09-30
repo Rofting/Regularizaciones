@@ -6,6 +6,7 @@ import sys
 import tkinter as tk
 from collections import Counter
 from dataclasses import dataclass
+import re
 from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -675,13 +676,133 @@ def issue_guidance(field_name: str) -> dict[str, str]:
             "why": "Determina la hoja del Excel y la regla de reparto que se aplicará.",
         },
     }
+    guides.update({
+        "tipo_suministro": {
+            "label": "Tipo de suministro",
+            "what_to_find": "Indica qué servicio factura el documento: GAS, ELECTRICIDAD, AGUA, ACS, CALEFACCION, MANTENIMIENTO…",
+            "format": "Una palabra en mayúsculas. Ejemplo: GAS.",
+            "why": "Decide en qué concepto del reparto entra la factura.",
+        },
+        "fecha_factura": {
+            "label": "Fecha de emisión de la factura",
+            "what_to_find": "Busca «Fecha de factura», «Fecha de emisión» o «Fecha» junto al número de factura.",
+            "format": "Escribe la fecha como dd/mm/aaaa. Ejemplo: 05/04/2026.",
+            "why": "Identifica la factura y ayuda a detectar duplicados.",
+        },
+        "num_factura": {
+            "label": "Número de factura",
+            "what_to_find": "Busca «Nº factura», «Número de factura» o «Factura nº» en la cabecera.",
+            "format": "Cópialo tal cual, con letras y guiones. Ejemplo: FE-2026/00123.",
+            "why": "Evita incorporar dos veces la misma factura.",
+        },
+        "consumo_kwh": {
+            "label": "Consumo facturado (kWh)",
+            "what_to_find": "Busca «Consumo total», «Energía consumida» o el total de kWh del período.",
+            "format": "Solo el número. Ejemplo: 1.245,50.",
+            "why": "Permite contrastar el consumo con las lecturas.",
+        },
+        "consumo_m3": {
+            "label": "Consumo facturado (m³)",
+            "what_to_find": "Busca «Consumo» seguido de m³ en el detalle de lecturas de la factura.",
+            "format": "Solo el número. Ejemplo: 45.",
+            "why": "Permite contrastar el consumo con las lecturas.",
+        },
+        "document.provider": {
+            "label": "Proveedor de la factura",
+            "what_to_find": "Mira en la cabecera la empresa que emite la factura (nombre y CIF).",
+            "format": "Elige o escribe el proveedor tal como figura en el documento.",
+            "why": "Con el proveedor se aplican sus reglas de lectura y se releen fechas e importes automáticamente.",
+        },
+        "document.eligibility": {
+            "label": "¿La factura entra en este expediente?",
+            "what_to_find": "Compara el período facturado y el servicio con las fechas y conceptos del expediente.",
+            "format": "Ciérrala como no aplicable u omítela si pertenece a otro período o servicio.",
+            "why": "Evita que una factura de otro período o servicio se sume al reparto.",
+        },
+        "tipo": {
+            "label": "Servicio de las lecturas",
+            "what_to_find": "Indica si las lecturas son de agua caliente (ACS) o de calefacción.",
+            "format": "ACS o CALEFACCION.",
+            "why": "Cada servicio se reparte en su propia hoja.",
+        },
+    })
     default = {
-        "label": field_name.replace("_", " ").capitalize(),
+        "label": field_name.replace("_", " ").replace(".", " ").capitalize(),
         "what_to_find": "Busca este dato en el documento original antes de confirmarlo.",
         "format": "Copia el valor con el formato que aparece en la fuente.",
         "why": "Es necesario para mantener trazabilidad y evitar un cálculo con datos incompletos.",
     }
     return guides.get(field_name, default)
+
+
+_ISSUE_TITLES = {
+    "PROVIDER_UNKNOWN": "Proveedor sin identificar",
+    "INVOICE_OUTSIDE_PERIOD": "Factura fuera del período",
+    "ELIGIBILITY_REVIEW_REQUIRED": "Factura por confirmar",
+    "DOCUMENT_CLASSIFICATION_REQUIRED": "Tipo de documento desconocido",
+    "INVOICE_CONFLICT": "Posible factura duplicada",
+    "INVOICE_PERIOD_CONFLICT": "Facturas con períodos solapados",
+    "READING_CONFLICT": "Lecturas contradictorias",
+    "OWNER_COEFFICIENT_CONFLICT": "Coeficiente distinto al registrado",
+    "COUNTER_RESET": "Contador que baja de valor",
+    "READING_ZERO_REVIEW": "Lectura a cero",
+    "ARCHIVED_SOURCE_MISSING": "Archivo original no encontrado",
+    "ARCHIVED_SOURCE_DUPLICATE": "Varias copias del archivo",
+}
+
+
+def issue_title(issue: ReviewIssue) -> str:
+    """Título legible para la bandeja: qué pasa, no el nombre técnico del campo."""
+    if issue.code in _ISSUE_TITLES:
+        return _ISSUE_TITLES[issue.code]
+    label = issue_guidance(issue.field_name)["label"]
+    if issue.code == "MISSING_REQUIRED_FIELD" or not issue.detected_value:
+        return f"Falta: {label[0].lower()}{label[1:]}"
+    return f"Revisar: {label[0].lower()}{label[1:]}"
+
+
+def source_display_name(path: Path) -> str:
+    """Nombre original de una fuente archivada (sin el prefijo de huella)."""
+    name = Path(path).name
+    return re.sub(r"^[0-9a-f]{12}_", "", name)
+
+
+def issue_message(issue: ReviewIssue) -> str:
+    """Explicación para el usuario; los mensajes genéricos se sustituyen por la guía."""
+    message = (issue.message or "").strip()
+    if not message or message.startswith("Falta el campo requerido"):
+        return issue_guidance(issue.field_name)["what_to_find"]
+    return message
+
+
+_DATE_FIELDS = frozenset({"fecha_inicio", "fecha_fin", "fecha_factura"})
+_CONFIDENCE_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def issue_suggestion(connection, issue: ReviewIssue) -> str | None:
+    """Valor propuesto para rellenar el formulario: el detectado o la mejor evidencia.
+
+    Las evidencias de confianza baja no se aplican solas, pero son un buen punto
+    de partida: el usuario sólo tiene que comprobarlas en el documento.
+    """
+    value = issue.detected_value
+    if not value:
+        rows = connection.execute(
+            """SELECT value,confidence FROM source_field_evidence
+               WHERE id_document=? AND field_name=? AND value IS NOT NULL AND trim(value)<>''""",
+            (issue.id_document, issue.field_name),
+        ).fetchall()
+        if rows:
+            value = min(rows, key=lambda row: _CONFIDENCE_RANK.get(row["confidence"], 3))["value"]
+    if not value:
+        return None
+    value = str(value).strip()
+    if issue.field_name in _DATE_FIELDS:
+        try:
+            return datetime.strptime(value[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            return value
+    return value
 
 
 def onboarding_summary_data(
@@ -2516,231 +2637,322 @@ def resolution_route_for_issue(issue: ReviewIssue) -> str:
     return "generic_correction"
 
 
-def open_service_fees_dialog(app: "AppGestionFincas", servicio: str = "ACS") -> None:
+def _euros(value) -> str:
+    return f"{float(value):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+_FEE_SERVICES = {"ACS": "Agua caliente (ACS)", "CALEFACCION": "Calefacción"}
+
+
+def open_service_fees_dialog(
+    app: "AppGestionFincas", servicio: str = "ACS", period_id: int | None = None,
+) -> None:
     """Cuotas que la comunidad cobra a los vecinos por ACS o calefacción.
 
     Es el lado de los ingresos del estudio y el único dato que no sale de
     ninguna factura ni de ningún contador: lo decide la comunidad. Sin él, el
     análisis no puede comparar lo cobrado con lo que ha costado el servicio.
     """
-    if not app.id_comunidad or not app.id_periodo:
+    period_id = period_id or getattr(app, "id_periodo", None)
+    if not app.id_comunidad or not period_id:
         messagebox.showinfo(
-            "Cuotas cobradas",
-            "Elige antes una comunidad y un período.",
-            parent=app,
+            "Cuotas cobradas", "Elige antes una comunidad y un expediente.", parent=app,
         )
         return
-
-    dialog = _dialog(app, f"Cuotas cobradas de {servicio}", 720, 640)
-    panel = ctk.CTkFrame(
-        dialog, fg_color=C["panel"], corner_radius=16,
-        border_width=1, border_color=C["borde"],
-    )
-    panel.pack(fill="both", expand=True, padx=18, pady=18)
-    panel.grid_columnconfigure(0, weight=1)
-    panel.grid_rowconfigure(6, weight=1)
-
-    ctk.CTkLabel(
-        panel, text=f"Cuotas cobradas de {servicio}", font=UIM.fuente(20, "bold"),
-        text_color=C["texto"],
-    ).grid(row=0, column=0, sticky="w", padx=22, pady=(22, 2))
-    ctk.CTkLabel(
-        panel,
-        text=(
-            "Lo que la comunidad gira a los vecinos durante el período. La cuota "
-            "fija mensual se genera de una vez a partir de sus tramos; las "
-            "liquidaciones por consumo se añaden una a una."
-        ),
-        font=UIM.fuente(12), text_color=C["texto_sec"], wraplength=640, justify="left",
-    ).grid(row=1, column=0, sticky="w", padx=22, pady=(0, 14))
-
-    # --- cuota fija mensual --------------------------------------------------
-    fijas = ctk.CTkFrame(panel, fg_color=C["fondo"], corner_radius=10)
-    fijas.grid(row=2, column=0, sticky="ew", padx=22)
-    fijas.grid_columnconfigure(1, weight=1)
-    ctk.CTkLabel(
-        fijas, text="Cuota fija mensual", font=UIM.fuente(13, "bold"), text_color=C["texto"],
-    ).grid(row=0, column=0, columnspan=4, sticky="w", padx=14, pady=(12, 2))
-    ctk.CTkLabel(
-        fijas,
-        text="Un tramo por cada cambio de importe: mes de inicio e importe del recibo.",
-        font=UIM.fuente(11), text_color=C["texto_sec"],
-    ).grid(row=1, column=0, columnspan=4, sticky="w", padx=14, pady=(0, 8))
-
-    tramos: list[tuple[ctk.CTkEntry, ctk.CTkEntry]] = []
-    contenedor_tramos = ctk.CTkFrame(fijas, fg_color="transparent")
-    contenedor_tramos.grid(row=2, column=0, columnspan=4, sticky="ew", padx=14)
-    contenedor_tramos.grid_columnconfigure((1, 3), weight=1)
-
-    def anadir_tramo(desde: str = "", importe: str = "") -> None:
-        fila = len(tramos)
-        ctk.CTkLabel(
-            contenedor_tramos, text="Desde (aaaa-mm)", font=UIM.fuente(11),
-            text_color=C["texto_sec"],
-        ).grid(row=fila, column=0, sticky="w", pady=3)
-        mes = ctk.CTkEntry(contenedor_tramos, height=30, corner_radius=8, width=120)
-        mes.grid(row=fila, column=1, sticky="w", padx=(6, 18), pady=3)
-        mes.insert(0, desde)
-        ctk.CTkLabel(
-            contenedor_tramos, text="Importe (€/mes)", font=UIM.fuente(11),
-            text_color=C["texto_sec"],
-        ).grid(row=fila, column=2, sticky="w", pady=3)
-        valor = ctk.CTkEntry(contenedor_tramos, height=30, corner_radius=8, width=120)
-        valor.grid(row=fila, column=3, sticky="w", padx=6, pady=3)
-        valor.insert(0, importe)
-        tramos.append((mes, valor))
-
     connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
     try:
         periodo = connection.execute(
-            "SELECT fecha_inicio,fecha_fin FROM periodos WHERE id_periodo=?",
-            (app.id_periodo,),
+            "SELECT nombre,fecha_inicio,fecha_fin FROM periodos WHERE id_periodo=?", (period_id,),
         ).fetchone()
+        dwellings = cuotas_servicio.viviendas_facturables(connection, app.id_comunidad)
     finally:
         connection.close()
-    anadir_tramo(str(periodo["fecha_inicio"])[:7] if periodo else "", "")
-    anadir_tramo()
+    if periodo is None:
+        messagebox.showinfo("Cuotas cobradas", "El período del expediente no existe.", parent=app)
+        return
+    months = cuotas_servicio.meses_del_periodo(periodo["fecha_inicio"], periodo["fecha_fin"])
+    state = {"service": servicio if servicio in _FEE_SERVICES else "ACS"}
 
-    ctk.CTkButton(
-        fijas, text="Añadir tramo", width=120, height=28, corner_radius=8,
-        font=UIM.fuente(11), command=lambda: anadir_tramo(),
-        **UIM.secondary_button_kwargs(),
-    ).grid(row=3, column=0, sticky="w", padx=14, pady=(8, 12))
+    dialog = _dialog(app, "Cuotas cobradas", 760, 720)
+    panel = ctk.CTkScrollableFrame(
+        dialog, fg_color=C["panel"], corner_radius=16, border_width=1, border_color=C["borde"],
+    )
+    panel.pack(fill="both", expand=True, padx=18, pady=(18, 8))
+
+    ctk.CTkLabel(
+        panel, text="Cuotas cobradas a los vecinos", font=UIM.fuente(20, "bold"),
+        text_color=C["texto"],
+    ).pack(anchor="w", padx=18, pady=(14, 2))
+    ctk.CTkLabel(
+        panel,
+        text=(
+            f"{periodo['nombre']} · {len(months)} mes(es). Es lo que la comunidad gira en los "
+            "recibos; el análisis lo compara con el coste de las facturas. Si cambias algo con "
+            "el Excel ya generado, vuelve a generarlo."
+        ),
+        font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=660, justify="left",
+    ).pack(anchor="w", padx=18, pady=(0, 10))
+
+    selector = ctk.CTkSegmentedButton(
+        panel, values=list(_FEE_SERVICES.values()),
+        command=lambda label: change_service(label), font=UIM.fuente(11),
+        selected_color=C["primario"], selected_hover_color=C["primario_hover"],
+    )
+    selector.pack(anchor="w", padx=18, pady=(0, 12))
+
+    # --- cuota fija mensual --------------------------------------------------
+    fixed = ctk.CTkFrame(panel, fg_color=C["panel_2"], corner_radius=10)
+    fixed.pack(fill="x", padx=18)
+    ctk.CTkLabel(
+        fixed, text="Cuota fija mensual", font=UIM.fuente(13, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=14, pady=(12, 0))
+    ctk.CTkLabel(
+        fixed,
+        text=(
+            "Un tramo por cada cambio de importe. Al generar se sustituyen las cuotas fijas "
+            "anteriores de este servicio. Mes: 09/2025, 2025-09 o «septiembre 2025»."
+        ),
+        font=UIM.fuente(10), text_color=C["texto_sec"], wraplength=640, justify="left",
+    ).pack(anchor="w", padx=14, pady=(0, 6))
+    rows_frame = ctk.CTkFrame(fixed, fg_color="transparent")
+    rows_frame.pack(fill="x", padx=14)
+    per_dwelling = tk.BooleanVar(value=False)
+    tramos: list[tuple[tk.StringVar, tk.StringVar]] = []
+    preview = ctk.CTkLabel(
+        fixed, text="", font=UIM.fuente(11, "bold"), text_color=C["primario"],
+        wraplength=640, justify="left", anchor="w",
+    )
+
+    def parsed_tramos(strict: bool):
+        pairs = []
+        for month_var, amount_var in tramos:
+            month_text, amount_text = month_var.get().strip(), amount_var.get().strip()
+            if not month_text and not amount_text:
+                continue
+            if not month_text or not amount_text:
+                if strict:
+                    raise ValueError("Cada tramo necesita su mes de inicio y su importe.")
+                continue
+            amount = cuotas_servicio._importe(amount_text, "El importe mensual")
+            if per_dwelling.get():
+                amount *= dwellings
+            pairs.append((cuotas_servicio.parse_mes(month_text), amount))
+        return sorted(pairs)
+
+    def update_preview(*_args):
+        try:
+            pairs = parsed_tramos(strict=False)
+        except ValueError as error:
+            preview.configure(text=f"⚠ {error}", text_color=C["aviso"])
+            return
+        if not pairs:
+            preview.configure(text="Indica al menos un importe mensual.", text_color=C["texto_sec"])
+            return
+        amounts = []
+        for month in months:
+            current = [amount for start, amount in pairs if start[:7] <= month[:7]]
+            if current:
+                amounts.append(current[-1])
+        groups: dict[object, int] = {}
+        for amount in amounts:
+            groups[amount] = groups.get(amount, 0) + 1
+        detail = " + ".join(f"{count} × {_euros(amount)}" for amount, count in groups.items())
+        uncovered = len(months) - len(amounts)
+        text = f"{len(amounts)} cuota(s): {detail} = {_euros(sum(amounts))}"
+        if per_dwelling.get():
+            text += f"  (importe por vivienda × {dwellings} viviendas)"
+        if uncovered:
+            text += f"\n⚠ {uncovered} mes(es) al inicio del período sin cuota: el primer tramo empieza más tarde."
+        preview.configure(text=text, text_color=C["aviso"] if uncovered else C["primario"])
+
+    def add_tramo(month: str = "", amount: str = "") -> None:
+        index = len(tramos)
+        month_var, amount_var = tk.StringVar(value=month), tk.StringVar(value=amount)
+        ctk.CTkLabel(rows_frame, text="Desde", font=UIM.fuente(11), text_color=C["texto_sec"]).grid(
+            row=index, column=0, sticky="w", pady=3)
+        ctk.CTkEntry(rows_frame, textvariable=month_var, height=30, corner_radius=8, width=130,
+                     placeholder_text="MM/AAAA").grid(row=index, column=1, sticky="w", padx=(6, 16), pady=3)
+        ctk.CTkLabel(rows_frame, text="Importe al mes", font=UIM.fuente(11), text_color=C["texto_sec"]).grid(
+            row=index, column=2, sticky="w", pady=3)
+        ctk.CTkEntry(rows_frame, textvariable=amount_var, height=30, corner_radius=8, width=120,
+                     placeholder_text="0,00").grid(row=index, column=3, sticky="w", padx=6, pady=3)
+        month_var.trace_add("write", update_preview)
+        amount_var.trace_add("write", update_preview)
+        tramos.append((month_var, amount_var))
+
+    first_month = periodo["fecha_inicio"][:7]
+    add_tramo(f"{first_month[5:7]}/{first_month[:4]}")
+    add_tramo()
+    ctk.CTkCheckBox(
+        fixed,
+        text=(
+            f"El importe es por vivienda (se multiplica por {dwellings} viviendas activas)"
+            if dwellings else "El importe es por vivienda (no hay viviendas activas registradas)"
+        ),
+        variable=per_dwelling, command=update_preview, font=UIM.fuente(11),
+        state="normal" if dwellings else "disabled",
+    ).pack(anchor="w", padx=14, pady=(6, 2))
+    preview.pack(fill="x", padx=14, pady=(4, 4))
+    fixed_buttons = ctk.CTkFrame(fixed, fg_color="transparent")
+    fixed_buttons.pack(fill="x", padx=14, pady=(2, 12))
 
     # --- liquidación por consumo --------------------------------------------
-    variables = ctk.CTkFrame(panel, fg_color=C["fondo"], corner_radius=10)
-    variables.grid(row=3, column=0, sticky="ew", padx=22, pady=(12, 0))
-    variables.grid_columnconfigure((1, 3, 5), weight=1)
+    variable = ctk.CTkFrame(panel, fg_color=C["panel_2"], corner_radius=10)
+    variable.pack(fill="x", padx=18, pady=(12, 0))
     ctk.CTkLabel(
-        variables, text="Liquidación por consumo", font=UIM.fuente(13, "bold"),
-        text_color=C["texto"],
-    ).grid(row=0, column=0, columnspan=6, sticky="w", padx=14, pady=(12, 2))
+        variable, text="Liquidación por consumo", font=UIM.fuente(13, "bold"), text_color=C["texto"],
+    ).pack(anchor="w", padx=14, pady=(12, 0))
     ctk.CTkLabel(
-        variables, text="Lo cobrado tras cada lectura de contadores.",
-        font=UIM.fuente(11), text_color=C["texto_sec"],
-    ).grid(row=1, column=0, columnspan=6, sticky="w", padx=14, pady=(0, 8))
-    for columna, etiqueta in ((0, "Fecha"), (2, "Importe (€)"), (4, "Consumo")):
-        ctk.CTkLabel(
-            variables, text=etiqueta, font=UIM.fuente(11), text_color=C["texto_sec"],
-        ).grid(row=2, column=columna, sticky="w", padx=(14 if columna == 0 else 0, 4))
-    fecha_var = ctk.CTkEntry(variables, height=30, corner_radius=8, width=120)
-    fecha_var.grid(row=2, column=1, sticky="w", padx=(0, 14))
-    importe_var = ctk.CTkEntry(variables, height=30, corner_radius=8, width=110)
-    importe_var.grid(row=2, column=3, sticky="w", padx=(0, 14))
-    consumo_var = ctk.CTkEntry(variables, height=30, corner_radius=8, width=110)
-    consumo_var.grid(row=2, column=5, sticky="w", padx=(0, 14))
+        variable, text="Lo cobrado tras cada lectura de contadores (una fila por recibo).",
+        font=UIM.fuente(10), text_color=C["texto_sec"],
+    ).pack(anchor="w", padx=14, pady=(0, 6))
+    variable_row = ctk.CTkFrame(variable, fg_color="transparent")
+    variable_row.pack(fill="x", padx=14)
+    entries = {}
+    for column, (key, label, placeholder, width) in enumerate((
+        ("fecha", "Fecha", "DD/MM/AAAA", 120),
+        ("importe", "Importe", "0,00", 110),
+        ("consumo", "Consumo (opcional)", "m³ o kWh", 120),
+    )):
+        ctk.CTkLabel(variable_row, text=label, font=UIM.fuente(11), text_color=C["texto_sec"]).grid(
+            row=0, column=column, sticky="w", padx=(0, 12))
+        entries[key] = ctk.CTkEntry(variable_row, height=30, corner_radius=8, width=width,
+                                    placeholder_text=placeholder)
+        entries[key].grid(row=1, column=column, sticky="w", padx=(0, 12))
 
-    resumen_texto = ctk.CTkLabel(
-        panel, text="", font=UIM.fuente(12, "bold"), text_color=C["texto"], justify="left",
+    # --- apuntes ---------------------------------------------------------------
+    summary = ctk.CTkLabel(
+        panel, text="", font=UIM.fuente(12, "bold"), text_color=C["texto"], justify="left", anchor="w",
     )
-    resumen_texto.grid(row=4, column=0, sticky="w", padx=22, pady=(14, 4))
+    summary.pack(fill="x", padx=18, pady=(14, 4))
+    ledger = ctk.CTkFrame(panel, fg_color=C["panel_2"], corner_radius=10)
+    ledger.pack(fill="x", padx=18, pady=(0, 12))
 
-    listado = ctk.CTkTextbox(panel, height=170, corner_radius=8, font=UIM.fuente(11))
-    listado.grid(row=6, column=0, sticky="nsew", padx=22, pady=(0, 10))
-
-    def refrescar() -> None:
+    def with_connection(action):
         conexion = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
-            apuntes = cuotas_servicio.listar(
-                conexion, community_id=app.id_comunidad,
-                period_id=app.id_periodo, servicio=servicio,
-            )
-            total = cuotas_servicio.resumen(
-                conexion, community_id=app.id_comunidad,
-                period_id=app.id_periodo, servicio=servicio,
-            )
+            result = action(conexion)
+            conexion.commit()
+            return result
         finally:
             conexion.close()
-        resumen_texto.configure(
-            text=(
-                f"Cobrado: {total.fija:,.2f} € de cuota fija + {total.variable:,.2f} € "
-                f"por consumo = {total.total:,.2f} €   ({total.apuntes} apunte(s))"
-            ).replace(",", " ")
-        )
-        listado.configure(state="normal")
-        listado.delete("1.0", "end")
-        for apunte in apuntes:
-            extra = f"  ·  consumo {apunte['consumo']}" if apunte["consumo"] is not None else ""
-            listado.insert(
-                "end",
-                f"{apunte['fecha']}   {apunte['concepto']:<9} {apunte['importe']:>10.2f} €{extra}\n",
-            )
+
+    def delete_entry(entry_id: int) -> None:
+        with_connection(lambda conexion: cuotas_servicio.borrar(conexion, entry_id))
+        refresh()
+
+    def refresh() -> None:
+        service = state["service"]
+        apuntes, total = with_connection(lambda conexion: (
+            cuotas_servicio.listar(conexion, community_id=app.id_comunidad,
+                                   period_id=period_id, servicio=service),
+            cuotas_servicio.resumen(conexion, community_id=app.id_comunidad,
+                                    period_id=period_id, servicio=service),
+        ))
+        summary.configure(text=(
+            f"Cobrado de {_FEE_SERVICES[service]}: {_euros(total.fija)} fijo + "
+            f"{_euros(total.variable)} por consumo = {_euros(total.total)}"
+        ))
+        for child in ledger.winfo_children():
+            child.destroy()
         if not apuntes:
-            listado.insert("end", "Todavía no hay cuotas anotadas para este período.\n")
-        listado.configure(state="disabled")
-
-    def generar_mensuales() -> None:
-        pares = []
-        for mes, valor in tramos:
-            texto_mes, texto_valor = mes.get().strip(), valor.get().strip()
-            if not texto_mes and not texto_valor:
-                continue
-            if not texto_mes or not texto_valor:
-                messagebox.showwarning(
-                    "Tramo incompleto",
-                    "Cada tramo necesita su mes de inicio y su importe.",
-                    parent=dialog,
-                )
-                return
-            pares.append((f"{texto_mes}-01" if len(texto_mes) == 7 else texto_mes, texto_valor))
-        if not pares:
-            messagebox.showwarning(
-                "Sin tramos", "Indica al menos un importe mensual.", parent=dialog,
-            )
+            ctk.CTkLabel(
+                ledger, text="Todavía no hay cuotas anotadas para este servicio.",
+                font=UIM.fuente(11), text_color=C["texto_sec"],
+            ).pack(anchor="w", padx=12, pady=10)
             return
-        conexion = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        for apunte in apuntes:
+            row = ctk.CTkFrame(ledger, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=1)
+            fecha = datetime.strptime(apunte["fecha"][:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+            kind = "Cuota fija" if apunte["concepto"] == "fija" else "Liquidación"
+            extra = f" · consumo {apunte['consumo']:g}" if apunte["consumo"] is not None else ""
+            ctk.CTkLabel(row, text=f"{fecha}   {kind}{extra}", font=UIM.fuente(11),
+                         text_color=C["texto"], anchor="w").pack(side="left")
+            ctk.CTkButton(
+                row, text="Borrar", width=60, height=22, corner_radius=6, font=UIM.fuente(10),
+                command=lambda entry_id=apunte["id_cuota"]: delete_entry(entry_id),
+                **UIM.secondary_button_kwargs(),
+            ).pack(side="right")
+            ctk.CTkLabel(row, text=_euros(apunte["importe"]), font=UIM.fuente(11, "bold"),
+                         text_color=C["texto"], width=110, anchor="e").pack(side="right", padx=10)
+
+    def generate_fixed() -> None:
         try:
-            creadas = cuotas_servicio.generar_cuotas_mensuales(
-                conexion, community_id=app.id_comunidad, period_id=app.id_periodo,
-                servicio=servicio, tramos=pares, notas="Cuota mensual del recibo",
-            )
-            conexion.commit()
+            pairs = parsed_tramos(strict=True)
+            if not pairs:
+                raise ValueError("Indica al menos un importe mensual.")
+            created = with_connection(lambda conexion: cuotas_servicio.generar_cuotas_mensuales(
+                conexion, community_id=app.id_comunidad, period_id=period_id,
+                servicio=state["service"], tramos=[(start, amount) for start, amount in pairs],
+                notas="Cuota mensual del recibo",
+            ))
         except (ValueError, LookupError) as error:
-            messagebox.showerror("No se pudo guardar", str(error), parent=dialog)
+            messagebox.showwarning("No se pudo guardar", str(error), parent=dialog)
             return
-        finally:
-            conexion.close()
-        app.log(f"Cuotas mensuales de {servicio}: {creadas} mes(es) anotados.", "ok")
-        refrescar()
+        app.log(f"Cuota fija de {_FEE_SERVICES[state['service']]}: {created} mes(es) anotados.", "ok")
+        refresh()
 
-    def anadir_liquidacion() -> None:
-        conexion = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    def clear_fixed() -> None:
+        if not messagebox.askyesno(
+            "Borrar cuota fija",
+            f"¿Borrar todas las cuotas fijas de {_FEE_SERVICES[state['service']]} de este período?",
+            parent=dialog,
+        ):
+            return
+        with_connection(lambda conexion: cuotas_servicio.borrar_fijas(
+            conexion, community_id=app.id_comunidad, period_id=period_id, servicio=state["service"],
+        ))
+        refresh()
+
+    def add_variable() -> None:
         try:
-            cuotas_servicio.registrar_cuota(
-                conexion, community_id=app.id_comunidad, period_id=app.id_periodo,
-                servicio=servicio, concepto="variable",
-                fecha=fecha_var.get().strip(), importe=importe_var.get().strip(),
-                consumo=consumo_var.get().strip() or None,
+            with_connection(lambda conexion: cuotas_servicio.registrar_cuota(
+                conexion, community_id=app.id_comunidad, period_id=period_id,
+                servicio=state["service"], concepto="variable",
+                fecha=entries["fecha"].get().strip(), importe=entries["importe"].get().strip(),
+                consumo=entries["consumo"].get().strip() or None,
                 notas="Liquidación por consumo",
-            )
-            conexion.commit()
+            ))
         except (ValueError, LookupError) as error:
-            messagebox.showerror("No se pudo guardar", str(error), parent=dialog)
+            messagebox.showwarning("No se pudo guardar", str(error), parent=dialog)
             return
-        finally:
-            conexion.close()
-        for campo in (fecha_var, importe_var, consumo_var):
-            campo.delete(0, "end")
-        refrescar()
+        for entry in entries.values():
+            entry.delete(0, "end")
+        refresh()
+
+    def change_service(label: str) -> None:
+        state["service"] = next(key for key, text in _FEE_SERVICES.items() if text == label)
+        refresh()
 
     ctk.CTkButton(
-        fijas, text="Generar cuotas del período", width=200, height=30, corner_radius=8,
-        font=UIM.fuente(11), fg_color=C["primario"], hover_color=C["primario_hover"],
-        command=generar_mensuales,
-    ).grid(row=3, column=1, columnspan=3, sticky="e", padx=14, pady=(8, 12))
+        fixed_buttons, text="Añadir tramo", width=110, height=30, corner_radius=8,
+        font=UIM.fuente(11), command=lambda: add_tramo(), **UIM.secondary_button_kwargs(),
+    ).pack(side="left")
     ctk.CTkButton(
-        variables, text="Añadir liquidación", width=160, height=30, corner_radius=8,
-        font=UIM.fuente(11), fg_color=C["primario"], hover_color=C["primario_hover"],
-        command=anadir_liquidacion,
-    ).grid(row=3, column=0, columnspan=6, sticky="e", padx=14, pady=(8, 12))
-
+        fixed_buttons, text="Borrar cuota fija", width=130, height=30, corner_radius=8,
+        font=UIM.fuente(11), command=clear_fixed, **UIM.secondary_button_kwargs(),
+    ).pack(side="left", padx=8)
     ctk.CTkButton(
-        panel, text="Cerrar", width=110, height=32, corner_radius=8,
-        command=dialog.destroy, **UIM.secondary_button_kwargs(),
-    ).grid(row=7, column=0, sticky="e", padx=22, pady=(0, 18))
+        fixed_buttons, text="Generar cuota fija del período", height=30, corner_radius=8,
+        font=UIM.fuente(11, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"],
+        command=generate_fixed,
+    ).pack(side="right")
+    ctk.CTkButton(
+        variable, text="Añadir liquidación", width=160, height=30, corner_radius=8,
+        font=UIM.fuente(11, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"],
+        command=add_variable,
+    ).pack(anchor="e", padx=14, pady=(8, 12))
+    ctk.CTkButton(
+        dialog, text="Cerrar", width=110, height=34, corner_radius=8,
+        command=lambda: (dialog.destroy(), app._refrescar_expediente()
+                         if getattr(app, "id_expediente", None) else None),
+        **UIM.secondary_button_kwargs(),
+    ).pack(anchor="e", padx=20, pady=(0, 14))
 
-    refrescar()
-
+    selector.set(_FEE_SERVICES[state["service"]])
+    update_preview()
+    refresh()
 
 
 def open_skip_source_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
@@ -2831,7 +3043,7 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     if route == "archived_source_missing":
         messagebox.showwarning(
             "Archivo archivado no disponible",
-            "No se encuentra una copia verificada de esta fuente. Vuelve a añadir el archivo original y después pulsa Reanalizar fuentes.",
+            "No se encuentra una copia verificada de esta fuente. Vuelve a añadir el archivo original y después pulsa «Reevaluar fuentes».",
             parent=app,
         )
         return
@@ -2856,15 +3068,17 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     ).grid(row=0, column=0, sticky="w", padx=22, pady=(22, 3))
 
     guidance = issue_guidance(issue.field_name)
-    facts = (
-        ("ARCHIVO", issue.archived_path.name),
+    facts = [
+        ("ARCHIVO", source_display_name(issue.archived_path)),
         ("DATO QUE NECESITAMOS", guidance["label"]),
-        ("VALOR DETECTADO", issue.detected_value or "—"),
         ("QUÉ BUSCAR", guidance["what_to_find"]),
         ("FORMATO", guidance["format"]),
         ("POR QUÉ SE PIDE", guidance["why"]),
-        ("RESULTADO DEL ANÁLISIS", issue.message),
-    )
+    ]
+    if issue.detected_value:
+        facts.insert(2, ("VALOR DETECTADO", issue.detected_value))
+    if issue_message(issue) != guidance["what_to_find"]:
+        facts.append(("RESULTADO DEL ANÁLISIS", issue.message))
     facts_frame = ctk.CTkFrame(panel, fg_color=C["panel_2"], corner_radius=11)
     facts_frame.grid(row=1, column=0, sticky="ew", padx=22, pady=(8, 5))
     facts_frame.grid_columnconfigure(1, weight=1)
@@ -2881,8 +3095,9 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
             font=UIM.fuente(11),
             text_color=C["texto"],
             anchor="w",
-            wraplength=390,
-        ).grid(row=row, column=1, sticky="w", padx=(0, 12), pady=7)
+            justify="left",
+            wraplength=430,
+        ).grid(row=row, column=1, sticky="w", padx=(0, 12), pady=5)
 
     source_actions = ctk.CTkFrame(panel, fg_color="transparent")
     source_actions.grid(row=2, column=0, sticky="w", padx=22, pady=(6, 0))
@@ -2948,9 +3163,25 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         action_text = "Cerrar: no corresponde al período"
     else:
         value = _field(panel, f"Valor confirmado · {guidance['label']}", 3)
-        reason = _field(panel, "Motivo de la corrección y fuente consultada", 5)
-        action_row = 7
-        action_text = "Guardar corrección"
+        suggestion_connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            suggestion = issue_suggestion(suggestion_connection, issue)
+        finally:
+            suggestion_connection.close()
+        if suggestion:
+            value.insert(0, suggestion)
+            if not issue.detected_value:
+                ctk.CTkLabel(
+                    panel,
+                    text="Valor propuesto por el análisis con poca seguridad: compruébalo en el archivo.",
+                    font=UIM.fuente(10), text_color=C["aviso"],
+                ).grid(row=5, column=0, sticky="w", padx=22, pady=(4, 0))
+        reason = _field(
+            panel, "Nota (opcional)", 6,
+            placeholder="Si lo dejas vacío: «Comprobado en el documento original»",
+        )
+        action_row = 8
+        action_text = "Guardar"
 
     actions = ctk.CTkFrame(panel, fg_color="transparent")
     actions.grid(row=action_row, column=0, sticky="ew", padx=22, pady=(20, 16))
@@ -2967,10 +3198,18 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         text_color=C["texto_sec"],
     ).pack(side="right")
 
-    def save():
+    optional_reason = route in {"generic_correction", "dismiss_invoice_outside_period"}
+
+    def save(open_next: bool = False):
         if app._procesando:
             return
         correction_reason = reason.get().strip()
+        if not correction_reason and optional_reason:
+            correction_reason = (
+                "No corresponde al período del expediente"
+                if route == "dismiss_invoice_outside_period"
+                else "Comprobado en el documento original"
+            )
         confirmed = value.get().strip() if value is not None else ""
         if route == "classify_unknown":
             confirmed = kind_by_label.get(confirmed, "")
@@ -2980,7 +3219,7 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
                 (
                     "Indica el consumo estimado y el soporte de la estimación."
                     if route == "counter_reset_estimate"
-                    else "Indica el valor confirmado y el motivo de la corrección."
+                    else "Indica el valor confirmado."
                 ),
             )
             return
@@ -3027,6 +3266,8 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
             app.log("Listo para cálculo", "ok")
         else:
             app.log(f"{remaining} incidencia(s) por resolver", "aviso")
+        if open_next and remaining:
+            app.after(50, app._accion_resolver_incidencias)
 
     ctk.CTkButton(
         actions,
@@ -3040,4 +3281,11 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         border_width=1,
         border_color=C["exito"],
     ).pack(side="right", padx=(0, 8))
+    if route != "counter_reset_estimate":
+        ctk.CTkButton(
+            actions, text="Guardar y siguiente", command=lambda: save(open_next=True),
+            height=38, corner_radius=9, font=UIM.fuente(12),
+            **UIM.secondary_button_kwargs(),
+        ).pack(side="right", padx=(0, 8))
+    dialog.bind("<Return>", lambda _event: save(open_next=True))
     (reason if route == "classify_unknown" else (value or reason)).focus_set()

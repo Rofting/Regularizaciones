@@ -769,11 +769,22 @@ class AppGestionFincas(ctk.CTk):
         self._refrescar_expediente()
 
     def _accion_cuotas_cobradas(self):
-        ui = MOD.get("expedient_ui")
+        """Abre las cuotas del período del expediente, enlazándolo si aún no lo está."""
+        ui, database, service = (MOD.get(name) for name in ("expedient_ui", "gestor_bd", "expedient_service"))
         if not ui:
             self.log("No está disponible la gestión de cuotas.", "error")
             return
-        ui.open_service_fees_dialog(self, "ACS")
+        if self._procesando or not self._validar_expediente_activo():
+            return
+        connection = database.conectar(str(self.ruta_bd_expedientes))
+        try:
+            self.id_periodo = service.link_case_to_period(connection, self.id_expediente)
+        except ValueError as error:
+            self.log(f"No se pudo preparar el período del expediente: {error}", "aviso")
+            return
+        finally:
+            connection.close()
+        ui.open_service_fees_dialog(self, "ACS", period_id=self.id_periodo)
 
     def _accion_resolver_incidencias(self):
         review = MOD.get("document_review")
@@ -1146,7 +1157,7 @@ class AppGestionFincas(ctk.CTk):
                         f"{reset_count} reinicios de contador por revisar"
                         if is_reset_group else
                         f"{reset_count} lecturas a 0 por revisar" if is_zero_group else
-                        issue.field_name
+                        expedient_ui.issue_title(issue)
                     ),
                     font=UIM.fuente(11, "bold"),
                     text_color=C["texto"],
@@ -1161,13 +1172,15 @@ class AppGestionFincas(ctk.CTk):
                         if is_reset_group else
                         (f"{issue.archived_path.name} · Aplica un único criterio: se conserva la lectura "
                          "canónica si existe; si no, el cero queda como lectura inicial auditada.")
-                        if is_zero_group else f"{issue.archived_path.name} · {issue.message}"
+                        if is_zero_group else
+                        f"{expedient_ui.source_display_name(issue.archived_path)} · "
+                        f"{expedient_ui.issue_message(issue)}"
                     ),
                     font=UIM.fuente(10),
                     text_color=C["texto_sec"],
                     anchor="w",
                     justify="left",
-                    wraplength=260,
+                    wraplength=560,
                 ).pack(fill="x", pady=(2, 0))
                 actions = ctk.CTkFrame(row, fg_color="transparent")
                 actions.pack(side="right", padx=8, pady=7)

@@ -66,6 +66,8 @@ class FakeWidget:
     resizable = minsize
     protocol = minsize
     grid_columnconfigure = lambda self, *args, **kwargs: None
+    bind = lambda self, *args, **kwargs: None
+    insert = lambda self, *args, **kwargs: None
 
     def winfo_children(self):
         return list(self.children)
@@ -589,6 +591,39 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
         self.assertEqual(("reparto", "calcular_reparto"), (
             state.active_step, state.next_action,
         ))
+
+    def _issue(self, code, field_name, detected=None):
+        return expedient_ui.ReviewIssue(
+            id_issue=1, id_case=1, id_document=7, code=code, field_name=field_name,
+            detected_value=detected, message="", archived_path=Path("factura.pdf"), status="open",
+        )
+
+    def test_issue_titles_are_readable_instead_of_technical_field_names(self):
+        self.assertEqual("Proveedor sin identificar",
+                         expedient_ui.issue_title(self._issue("PROVIDER_UNKNOWN", "document.provider")))
+        self.assertEqual(
+            "Falta: fecha de inicio del período facturado",
+            expedient_ui.issue_title(self._issue("MISSING_REQUIRED_FIELD", "fecha_inicio")),
+        )
+        self.assertNotIn("_", expedient_ui.issue_title(self._issue("X", "campo_raro.algo")))
+
+    def test_issue_suggestion_prefers_detected_value_then_best_evidence(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE source_field_evidence (id_document INTEGER, field_name TEXT, value TEXT, confidence TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO source_field_evidence VALUES (7,'fecha_inicio',?,?)",
+            [("2026-03-02", "low"), ("2026-03-01", "medium")],
+        )
+        self.assertEqual("01/03/2026", expedient_ui.issue_suggestion(
+            connection, self._issue("MISSING_REQUIRED_FIELD", "fecha_inicio")))
+        self.assertEqual("121,00", expedient_ui.issue_suggestion(
+            connection, self._issue("X", "importe_total", detected="121,00")))
+        self.assertIsNone(expedient_ui.issue_suggestion(
+            connection, self._issue("X", "num_factura")))
+        connection.close()
 
     def test_review_summary_treats_resets_from_one_source_as_one_action(self):
         issues = tuple(

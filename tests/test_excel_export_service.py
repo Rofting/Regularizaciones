@@ -643,6 +643,25 @@ class ExcelExportServiceTest(unittest.TestCase):
         self.connection.commit()
         self.assertNotEqual(after_expense, _input_hash(self.connection, case, profile))
 
+    def test_input_hash_changes_when_collected_fees_change(self):
+        from excel_profiles import load_profile
+        import cuotas_servicio
+
+        case = _case_context(self.connection, self.case_id)
+        profile = load_profile("658_acs_v1", self.project_root)
+        initial = _input_hash(self.connection, case, profile)
+        cuotas_servicio.registrar_cuota(
+            self.connection, community_id=self.community_id, period_id=case["id_periodo"],
+            servicio="ACS", concepto="fija", fecha=case["fecha_inicio"], importe="400",
+        )
+        with_fee = _input_hash(self.connection, case, profile)
+        self.assertNotEqual(initial, with_fee)
+        cuotas_servicio.registrar_cuota(
+            self.connection, community_id=self.community_id, period_id=case["id_periodo"],
+            servicio="ACS", concepto="fija", fecha=case["fecha_inicio"], importe="300",
+        )
+        self.assertNotEqual(with_fee, _input_hash(self.connection, case, profile))
+
     def test_registered_active_profile_selects_its_exact_version(self):
         v2 = dict(PROFILE_DATA)
         v2["key"] = "658_acs_v2"
