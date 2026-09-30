@@ -199,5 +199,37 @@ class ProviderResolutionRobustnessTest(unittest.TestCase):
         self.assertEqual("ISSUER", match.provider_key)
 
 
+
+class TaxIdTest(unittest.TestCase):
+    def test_control_digit_validation(self):
+        from provider_registry import valid_spanish_tax_id
+        for value in ("A95758389", "B50000009", "12345678Z", "X1234567L", "Q2826000H", "H99258139"):
+            with self.subTest(value=value):
+                self.assertTrue(valid_spanish_tax_id(value))
+        for value in ("A95758388", "B50000000", "12345678A", "Q28260008"):
+            with self.subTest(value=value):
+                self.assertFalse(valid_spanish_tax_id(value))
+
+    def test_find_tax_ids_accepts_separators_and_skips_invalid_tokens(self):
+        from provider_registry import find_tax_ids
+        text = "CIF: A-95.758.389 · cliente H99258139 · ref B50000000 · IBAN ES12 3456"
+        self.assertEqual(("A95758389", "H99258139"), find_tax_ids(text))
+
+    def test_community_tax_id_with_separators_is_found_by_the_pdf_reader(self):
+        from lector_pdf import extraer_cif_pdf
+        self.assertEqual("H99258139", extraer_cif_pdf("Comunidad N.I.F. H-99.258.139"))
+        self.assertIsNone(extraer_cif_pdf("Proveedor B50000009"))
+
+    def test_catalog_lookup_by_display_name_or_alias(self):
+        from provider_registry import profile_for_name
+        registry = provider_registry_from_payload({"proveedores": {
+            "ACME": {"display_name": "Acme Energía", "aliases": ["ACME ENERGIA SL"],
+                     "document_types": ["invoice"]},
+        }})
+        for value in ("ACME", "acme energia", "Acme Energía SL"):
+            with self.subTest(value=value):
+                self.assertEqual("ACME", profile_for_name(registry, value).key)
+        self.assertIsNone(profile_for_name(registry, "Otro"))
+
 if __name__ == "__main__":
     unittest.main()

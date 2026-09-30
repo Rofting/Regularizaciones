@@ -169,12 +169,14 @@ def extraer_cif_pdf(texto: str) -> str | None:
         m = re.search(patron, texto, re.IGNORECASE)
         if m:
             return m.group(1).upper()
+    # CIF escrito con separadores («H-99.258.139»): se aceptan sólo los que
+    # superan el dígito de control y son de entidades sin ánimo de lucro.
+    from provider_registry import find_tax_ids
+    for letras in ("H", "EJG"):
+        for cif in find_tax_ids(texto):
+            if cif[0] in letras:
+                return cif
     return None
-    h = hashlib.md5()
-    with open(ruta, "rb") as f:
-        for bloque in iter(lambda: f.read(65536), b""):
-            h.update(bloque)
-    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------

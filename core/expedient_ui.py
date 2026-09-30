@@ -3035,6 +3035,25 @@ def open_skip_source_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None
 
 
 
+def _catalog_provider_labels() -> dict[str, str]:
+    """Nombre visible → clave de cada proveedor del catálogo global."""
+    import provider_registry
+
+    try:
+        registry = provider_registry.load_provider_registry(
+            Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+        )
+    except (OSError, ValueError):
+        return {}
+    labels: dict[str, str] = {}
+    for profile in registry.values():
+        label = profile.display_name
+        if label in labels:
+            label = f"{label} ({profile.key})"
+        labels[label] = profile.key
+    return labels
+
+
 def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     route = resolution_route_for_issue(issue)
     if route == "archived_source_duplicate":
@@ -3161,6 +3180,29 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         reason = _field(panel, "Motivo del cierre", 4)
         action_row = 6
         action_text = "Cerrar: no corresponde al período"
+    elif issue.field_name == "document.provider":
+        provider_by_label = _catalog_provider_labels()
+        ctk.CTkLabel(
+            panel, text="PROVEEDOR DEL CATÁLOGO", font=UIM.fuente(10, "bold"),
+            text_color=C["texto_sec"],
+        ).grid(row=3, column=0, sticky="w", padx=22, pady=(13, 4))
+        value = ctk.CTkComboBox(
+            panel, values=sorted(provider_by_label), height=36, font=UIM.fuente(12),
+        )
+        value.set("")
+        value.grid(row=4, column=0, sticky="ew", padx=22)
+        ctk.CTkLabel(
+            panel,
+            text=(
+                "Elige el emisor de la lista (puedes escribir para buscar). Se releerán sus "
+                "fechas e importes con las reglas de ese proveedor y su CIF se recordará "
+                "para reconocer sus próximas facturas."
+            ),
+            font=UIM.fuente(10), text_color=C["texto_sec"], wraplength=560, justify="left",
+        ).grid(row=5, column=0, sticky="w", padx=22, pady=(4, 0))
+        reason = _field(panel, "Nota (opcional)", 6)
+        action_row = 8
+        action_text = "Guardar proveedor"
     else:
         value = _field(panel, f"Valor confirmado · {guidance['label']}", 3)
         suggestion_connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
@@ -3199,6 +3241,7 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     ).pack(side="right")
 
     optional_reason = route in {"generic_correction", "dismiss_invoice_outside_period"}
+    reanalyse_after = route == "classify_unknown" or issue.field_name == "document.provider"
 
     def save(open_next: bool = False):
         if app._procesando:
@@ -3213,6 +3256,8 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         confirmed = value.get().strip() if value is not None else ""
         if route == "classify_unknown":
             confirmed = kind_by_label.get(confirmed, "")
+        elif issue.field_name == "document.provider":
+            confirmed = _catalog_provider_labels().get(confirmed, confirmed)
         if (route != "dismiss_invoice_outside_period" and not confirmed) or not correction_reason:
             messagebox.showwarning(
                 "Datos requeridos",
@@ -3226,7 +3271,7 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
 
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
-            if route == "classify_unknown":
+            if reanalyse_after:
                 connection.execute("BEGIN IMMEDIATE")
             if route == "counter_reset_estimate":
                 document_review.approve_counter_reset_estimate(
@@ -3243,15 +3288,16 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
                     connection, issue.id_issue, value=confirmed,
                     reason=correction_reason,
                 )
-                if route == "classify_unknown":
+                if reanalyse_after:
                     # Reuse the archived source and retain the manual decision.
-                    # Missing invoice fields must exist before readiness is checked.
+                    # Missing invoice fields must exist before readiness is checked;
+                    # a confirmed provider rereads dates and amounts with its rules.
                     case_ingestion.reanalyze_case_documents(connection, issue.id_case)
             remaining = len(document_review.list_open_issues(connection, issue.id_case))
             ready = None
             if not remaining and not document_review.case_has_unapplied_sources(connection, issue.id_case):
                 ready = document_review.validate_case_ready(connection, issue.id_case)
-            if route == "classify_unknown":
+            if reanalyse_after:
                 connection.commit()
         except Exception as error:
             connection.rollback()

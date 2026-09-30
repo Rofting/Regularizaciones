@@ -20,8 +20,11 @@ from document_text_service import TextExtraction, get_document_text
 from invoice_extractors import FieldEvidence
 from invoice_extractors import extract_invoice_fields
 from provider_registry import (
+    ProviderMatch,
     ProviderProfile,
+    find_tax_ids,
     load_provider_registry,
+    profile_for_name,
     provider_registry_from_payload,
     resolve_provider,
 )
@@ -315,6 +318,67 @@ def _legacy_invoice_candidates(
     return candidates, evidence
 
 
+def load_learned_tax_ids(connection: sqlite3.Connection | None) -> dict[str, str]:
+    if connection is None:
+        return {}
+    try:
+        rows = connection.execute(
+            "SELECT tax_id, provider_key FROM provider_learned_tax_ids"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {str(row[0]): str(row[1]) for row in rows}
+
+
+def _community_tax_ids(connection: sqlite3.Connection | None) -> set[str]:
+    if connection is None:
+        return set()
+    try:
+        rows = connection.execute("SELECT cif FROM comunidades WHERE cif IS NOT NULL").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {re.sub(r"[^A-Z0-9]", "", str(row[0]).upper()) for row in rows}
+
+
+def learn_issuer_tax_id(
+    connection: sqlite3.Connection | None,
+    text: str,
+    provider_key: str,
+    registry: Mapping[str, ProviderProfile],
+    *,
+    source: str,
+) -> str | None:
+    """Guarda el CIF del emisor de una factura cuyo proveedor es seguro.
+
+    Se descartan los CIF de comunidades de propietarios (letra H y los
+    registrados) porque son el cliente, y los que ya pertenecen a otro
+    proveedor. Sólo se aprende si queda exactamente un candidato: una factura
+    que menciona también a la distribuidora no debe enseñar un CIF ajeno.
+    """
+    if connection is None:
+        return None
+    communities = _community_tax_ids(connection)
+    learned = load_learned_tax_ids(connection)
+    owners = {tax_id: profile.key for profile in registry.values() for tax_id in profile.tax_ids}
+    owners.update(learned)
+    candidates = [
+        tax_id for tax_id in find_tax_ids(text)
+        if not tax_id.startswith("H") and tax_id not in communities
+        and owners.get(tax_id, provider_key) == provider_key
+    ]
+    if len(candidates) != 1 or candidates[0] in learned:
+        return None
+    try:
+        connection.execute(
+            """INSERT OR IGNORE INTO provider_learned_tax_ids(tax_id,provider_key,source)
+               VALUES (?,?,?)""",
+            (candidates[0], provider_key, source),
+        )
+    except sqlite3.OperationalError:
+        return None
+    return candidates[0]
+
+
 def analyse_pdf_pipeline(
     path: Path,
     *,
@@ -324,8 +388,13 @@ def analyse_pdf_pipeline(
     provider_registry: Mapping[str, ProviderProfile] | None = None,
     text_extractor: Callable[[Path, int], TextExtraction] | None = None,
     provider_detail_extractor: Callable[[Path, int, int], str] | None = None,
+    forced_provider: str | None = None,
 ) -> SourceAnalysis:
-    """Run the cached global pipeline used by folder and bulk ingestion."""
+    """Run the cached global pipeline used by folder and bulk ingestion.
+
+    ``forced_provider`` es el proveedor que el usuario confirmó para este
+    documento: se usa cuando la detección automática no encuentra ninguno.
+    """
     extraction = get_document_text(connection, path, extractor=text_extractor)
     classification = classify_document(extraction.text, path.name)
     locator = _classification_locator(extraction)
@@ -385,13 +454,24 @@ def analyse_pdf_pipeline(
         extraction.text,
         path.name,
         classification.kind,
+        learned_tax_ids=load_learned_tax_ids(connection),
     )
+    if match is None and forced_provider:
+        confirmed = profile_for_name(provider_registry, forced_provider)
+        if confirmed is not None:
+            match = ProviderMatch(confirmed.key, "high", "provider:manual:v1", (forced_provider,))
     if match is None:
         bundle = extract_invoice_fields(_generic_invoice_profile(), extraction.text)
         return SourceAnalysis.invoice(
+            {"proveedor": forced_provider} if forced_provider else None,
             confidence="medium",
             locator=locator,
             field_evidence=bundle.fields,
+        )
+    if match.confidence == "high" and match.rule_id != "provider:tax-id:v1":
+        learn_issuer_tax_id(
+            connection, extraction.text, match.provider_key, provider_registry,
+            source=match.rule_id,
         )
 
     profile = provider_registry[match.provider_key]
@@ -896,7 +976,8 @@ def analyse_source(path: Path, *, community_code: str, pdf_processor=None,
                    providers: Mapping[str, object] | None = None,
                    connection: sqlite3.Connection | None = None,
                    provider_registry: Mapping[str, ProviderProfile] | None = None,
-                   text_extractor: Callable[[Path, int], TextExtraction] | None = None) -> SourceAnalysis:
+                   text_extractor: Callable[[Path, int], TextExtraction] | None = None,
+                   forced_provider: str | None = None) -> SourceAnalysis:
     """Dispatch a supported source file to the appropriate analyser."""
     path = Path(path)
     suffix = path.suffix.lower()
@@ -909,6 +990,7 @@ def analyse_source(path: Path, *, community_code: str, pdf_processor=None,
                 providers=providers,
                 provider_registry=provider_registry,
                 text_extractor=text_extractor,
+                forced_provider=forced_provider,
             )
         return analyse_pdf(
             path, pdf_processor=pdf_processor, community_code=community_code,

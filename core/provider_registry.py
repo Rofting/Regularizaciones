@@ -54,6 +54,64 @@ def _valid_tax_id(value: str) -> bool:
     return bool(_TAX_ID_PATTERN.fullmatch(value))
 
 
+_DNI_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE"
+
+
+def valid_spanish_tax_id(value: str) -> bool:
+    """Comprueba formato y dígito/letra de control de un CIF, NIF o NIE."""
+    tax_id = normalize_tax_id(value)
+    if not _TAX_ID_PATTERN.fullmatch(tax_id):
+        return False
+    if tax_id[0] in "XYZ":
+        number = int(str("XYZ".index(tax_id[0])) + tax_id[1:8])
+        return tax_id[8] == _DNI_LETTERS[number % 23]
+    if tax_id[0].isdigit():
+        return tax_id[8] == _DNI_LETTERS[int(tax_id[:8]) % 23]
+    digits = tax_id[1:8]
+    total = sum(int(digit) for digit in digits[1::2])
+    for digit in digits[0::2]:
+        doubled = int(digit) * 2
+        total += doubled // 10 + doubled % 10
+    control_digit = (10 - total % 10) % 10
+    control_letter = "JABCDEFGHI"[control_digit]
+    control = tax_id[8]
+    if tax_id[0] in "PQRSNW":
+        return control == control_letter
+    if tax_id[0] in "ABEH":
+        return control == str(control_digit)
+    return control in (str(control_digit), control_letter)
+
+
+_TAX_ID_IN_TEXT = re.compile(
+    r"(?<![A-Z0-9])([ABCDEFGHJNPQRSUVWXYZ0-9])[\s.\-]?(\d{2})[\s.\-]?(\d{3})"
+    r"[\s.\-]?(\d{2,3})[\s.\-]?([0-9A-Z])(?![A-Z0-9])"
+)
+
+
+def find_tax_ids(text: str) -> tuple[str, ...]:
+    """CIF/NIF/NIE válidos (con control correcto) en orden de aparición."""
+    found: list[str] = []
+    for match in _TAX_ID_IN_TEXT.finditer(_normalize_words(text)):
+        candidate = "".join(match.groups())
+        if len(candidate) == 9 and valid_spanish_tax_id(candidate) and candidate not in found:
+            found.append(candidate)
+    return tuple(found)
+
+
+def profile_for_name(
+    registry: Mapping[str, "ProviderProfile"], value: str,
+) -> "ProviderProfile | None":
+    """Localiza un proveedor por clave, nombre visible o alias (sin acentos)."""
+    wanted = _normalize_words(value)
+    if not wanted:
+        return None
+    for profile in registry.values():
+        names = (profile.key, profile.display_name, *profile.aliases)
+        if any(_normalize_words(name) == wanted for name in names):
+            return profile
+    return None
+
+
 def _as_strings(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -212,7 +270,13 @@ def resolve_provider(
     text: str,
     filename: str,
     document_kind: str,
+    learned_tax_ids: Mapping[str, str] | None = None,
 ) -> ProviderMatch | None:
+    """Identifica el emisor: primero por CIF (catálogo o aprendido), luego por firmas.
+
+    ``learned_tax_ids`` asocia CIF a claves de proveedor a partir de facturas
+    ya confirmadas, para que el catálogo no tenga que mantenerlos a mano.
+    """
     raw_document = f"{filename or ''}\n{text or ''}"
     normalized_document = _normalize_words(raw_document)
     compact_document = re.sub(r"[^A-Z0-9]", "", normalized_document)
@@ -227,9 +291,12 @@ def resolve_provider(
         profile for profile in registry.values() if kind in profile.document_types
     ]
 
+    learned_by_profile: dict[str, list[str]] = {}
+    for tax_id, key in (learned_tax_ids or {}).items():
+        learned_by_profile.setdefault(key, []).append(tax_id)
     fiscal_matches: list[tuple[ProviderProfile, str]] = []
     for profile in compatible:
-        for tax_id in profile.tax_ids:
+        for tax_id in (*profile.tax_ids, *learned_by_profile.get(profile.key, ())):
             if _tax_id_in_text(tax_id, normalized_document):
                 fiscal_matches.append((profile, tax_id))
     # An exclusion signature ("Energía XXI") vetoes the provider even when its
@@ -295,6 +362,9 @@ def resolve_provider(
 __all__ = [
     "ProviderMatch",
     "ProviderProfile",
+    "find_tax_ids",
+    "profile_for_name",
+    "valid_spanish_tax_id",
     "load_provider_registry",
     "normalize_tax_id",
     "provider_registry_from_payload",

@@ -1318,5 +1318,71 @@ class TabularRobustnessTest(unittest.TestCase):
             parse("-3")
 
 
+
+class ProviderLearningTest(unittest.TestCase):
+    """El proveedor confirmado se usa y su CIF se aprende para la siguiente factura."""
+
+    REGISTRY = provider_registry_from_payload({"proveedores": {
+        "ACME": {
+            "aliases": ["ACME ENERGIA"], "document_types": ["invoice"],
+            "service_family": "GAS", "extractor_family": "gas_fuel",
+            "required_signatures": [r"\bFACTURA\b"],
+        },
+    }})
+    INVOICE = (
+        "FACTURA F-{n} Fecha factura: 03/03/2026 Emisor CIF: A-95.758.389 "
+        "Cliente Comunidad de Propietarios NIF H99258139 "
+        "Periodo de facturacion 01/02/2026 al 28/02/2026 "
+        "Base imponible 100,00 EUR IVA 21,00 EUR Total factura 121,00 EUR"
+    )
+
+    def setUp(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        import gestor_bd
+        self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        with redirect_stdout(StringIO()):
+            gestor_bd.crear_bd(str(Path(self.directory.name) / "g.db"))
+        self.connection = gestor_bd.conectar(str(Path(self.directory.name) / "g.db"))
+
+    def tearDown(self):
+        self.connection.close()
+        self.directory.cleanup()
+
+    def analyse(self, text, name, **kwargs):
+        path = Path(self.directory.name) / name
+        path.write_bytes(name.encode())
+        return source_analysis.analyse_source(
+            path, community_code="658", connection=self.connection,
+            provider_registry=self.REGISTRY,
+            text_extractor=lambda *_: TextExtraction(text, "pdf_text", (1,), {}, 1, False),
+            **kwargs,
+        )
+
+    def test_confirmed_provider_is_used_and_its_tax_id_recognises_the_next_invoice(self):
+        unknown = self.analyse(self.INVOICE.format(n=1), "a.pdf")
+        self.assertIsNone(unknown.provider_key)
+
+        confirmed = self.analyse(self.INVOICE.format(n=1), "a.pdf", forced_provider="acme energia")
+        self.assertEqual("ACME", confirmed.provider_key)
+        self.assertEqual("GAS", confirmed.candidates["tipo_suministro"])
+        self.assertEqual(
+            {"A95758389": "ACME"}, source_analysis.load_learned_tax_ids(self.connection),
+        )
+
+        # Otra factura del mismo emisor sin su nombre: se reconoce por el CIF.
+        later = self.analyse(self.INVOICE.format(n=2), "b.pdf")
+        self.assertEqual("ACME", later.provider_key)
+
+    def test_ambiguous_documents_do_not_teach_a_tax_id(self):
+        text = self.INVOICE.format(n=3) + " Distribuidora CIF B50000009 ACME ENERGIA"
+        self.analyse(text, "c.pdf")
+        self.assertEqual({}, source_analysis.load_learned_tax_ids(self.connection))
+
+    def test_unknown_forced_provider_keeps_the_name(self):
+        result = self.analyse(self.INVOICE.format(n=4), "d.pdf", forced_provider="Talleres Pepe")
+        self.assertIsNone(result.provider_key)
+        self.assertEqual("Talleres Pepe", result.candidates["proveedor"])
+
 if __name__ == "__main__":
     unittest.main()
