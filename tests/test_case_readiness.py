@@ -199,6 +199,27 @@ class CaseReadinessTest(unittest.TestCase):
         self.assertEqual(1, blocker.count)
         self.assertIn("1 propiedad", blocker.message)
 
+    def test_old_distribution_hash_does_not_authorize_letters(self):
+        self._register_profile("equal")
+        self._add_owner()
+        self.connection.execute(
+            """INSERT INTO distribution_runs
+               (id_case,id_periodo,input_sha256,status)
+               VALUES (?,?,?,'completed')""",
+            (self.case_id, self.period_id, "obsolete-input"),
+        )
+        self.connection.commit()
+        from case_readiness import evaluate_case_readiness
+
+        report = evaluate_case_readiness(
+            self.connection, self.case_id, self.project_root
+        )
+
+        self.assertIn(
+            "STALE_DISTRIBUTION",
+            tuple(item.code for item in report.for_stage("letters")),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
