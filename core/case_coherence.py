@@ -176,9 +176,16 @@ def evaluate(con: sqlite3.Connection, case_id: int, profile) -> CoherenceReport:
             start, end = (date.fromisoformat(str(invoice[k])) for k in ('fecha_inicio', 'fecha_fin'))
         except ValueError:
             continue  # El control de campos obligatorios ya señala las fechas ausentes.
-        if start >= end:
+        if start > end:
             add(f'invoice_dates:{invoice["id_factura"]}',
                 f'Factura {invoice["num_factura"] or invoice["id_factura"]}: el inicio debe ser anterior al fin.', False)
+            continue
+        if start == end:
+            # Un servicio puntual (reparación, revisión) puede durar un día; en
+            # un suministro suele ser un error de lectura. Se pide confirmarlo.
+            add(f'invoice_single_day:{invoice["id_factura"]}',
+                f'Factura {invoice["num_factura"] or invoice["id_factura"]} de {invoice["tipo_suministro"]}: '
+                f'empieza y termina el {start}. Confirma que es un servicio puntual o corrige el período.')
             continue
         dated.append((invoice, start, end))
     for index, (first, start, end) in enumerate(dated):

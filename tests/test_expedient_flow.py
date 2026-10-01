@@ -429,6 +429,28 @@ class ExpedientFlowTest(unittest.TestCase):
         })
         self.assertEqual("validated", self.document_status(document))
 
+    def test_extracted_supply_point_consumption_and_provider_reach_the_invoice(self):
+        result = case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case, source_path=self.source_path,
+            archive_root=self.archive_root, document_kind="invoice",
+            candidates={"tipo_suministro": "GAS", "fecha_inicio": "2026-01-01",
+                        "fecha_fin": "2026-01-31", "importe_total": "128.10",
+                        "cups": "ES 0217 9000 0000 0001 AB", "consumo_kwh": "1234",
+                        "consumo_m3": "110"},
+            required_fields=(),
+        )
+        self.connection.execute(
+            "UPDATE source_documents SET provider_key='NATURGY_CLIENTES_GAS' WHERE id_document=?",
+            (result.document.id_document,),
+        )
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, result.document.id_document)
+        invoice = self.connection.execute(
+            "SELECT cups_o_referencia,consumo_total,unidad_consumo,proveedor FROM facturas"
+        ).fetchone()
+        self.assertEqual("ES0217900000000001AB", invoice["cups_o_referencia"])
+        self.assertEqual((1234.0, "kWh"), (invoice["consumo_total"], invoice["unidad_consumo"]))
+        self.assertTrue(invoice["proveedor"])
+
     def test_confirmed_reading_is_available_as_reading_not_invoice(self):
         document = self.add_confirmed_reading()
         case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, document.id_document)
