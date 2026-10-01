@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import tempfile
@@ -113,6 +114,21 @@ def restore_design_with_calculated_values(original: Path, calculated: Path) -> N
         temporary.unlink(missing_ok=True)
 
 
+# Versión más antigua con la que se ha verificado el recorrido completo
+# (mejora 12: 24.2.7.2 en Ubuntu 24.04 y 26.2.6.3 en Windows).
+MINIMUM_LIBREOFFICE_VERSION = (24, 2)
+
+
+def parse_libreoffice_version(text: str) -> tuple[int, ...] | None:
+    """Extrae la versión de la salida de ``soffice --version``."""
+    match = re.search(r"LibreOffice\s+(\d+(?:\.\d+)+)", text or "")
+    return tuple(int(part) for part in match.group(1).split(".")) if match else None
+
+
+def version_text(version: tuple[int, ...]) -> str:
+    return ".".join(str(part) for part in version)
+
+
 class RecalculationError(RuntimeError):
     """Indica que el libro no pudo recalcularse con un motor de escritorio."""
 
@@ -187,6 +203,34 @@ class LibreOfficeRecalculator:
             "LibreOffice no está instalado o no se encuentra soffice. "
             "Instálalo para poder validar el Excel oficial."
         )
+
+    def installed_version(self) -> tuple[int, ...]:
+        """Versión del LibreOffice que se usaría para recalcular."""
+        executable = self._find_executable()
+        with tempfile.TemporaryDirectory(prefix="regularizacion-lo-") as profile_root:
+            try:
+                completed = subprocess.run(
+                    [str(executable), f"-env:UserInstallation={Path(profile_root).resolve().as_uri()}", "--version"],
+                    capture_output=True, text=True, timeout=self._timeout_seconds, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise RecalculationError(f"No se pudo consultar la versión de LibreOffice: {error}") from error
+        version = parse_libreoffice_version(completed.stdout + completed.stderr)
+        if version is None:
+            raise RecalculationError(
+                "No se reconoce la versión de LibreOffice "
+                f"({(completed.stdout or completed.stderr or 'sin salida').strip()})"
+            )
+        return version
+
+    def check_minimum_version(self) -> tuple[int, ...]:
+        version = self.installed_version()
+        if version[:len(MINIMUM_LIBREOFFICE_VERSION)] < MINIMUM_LIBREOFFICE_VERSION:
+            raise RecalculationError(
+                f"LibreOffice {version_text(version)} es anterior a la versión mínima comprobada "
+                f"({version_text(MINIMUM_LIBREOFFICE_VERSION)}). Actualízalo para generar el Excel."
+            )
+        return version
 
     def recalculate(self, workbook_path: Path, work_directory: Path) -> None:
         workbook_path = Path(workbook_path).resolve()

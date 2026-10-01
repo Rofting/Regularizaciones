@@ -37,7 +37,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install libreoffice-fresh poppler tesseract --yes --no-progress
+          choco install libreoffice-still poppler tesseract --yes --no-progress
           if ($LASTEXITCODE -ne 0) { throw "No se pudieron instalar las herramientas de documentos" }
           "$env:ProgramFiles\LibreOffice\program" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
@@ -72,11 +72,8 @@ jobs:
         shell: bash
         run: |
           python -c "import shutil; assert shutil.which('soffice'), 'LibreOffice no está en el PATH'"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            soffice.com --version
-          else
-            soffice --version
-          fi
+          # Falla si la versión instalada es anterior a la mínima verificada.
+          python scripts/comprobar_libreoffice.py
 
       - name: Suite completa desde el checkout limpio
         shell: bash
