@@ -452,11 +452,20 @@ _SERVICE_KEYWORDS: tuple[tuple[str, str], ...] = (
 def infer_service_family(text: str) -> tuple[str, str] | None:
     """Guess the supply type from keywords when no provider profile applies."""
     folded = _strip_accents(text or "")
-    counts = []
+    found: dict[str, list[str]] = {}
     for family, pattern in _SERVICE_KEYWORDS:
         hits = re.findall(_strip_accents(pattern), folded, re.IGNORECASE)
         if hits:
-            counts.append((len(hits), family, hits[0]))
+            found.setdefault(family, []).extend(hits)
+    # Palabras clave configurables (producto + despacho) en config/palabras_clave.json.
+    import keywords
+    padded = f" {keywords.fold(text)} "
+    for family, words in keywords.section("servicios").items():
+        for word in words:
+            occurrences = padded.count(f" {word} ")
+            if occurrences:
+                found.setdefault(family, []).extend([word] * occurrences)
+    counts = [(len(hits), family, hits[0]) for family, hits in found.items()]
     if not counts:
         return None
     counts.sort(key=lambda item: -item[0])

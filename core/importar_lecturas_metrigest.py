@@ -29,6 +29,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent))
 from gestor_bd import conectar, crear_bd, marcar_archivo_procesado, archivo_ya_procesado
 from lector_pdf import procesar_archivo
+from dwelling_matching import match_dwelling
 import document_review
 
 BASE_DIR        = Path(__file__).parent.parent
@@ -274,13 +275,12 @@ def apply_confirmed_readings(
     Devuelve ``True`` cuando la fuente sigue pendiente de revisión (por ejemplo,
     por un reinicio de contador). El llamador conserva la transacción completa.
     """
-    owners = {
-        _normalizar_vivienda(row["codigo_vivienda"]): row
-        for row in con.execute(
-            "SELECT id_propietario,codigo_vivienda FROM propietarios WHERE id_comunidad=?",
-            (community_id,),
-        )
-    }
+    owner_rows = con.execute(
+        "SELECT id_propietario,codigo_vivienda FROM propietarios WHERE id_comunidad=?",
+        (community_id,),
+    ).fetchall()
+    owners = {_normalizar_vivienda(row["codigo_vivienda"]): row for row in owner_rows}
+    owners_by_code = {str(row["codigo_vivienda"]): row for row in owner_rows}
     pending_review = False
     unmatched: list[str] = []
 
@@ -292,6 +292,10 @@ def apply_confirmed_readings(
         if not property_code or service not in {"ACS", "CALEFACCION"}:
             raise ValueError("La lectura confirmada debe incluir vivienda y tipo válidos")
         owner = owners.get(_normalizar_vivienda(property_code))
+        if owner is None:
+            # «1º B», «PISO 1 PUERTA B», «BAJO IZQ.»: notación distinta de la
+            # del listado, pero inequívoca.
+            owner = match_dwelling(property_code, owners_by_code)
         if owner is None:
             # Una incidencia por vivienda convertía un listado desparejado en
             # cientos de avisos idénticos. Se acumulan y se resumen en una sola
