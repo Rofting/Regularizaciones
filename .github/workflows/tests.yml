@@ -83,7 +83,21 @@ jobs:
         env:
           MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
           XDG_CACHE_HOME: ${{ runner.temp }}/cache
-        run: python -m unittest discover -s tests -v 2>&1 | tee test-results.txt
+        run: |
+          set -o pipefail
+          if ! python -m unittest discover -s tests -v 2>&1 | tee test-results.txt; then
+            python - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("test-results.txt").read_text(encoding="utf-8", errors="replace")
+          failures = [part for part in re.split(r"\n={10,}\n", text) if part.startswith(("ERROR:", "FAIL:"))]
+          for failure in failures or ["\n".join(text.splitlines()[-40:])]:
+              message = "\n".join(line[:800] for line in failure.splitlines())[:5000]
+              message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print("::error title=Prueba fallida::" + message)
+          PY
+            exit 1
+          fi
 
       - name: Conservar resultado de pruebas
         if: always()
