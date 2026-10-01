@@ -495,19 +495,21 @@ def _write_results(
         consumption_unit = (
             "kWh" if concept.key.startswith("heating_") else "m³"
         ) if consumption_value is not None else None
+        identity = connection.execute('SELECT nombre_propietario,codigo_vivienda FROM propietarios WHERE id_propietario=?',
+                                      (owner_id,)).fetchone()
         connection.execute(
             """INSERT INTO owner_distribution_snapshots
                (id_distribution_run,id_propietario,concept_key,
                 coefficient_raw,coefficient_eligible_total,coefficient_applied,
-                consumption,consumption_unit,billed_cents,actual_cents,difference_cents)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                consumption,consumption_unit,billed_cents,actual_cents,difference_cents,owner_name,dwelling_code)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 distribution_run_id, owner_id, concept.key,
                 float(raw_coefficient) if raw_coefficient is not None else None,
                 float(coefficient_eligible_total) if coefficient_eligible_total > 0 else None,
                 float(applied_coefficient) if applied_coefficient is not None else None,
                 consumption_value, consumption_unit,
-                billed, actual, actual - billed,
+                billed, actual, actual - billed, identity['nombre_propietario'], identity['codigo_vivienda'],
             ),
         )
     return len(allocations_actual)

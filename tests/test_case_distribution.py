@@ -215,6 +215,21 @@ class CaseDistributionTest(unittest.TestCase):
             (runs[0][0],),
         ).fetchone()[0])
 
+    def test_distribution_keeps_owner_identity_when_the_holder_changes(self):
+        calculate_case_distribution(self.connection, id_case=self.case_id)
+        first = self.connection.execute('SELECT MAX(id_distribution_run) FROM distribution_runs').fetchone()[0]
+        snapshot = self.connection.execute('SELECT * FROM owner_distribution_snapshots WHERE id_distribution_run=? LIMIT 1', (first,)).fetchone()
+        owner = self.connection.execute('SELECT * FROM propietarios WHERE id_propietario=?', (snapshot['id_propietario'],)).fetchone()
+        self.assertEqual(owner['nombre_propietario'], snapshot['owner_name'])
+        self.assertEqual(owner['codigo_vivienda'], snapshot['dwelling_code'])
+        self.connection.execute("UPDATE propietarios SET nombre_propietario='Nuevo titular' WHERE id_propietario=?", (owner['id_propietario'],))
+        self.connection.commit()
+        self._refresh_validated_export()
+        calculate_case_distribution(self.connection, id_case=self.case_id)
+        self.assertEqual(snapshot['owner_name'], self.connection.execute('SELECT owner_name FROM owner_distribution_snapshots WHERE id_snapshot=?', (snapshot['id_snapshot'],)).fetchone()[0])
+        latest = self.connection.execute('SELECT MAX(id_distribution_run) FROM distribution_runs').fetchone()[0]
+        self.assertEqual('Nuevo titular', self.connection.execute('SELECT owner_name FROM owner_distribution_snapshots WHERE id_distribution_run=? AND id_propietario=? LIMIT 1', (latest, owner['id_propietario'])).fetchone()[0])
+
     def test_largest_remainder_breaks_ties_by_owner_identifier_for_negative_credits(self):
         self.assertEqual(
             {1: -34, 2: -33, 3: -33},

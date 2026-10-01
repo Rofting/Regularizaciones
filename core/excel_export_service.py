@@ -520,6 +520,10 @@ def _input_hash(
             (case["id_comunidad"],),
         ),
     }
+    from case_year_comparison import reference_snapshot
+    history = reference_snapshot(connection, case)
+    if history:
+        payload['historical_reference'] = history
     # Lo cobrado a los vecinos alimenta el «importe cobrado» del análisis: si
     # cambia una cuota, el Excel y el reparto dejan de estar al día. Sólo se
     # incluye cuando existe, para no invalidar huellas de comunidades sin cuotas.

@@ -166,6 +166,14 @@ class CaseLetterServiceTest(unittest.TestCase):
             (run_id,),
         ).fetchall()
 
+    def _refresh_validated_export(self):
+        input_hash = calculate_case_input_hash(self.connection, id_case=self.case_id, project_root=self.root)
+        self.connection.execute('''INSERT INTO excel_export_runs
+            (id_case,id_periodo,id_template_profile,input_sha256,template_sha256,status)
+            SELECT id_case,id_periodo,id_template_profile,?,template_sha256,'validated'
+            FROM excel_export_runs WHERE id_case=? ORDER BY id_export_run DESC LIMIT 1''',
+            (input_hash, self.case_id))
+
     def test_case_letters_use_active_concepts_and_record_each_owner(self):
         from case_letter_service import generate_case_letters
 
@@ -382,7 +390,7 @@ class CaseLetterServiceTest(unittest.TestCase):
             )
 
     def test_changed_historical_graph_input_starts_a_new_batch(self):
-        from case_letter_service import generate_case_letters
+        from case_letter_service import generate_case_letters, LetterGenerationBlockedError
 
         historical_period = self.connection.execute(
             """INSERT INTO periodos(id_comunidad,nombre,fecha_inicio,fecha_fin)
@@ -398,6 +406,7 @@ class CaseLetterServiceTest(unittest.TestCase):
                 (self.owner_one, historical_period, "2025-08-31", 60),
             ],
         )
+        self._refresh_validated_export()
         self.connection.commit()
         first = generate_case_letters(
             self.database_path, id_case=self.case_id, project_root=self.root
@@ -409,6 +418,10 @@ class CaseLetterServiceTest(unittest.TestCase):
         )
         self.connection.commit()
 
+        with self.assertRaisesRegex(LetterGenerationBlockedError, 'regenerar Excel'):
+            generate_case_letters(self.database_path, id_case=self.case_id, project_root=self.root)
+        self._refresh_validated_export()
+        self.connection.commit()
         second = generate_case_letters(
             self.database_path, id_case=self.case_id, project_root=self.root
         )
@@ -468,6 +481,7 @@ class CaseLetterServiceTest(unittest.TestCase):
                FROM excel_export_runs WHERE id_case=?""",
             (previous_case, previous_period, previous_hash, self.case_id),
         )
+        self._refresh_validated_export()
         self.connection.commit()
 
         # The real writer still creates the documents; inspect the payload at

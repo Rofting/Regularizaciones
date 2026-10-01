@@ -2,6 +2,8 @@
 
 La mejora 10 añade controles a la preparación del expediente y a la generación
 del Excel oficial. Una llamada directa al exportador también los ejecuta.
+El mismo panel incluye la [comparación con el ejercicio anterior](comparacion-con-ejercicio-anterior.md)
+de la mejora 9, con avisos y umbrales propios.
 
 ## Uso
 
