@@ -62,9 +62,12 @@ y fijar la versión de LibreOffice de referencia.
   temporal para comparar correctamente rutas cortas y largas de Windows.
 
 La versión de LibreOffice instalada por los gestores de paquetes de CI todavía
-puede cambiar. Fijar la misma versión estable y validar todo el recorrido en
-Windows forma parte de la mejora 12. Un workflow añadido no equivale a una
-ejecución de Windows aprobada: hay que comprobar el resultado de Actions.
+puede cambiar: Ubuntu instala la rama de su distribución (24.2.7.2) y Chocolatey
+la más reciente (`libreoffice-fresh`, 26.2.6.3 al verificar la mejora 12). El
+recorrido pasó con ambas, así que el rango 24.2–26.2 queda comprobado. Fijar
+una versión exacta en Windows depende de que el instalador antiguo siga
+publicado; la alternativa más robusta es `libreoffice-still` (rama estable) y
+exigir una versión mínima en el paso «Comprobar LibreOffice real».
 
 ## Orden de ejecución
 
@@ -101,7 +104,7 @@ de recursos, datos, copias y herramientas externas.
 | 9. Comparación con el ejercicio previo | Implementado en «Coherencia»: último período anterior de la misma comunidad, importes por suministro/punto/unidad e intervalo y consumos por vivienda, con factor ×3 configurable y tolerancia de duración. Avisos motivados y huellas que incluyen el histórico. Los futuros repartos conservan nombre del titular y código de vivienda. | Pruebas de subidas/bajadas, ceros, referencias ausentes o ambiguas, rectificaciones, cambios de titular e invalidación al editar el histórico. Sin referencia comparable se informa y no se prorratea. Los repartos antiguos sin identidad histórica se señalan como tales; no se inventa el titular anterior. |
 | 10. Coherencia antes del Excel | Implementado: panel «Coherencia», control de porcentajes/pesos relativos, fechas y solapes por suministro/punto, y comparaciones de consumos declaradas por el usuario. Bloqueo en preparación y exportación directa, con aceptación motivada de avisos y revisión invalidada cuando cambian los datos. | Pruebas sintéticas de bloqueos, corrección desde la interfaz, abonos, unidades/intervalos incompatibles, lecturas estimadas y aceptación caducada. Los porcentajes deben sumar 100 % con tolerancia 0,01; los pesos se normalizan. Consumo sólo con unidades iguales, un punto identificado e intervalo exacto y continuo; no se prorratea. |
 | 11. Pruebas independientes de la 658 | Corregido en esta entrega: proyecto y workbook temporales sintéticos en las pruebas del flujo guiado. | La suite pasa desde un checkout que nunca ha tenido `plantillas/comunidades/658`. Las pruebas no dejan archivos privados ni salidas en el árbol de trabajo. |
-| 12. Recorrido real con LibreOffice | `tests/test_libreoffice_journey.py`: comunidad nueva desde el modelo común, dos propietarios, facturas y lecturas confirmadas, cuotas, Excel recalculado por LibreOffice, reparto y cartas. El ensayo destapó dos fallos ya corregidos: la validación posterior a LibreOffice exigía área de impresión en todas las hojas (el modelo sólo la tiene en ANALISIS) y la preparación pedía los importes de ACS como parámetros aunque hubiera cuotas, cuando el exportador los calcula. Verificado en Linux con LibreOffice 24.2.7.2. Pendiente: resultado en Windows y fijar la versión. | Con dos propietarios y documentos sintéticos, el mismo recorrido conserva impresión/diseño, cuadra en céntimos y genera las cartas esperadas. Registrar y fijar la versión estable tras comprobar Windows. Una prueba con un motor simulado no sustituye a esta aceptación. |
+| 12. Recorrido real con LibreOffice | `tests/test_libreoffice_journey.py`: comunidad nueva desde el modelo común, dos propietarios, facturas y lecturas confirmadas, cuotas, Excel recalculado por LibreOffice, reparto y cartas. El ensayo destapó dos fallos ya corregidos: la validación posterior a LibreOffice exigía área de impresión en todas las hojas (el modelo sólo la tiene en ANALISIS) y la preparación pedía los importes de ACS como parámetros aunque hubiera cuotas, cuando el exportador los calcula. Verificado en CI (run 36865907823, commit 4b4a589): ubuntu-24.04 con LibreOffice 24.2.7.2 y windows-2022 con LibreOffice 26.2.6.3; en ambos el recorrido se ejecutó (no se omitió) y pasaron las 691 pruebas. Pendiente: decidir si se fija una versión exacta o una mínima (ver nota de CI). | Con dos propietarios y documentos sintéticos, el mismo recorrido conserva impresión/diseño, cuadra en céntimos y genera las cartas esperadas. Versiones registradas; queda fijar la de referencia. Una prueba con un motor simulado no sustituye a esta aceptación. |
 
 ## Uso diario e interfaz
 
