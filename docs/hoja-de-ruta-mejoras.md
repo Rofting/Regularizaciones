@@ -17,7 +17,23 @@ La mejora 10 también está implementada, documentada en
 [Coherencia antes del Excel](coherencia-antes-del-excel.md).
 La mejora 9 está implementada en
 [Comparación con el ejercicio anterior](comparacion-con-ejercicio-anterior.md).
-La mejora 12 sigue pendiente en la entrega B.
+La mejora 12 tiene su prueba de aceptación en `tests/test_libreoffice_journey.py`
+(ver la fila 12); queda pendiente comprobar su resultado en Windows en Actions
+y fijar la versión de LibreOffice de referencia.
+
+### Revisión de 9 y 10 (entrega B)
+
+- Al aplicar una factura, `cups`, `consumo_kwh`/`consumo_m3` y el proveedor
+  detectado no llegaban a `facturas` (`cups_o_referencia`, `consumo_total`,
+  `unidad_consumo`, `proveedor`). Sin esos datos la comparación histórica no
+  comparaba ningún importe y la coherencia trataba como posible solape dos
+  suministros distintos del mismo tipo. Corregido en `case_ingestion`; un valor
+  confirmado con el nombre canónico prevalece. Las facturas ya aplicadas antes
+  de la corrección conservan sus columnas vacías hasta que se vuelvan a aplicar.
+- Una factura de un solo día (servicio puntual) era un bloqueo sin aceptación
+  posible; ahora es un aviso aceptable. Inicio posterior al fin sigue bloqueando.
+- En comunidades de más de 10 viviendas las notas sin novedad de la comparación
+  histórica se resumen en una línea para no tapar los avisos.
 
 ## Primera entrega: pruebas que se pueden repetir
 
@@ -85,7 +101,7 @@ de recursos, datos, copias y herramientas externas.
 | 9. Comparación con el ejercicio previo | Implementado en «Coherencia»: último período anterior de la misma comunidad, importes por suministro/punto/unidad e intervalo y consumos por vivienda, con factor ×3 configurable y tolerancia de duración. Avisos motivados y huellas que incluyen el histórico. Los futuros repartos conservan nombre del titular y código de vivienda. | Pruebas de subidas/bajadas, ceros, referencias ausentes o ambiguas, rectificaciones, cambios de titular e invalidación al editar el histórico. Sin referencia comparable se informa y no se prorratea. Los repartos antiguos sin identidad histórica se señalan como tales; no se inventa el titular anterior. |
 | 10. Coherencia antes del Excel | Implementado: panel «Coherencia», control de porcentajes/pesos relativos, fechas y solapes por suministro/punto, y comparaciones de consumos declaradas por el usuario. Bloqueo en preparación y exportación directa, con aceptación motivada de avisos y revisión invalidada cuando cambian los datos. | Pruebas sintéticas de bloqueos, corrección desde la interfaz, abonos, unidades/intervalos incompatibles, lecturas estimadas y aceptación caducada. Los porcentajes deben sumar 100 % con tolerancia 0,01; los pesos se normalizan. Consumo sólo con unidades iguales, un punto identificado e intervalo exacto y continuo; no se prorratea. |
 | 11. Pruebas independientes de la 658 | Corregido en esta entrega: proyecto y workbook temporales sintéticos en las pruebas del flujo guiado. | La suite pasa desde un checkout que nunca ha tenido `plantillas/comunidades/658`. Las pruebas no dejan archivos privados ni salidas en el árbol de trabajo. |
-| 12. Recorrido real con LibreOffice | Ya existe una prueba de exportación real con verificación de diseño, fórmulas y valores cacheados. `office_recalculation.py` conserva el diseño original y copia los resultados calculados. CI ejecuta esa comprobación en Linux y Windows; falta un ensayo completo alta → factura → Excel → reparto → cartas en ambos sistemas y acordar la versión estable de referencia. | Con dos propietarios y documentos sintéticos, el mismo recorrido conserva impresión/diseño, cuadra en céntimos y genera las cartas esperadas. Registrar y fijar la versión estable tras comprobar Windows. Una prueba con un motor simulado no sustituye a esta aceptación. |
+| 12. Recorrido real con LibreOffice | `tests/test_libreoffice_journey.py`: comunidad nueva desde el modelo común, dos propietarios, facturas y lecturas confirmadas, cuotas, Excel recalculado por LibreOffice, reparto y cartas. El ensayo destapó dos fallos ya corregidos: la validación posterior a LibreOffice exigía área de impresión en todas las hojas (el modelo sólo la tiene en ANALISIS) y la preparación pedía los importes de ACS como parámetros aunque hubiera cuotas, cuando el exportador los calcula. Verificado en Linux con LibreOffice 24.2.7.2. Pendiente: resultado en Windows y fijar la versión. | Con dos propietarios y documentos sintéticos, el mismo recorrido conserva impresión/diseño, cuadra en céntimos y genera las cartas esperadas. Registrar y fijar la versión estable tras comprobar Windows. Una prueba con un motor simulado no sustituye a esta aceptación. |
 
 ## Uso diario e interfaz
 

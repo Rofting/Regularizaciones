@@ -1040,6 +1040,14 @@ def _case_supply_points(connection: sqlite3.Connection, case, services) -> str |
     return " / ".join(values) or None
 
 
+def _sheets_with_print_area(path: Path) -> tuple[str, ...]:
+    book = load_workbook(path, read_only=False)
+    try:
+        return tuple(sheet.title for sheet in book.worksheets if sheet.print_area)
+    finally:
+        book.close()
+
+
 def _write_supply_identity(connection: sqlite3.Connection, workbook, case) -> None:
     """Dirección y CUPS de las hojas de suministro (C4/C5) con datos de la comunidad.
 
@@ -1526,8 +1534,12 @@ def generate_official_excel(
             shutil.copy2(temporary_path, before_recalculation)
         engine.recalculate(temporary_path, work_directory)
         if isinstance(engine, LibreOfficeRecalculator):
+            # LibreOffice reescribe el diseño (se restaura justo después), así que
+            # aquí aún no se compara la huella. Sólo deben conservar área de
+            # impresión las hojas que ya la tenían en la plantilla.
             validate_workbook(
                 temporary_path, profile, _expected_totals(connection, case, profile),
+                print_area_sheets=_sheets_with_print_area(template),
             )
             restore_design_with_calculated_values(before_recalculation, temporary_path)
         else:
