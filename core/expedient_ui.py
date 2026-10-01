@@ -31,6 +31,7 @@ import office_settings
 import owner_lists
 import period_selection
 import source_batch
+import source_preview
 import ui_moderna as UIM
 from expedient_models import ReviewIssue
 from ui_moderna import C
@@ -3005,6 +3006,146 @@ def open_archived_path_resolution_dialog(app: "AppGestionFincas", case_id: int) 
     render()
 
 
+def open_source_preview(app: "AppGestionFincas", issue: ReviewIssue) -> None:
+    """Muestra la página o la hoja de la fuente con la evidencia resaltada.
+
+    Sólo se resalta lo que se localiza de verdad en el archivo; si no, se
+    enseña el fragmento guardado. Sin visor posible, se usa el contexto.
+    """
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        evidence = source_preview.evidence_for_issue(
+            connection, issue.id_document, issue.field_name, issue.detected_value,
+        )
+    finally:
+        connection.close()
+    path = Path(issue.archived_path)
+    if not path.is_file() or path.suffix.lower() not in {".pdf", ".xlsx", ".xlsm", ".xls", ".csv"}:
+        show_issue_context(app, issue)
+        return
+
+    # Las facturas tienen pocas páginas: leer sus palabras es inmediato y así
+    # el visor se abre encima del diálogo de la incidencia, que es modal.
+    result = source_preview.build_preview(path, evidence)
+    if result.kind == "text":
+        show_issue_context(app, issue)
+    else:
+        _show_source_preview(app, issue, path, result)
+
+
+def _show_source_preview(app: "AppGestionFincas", issue: ReviewIssue, path: Path, result) -> None:
+    dialog = _dialog(app, "Evidencia en la fuente", 920, 780)
+    dialog.resizable(True, True)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16,
+                         border_width=1, border_color=C["borde"])
+    panel.pack(fill="both", expand=True, padx=14, pady=14)
+    ctk.CTkLabel(panel, text=source_display_name(path), font=UIM.fuente(17, "bold"),
+                 text_color=C["texto"]).pack(anchor="w", padx=18, pady=(16, 0))
+    located = result.match is not None or (result.sheet is not None and result.sheet.target is not None)
+    ctk.CTkLabel(panel, text=result.headline, font=UIM.fuente(11, "bold"),
+                 text_color=C["primario"] if located else C["alerta"],
+                 wraplength=860, justify="left").pack(anchor="w", padx=18, pady=(2, 0))
+    evidence = result.evidence
+    details = [f"Dato: {issue_guidance(issue.field_name)['label']}"]
+    if evidence.value:
+        details.append(f"Valor detectado: {evidence.value}")
+    if evidence.fragment:
+        details.append(f"Fragmento guardado: «{evidence.fragment}»")
+    details.extend(result.notes)
+    ctk.CTkLabel(panel, text="\n".join(details), font=UIM.fuente(10), text_color=C["texto_sec"],
+                 wraplength=860, justify="left").pack(anchor="w", padx=18, pady=(4, 8))
+
+    body = ctk.CTkFrame(panel, fg_color=C["panel_2"], corner_radius=11)
+    body.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+    footer = ctk.CTkFrame(panel, fg_color="transparent")
+    footer.pack(fill="x", padx=18, pady=(0, 14))
+
+    if result.kind == "pdf":
+        _pdf_viewer(body, footer, path, result)
+    else:
+        _sheet_viewer(body, result.sheet)
+
+    ctk.CTkButton(footer, text="Cerrar", command=dialog.destroy, height=34, corner_radius=8,
+                  fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right")
+    ctk.CTkButton(footer, text="Abrir archivo", command=lambda: open_archived_file(app, issue),
+                  height=34, corner_radius=8, **UIM.secondary_button_kwargs()).pack(side="right", padx=(0, 8))
+
+
+def _pdf_viewer(body, footer, path: Path, result) -> None:
+    from PIL import ImageTk
+
+    canvas = tk.Canvas(body, highlightthickness=0, background="#E5E7EB")
+    vertical = tk.Scrollbar(body, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vertical.set)
+    vertical.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    state = {"page": result.page, "image": None}
+    label = tk.StringVar(master=body)
+
+    def show(page: int):
+        page = max(1, min(result.page_count, page))
+        state["page"] = page
+        boxes = result.match.boxes if result.match is not None and result.match.page == page else ()
+        try:
+            image = source_preview.render_pdf_page(path, page, boxes)
+        except Exception as error:  # una página dañada no cierra el visor
+            canvas.delete("all")
+            canvas.create_text(20, 20, anchor="nw", text=f"No se pudo mostrar la página: {error}")
+            return
+        state["image"] = ImageTk.PhotoImage(image, master=canvas)
+        canvas.delete("all")
+        canvas.create_image(0, 0, anchor="nw", image=state["image"])
+        canvas.configure(scrollregion=(0, 0, image.width, image.height))
+        if boxes:
+            top = min(box[1] for box in boxes) * 110 / 72
+            canvas.yview_moveto(max(0.0, (top - 120) / image.height))
+        else:
+            canvas.yview_moveto(0)
+        label.set(f"Página {page} de {result.page_count}")
+
+    def wheel(event):
+        canvas.yview_scroll(-1 if (getattr(event, "delta", 0) > 0 or getattr(event, "num", 0) == 4) else 1, "units")
+    for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        canvas.bind(sequence, wheel)
+
+    navigation = ctk.CTkFrame(footer, fg_color="transparent")
+    navigation.pack(side="left")
+    for text, command in (("◀ Anterior", lambda: show(state["page"] - 1)),
+                          ("Siguiente ▶", lambda: show(state["page"] + 1))):
+        ctk.CTkButton(navigation, text=text, command=command, width=100, height=34, corner_radius=8,
+                      **UIM.secondary_button_kwargs()).pack(side="left", padx=(0, 6))
+    ctk.CTkLabel(navigation, textvariable=label, font=UIM.fuente(11),
+                 text_color=C["texto_sec"]).pack(side="left", padx=8)
+    if result.match is not None:
+        ctk.CTkButton(navigation, text="Ir al resaltado", command=lambda: show(result.match.page),
+                      height=34, corner_radius=8, **UIM.secondary_button_kwargs()).pack(side="left", padx=6)
+    show(result.page)
+
+
+def _sheet_viewer(body, window) -> None:
+    grid = ctk.CTkScrollableFrame(body, fg_color="transparent", orientation="horizontal")
+    grid.pack(fill="both", expand=True, padx=8, pady=8)
+    ctk.CTkLabel(grid, text=f"Hoja «{window.sheet}»", font=UIM.fuente(11, "bold"),
+                 text_color=C["texto"]).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+    width = max((len(row) for row in window.rows), default=0)
+    for offset in range(width):
+        ctk.CTkLabel(grid, text=source_preview._column_letter(window.first_column + offset),
+                     font=UIM.fuente(10, "bold"), text_color=C["texto_sec"]).grid(row=1, column=offset + 1)
+    for row_offset, values in enumerate(window.rows):
+        number = window.first_row + row_offset
+        ctk.CTkLabel(grid, text=str(number), font=UIM.fuente(10, "bold"),
+                     text_color=C["texto_sec"]).grid(row=row_offset + 2, column=0, padx=(0, 6))
+        for column_offset in range(width):
+            value = values[column_offset] if column_offset < len(values) else ""
+            target = window.target == (number, window.first_column + column_offset)
+            ctk.CTkLabel(
+                grid, text=value[:28], width=104, height=26, corner_radius=4, anchor="w",
+                font=UIM.fuente(10, "bold" if target else "normal"),
+                fg_color="#FDE68A" if target else C["panel"],
+                text_color="#7C2D12" if target else C["texto"],
+            ).grid(row=row_offset + 2, column=column_offset + 1, padx=1, pady=1, sticky="ew")
+
+
 def open_archived_file(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     try:
         if sys.platform != "win32":
@@ -3729,7 +3870,7 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
     source_actions = ctk.CTkFrame(panel, fg_color="transparent")
     source_actions.grid(row=2, column=0, sticky="w", padx=22, pady=(6, 0))
     ctk.CTkButton(
-        source_actions, text="Ver contexto", command=lambda: show_issue_context(app, issue),
+        source_actions, text="Ver en la fuente", command=lambda: open_source_preview(app, issue),
         height=34, corner_radius=8, **UIM.secondary_button_kwargs(),
     ).pack(side="left", padx=(0, 8))
     ctk.CTkButton(

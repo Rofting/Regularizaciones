@@ -103,7 +103,11 @@ creada: un maestro posterior sin importes o parámetros obligatorios se marca
 como incompleto y debe corregirse o confirmarse.
 
 Después de importar las fuentes, abre "Resolver incidencias". Confirma cada
-dato y su motivo hasta que el expediente muestre "Listo para cálculo". Entonces:
+dato y su motivo hasta que el expediente muestre "Listo para cálculo". En cada
+incidencia, "Ver en la fuente" abre la página del PDF con el dato resaltado (o
+la celda de la hoja). Si el texto no se localiza en el archivo, por ejemplo en
+un PDF escaneado, no se resalta nada y se muestra el fragmento leído.
+Entonces:
 
 1. Pulsa "Generar Excel oficial". El libro se reconstruye desde datos validados.
 2. Abre el resultado y revisa hojas, período, importes y lecturas.
