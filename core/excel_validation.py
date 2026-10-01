@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 from pathlib import Path
-from typing import Mapping
+from typing import Iterable, Mapping
 from zipfile import ZipFile
 
 from openpyxl import load_workbook
@@ -417,8 +417,14 @@ def validate_workbook(
     expected_totals_cents: Mapping[str, int],
     *,
     expected_fingerprint: WorkbookFingerprint | None = None,
+    print_area_sheets: Iterable[str] | None = None,
 ) -> None:
-    """Comprueba estructura, fórmulas, impresión, errores y conciliación."""
+    """Comprueba estructura, fórmulas, impresión, errores y conciliación.
+
+    Sin huella de la plantilla, ``print_area_sheets`` indica qué hojas deben
+    conservar su área de impresión (las que la tenían en la plantilla); si no
+    se indica, se exige en todas las hojas obligatorias.
+    """
     path = Path(path)
     if not path.is_file():
         raise WorkbookValidationError(f"No existe el libro a validar: {path}")
@@ -435,8 +441,9 @@ def validate_workbook(
         # Lo que sí se comprueba, más abajo contra la huella de la plantilla,
         # es que la generación no altere las que hubiera.
         if expected_fingerprint is None:
-            for sheet_name in profile.required_sheets:
-                if not _print_area(formula_book[sheet_name]):
+            sheets = profile.required_sheets if print_area_sheets is None else tuple(print_area_sheets)
+            for sheet_name in sheets:
+                if sheet_name in formula_book.sheetnames and not _print_area(formula_book[sheet_name]):
                     raise WorkbookValidationError(
                         f"La hoja {sheet_name} no conserva un área de impresión"
                     )

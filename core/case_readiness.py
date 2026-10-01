@@ -9,6 +9,7 @@ from pathlib import Path
 import document_review
 import fixed_costs
 import case_coherence
+import cuotas_servicio
 from excel_export_service import ExportBlockedError, calculate_case_input_hash
 from excel_profiles import (
     ExcelProfile,
@@ -208,6 +209,17 @@ def _required_parameter_missing(
             (case["id_comunidad"], case["id_periodo"]),
         )
     }
+    # Misma regla que el exportador: con cuotas anotadas, el libro calcula el
+    # coste real (facturas) y lo cobrado (hoja de cobros) de ese servicio.
+    for service, prefix in (("ACS", "acs"), ("CALEFACCION", "heating")):
+        if service in profile.active_modules and cuotas_servicio.resumen(
+            connection, community_id=case["id_comunidad"],
+            period_id=case["id_periodo"], servicio=service,
+        ).apuntes:
+            present.update({
+                f"{prefix}_fixed_actual", f"{prefix}_variable_actual",
+                f"{prefix}_fixed_billed", f"{prefix}_variable_billed",
+            })
     return tuple(sorted(required.difference(present)))
 
 
