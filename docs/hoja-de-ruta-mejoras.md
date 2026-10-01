@@ -24,6 +24,9 @@ funciones ya entregadas.
   LibreOffice, comprueba que esté disponible y registra su versión. Por tanto,
   la prueba de exportación real no queda omitida por faltar el programa.
   Los registros se conservan 14 días como artefactos del workflow.
+  En Windows se instala LibreOffice antes de preparar Python: el workflow
+  comprueba que las pruebas usan Python 3.12 del runner y no el Python interno
+  que LibreOffice trae en su carpeta de programa.
 - `tests/test_dependencies.py` comprueba también `rapidfuzz`, ya declarado en
   los requisitos. Evita confundir una instalación incompleta con un fallo del
   reconocimiento aproximado de proveedores.
@@ -41,7 +44,7 @@ ejecución de Windows aprobada: hay que comprobar el resultado de Actions.
 | B. Protección del cálculo | 19, 8, 10, 9, 12 | Crear copias verificadas, detectar importes heredados y comprobar el cálculo antes de ampliar automatismos. |
 | C. Entrada de documentos | 6, 5, 2, 3, 4, 1, 7 | Aprender identidades confirmadas, repartir por comunidad y mejorar extracción conservando trazabilidad. |
 | D. Trabajo diario | 14, 15, 13 | Revisar documentos dentro de la aplicación, ver todos los expedientes y completar altas en lote. |
-| E. Salidas y distribución | 17, 16, 18 | Obtener PDF, preparar/envíar cartas con control por destinatario y construir el instalador Windows. |
+| E. Salidas y distribución | 17, 16, 18 | Obtener PDF, preparar/enviar cartas con control por destinatario y construir el instalador Windows. |
 | F. Mantenimiento | Resto de 20 | Retirar código sin consumidores y limpiar Git con una copia recuperable. |
 
 La entrega B precede a la automatización de altas y envíos. El PDF de cartas
