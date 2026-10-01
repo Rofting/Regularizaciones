@@ -19,7 +19,7 @@ from openpyxl import load_workbook
 
 import document_review
 import cuotas_servicio
-from fixed_costs import load_fixed_costs, write_fixed_costs
+from fixed_costs import load_fixed_costs, write_fixed_costs, unconfirmed_template_costs, inherited_cost_message
 from excel_profiles import (
     ExcelProfile,
     calculate_profile_sha256,
@@ -1471,6 +1471,13 @@ def generate_official_excel(
     if profile.community_code != str(case["codigo"]):
         raise ExportBlockedError("El perfil no corresponde a la comunidad del expediente")
     _validate_normalized_inputs(connection, case, profile)
+    if "OTROS_GASTOS" in profile.active_modules and (project_root / profile.template_relative_path).is_file():
+        findings = unconfirmed_template_costs(
+            project_root / profile.template_relative_path,
+            load_fixed_costs(connection, case["id_comunidad"], case["id_periodo"]),
+        )
+        if findings:
+            raise ExportBlockedError(inherited_cost_message(findings))
     profile_id, template, template_hash = _template_registration(
         connection, case, profile, project_root
     )

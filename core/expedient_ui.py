@@ -291,6 +291,7 @@ def guided_workspace_state(
             "review_sources": ("validar", "confirmar_fuentes", "Completar datos de fuentes"),
             "review_owners": ("validar", "importar_propietarios", "Revisar coeficientes"),
             "review_readings": ("validar", "anadir_fuentes", "Completar lecturas"),
+            "review_fixed_costs": ("reparto", "revisar_gastos_fijos", "Revisar gastos fijos"),
             "generate_excel": ("reparto", "generar_excel", "Generar Excel oficial"),
             "calculate_distribution": ("reparto", "calcular_reparto", "Calcular reparto"),
         }
@@ -3196,9 +3197,23 @@ def open_fixed_costs_dialog(app: "AppGestionFincas", period_id: int) -> None:
         periodo = connection.execute(
             "SELECT nombre FROM periodos WHERE id_periodo=?", (period_id,),
         ).fetchone()
+        inherited = ()
+        if getattr(app, "id_expediente", None):
+            import case_workflow_actions
+            project_root = Path(__file__).resolve().parents[1]
+            try:
+                profile = case_workflow_actions.resolve_case_profile(
+                    connection, id_case=app.id_expediente, active_community_id=app.id_comunidad,
+                    project_root=project_root,
+                )
+                template = project_root / profile.template_relative_path
+                if template.is_file() and "OTROS_GASTOS" in profile.active_modules:
+                    inherited = fixed_costs.unconfirmed_template_costs(template, current)
+            except (LookupError, ValueError):
+                pass  # Los gastos pueden prepararse antes de instalar el perfil.
     finally:
         connection.close()
-    dialog = _dialog(app, "Gastos fijos", 560, 520)
+    dialog = _dialog(app, "Gastos fijos", 560, 700 if inherited else 520)
     panel = ctk.CTkFrame(
         dialog, fg_color=C["panel"], corner_radius=16, border_width=1, border_color=C["borde"],
     )
@@ -3214,6 +3229,11 @@ def open_fixed_costs_dialog(app: "AppGestionFincas", period_id: int) -> None:
         ),
         font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=480, justify="left",
     ).pack(anchor="w", padx=20, pady=(0, 10))
+    if inherited:
+        ctk.CTkLabel(
+            panel, text=fixed_costs.inherited_cost_message(inherited),
+            font=UIM.fuente(11), text_color=C["texto"], wraplength=480, justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 10))
     entries = {}
     for item in fixed_costs.FIXED_COSTS:
         row = ctk.CTkFrame(panel, fg_color="transparent")

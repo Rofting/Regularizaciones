@@ -88,7 +88,7 @@ def _importar_modulos():
                    "importar_excel_maestro", "letter_settings", "regularization_flow",
                    "expedient_service", "document_review", "case_ingestion",
                    "expedient_ui", "case_workflow_actions", "case_readiness",
-                   "database_reset", "office_settings"]:
+                   "database_reset", "database_backup", "office_settings"]:
         try:
             modulos[nombre] = __import__(nombre)
         except ImportError:
@@ -132,8 +132,13 @@ class AppGestionFincas(ctk.CTk):
         self._workspace_action_label = "Crear expediente"
 
         self._crear_ui_guiada()
+        try:
+            self._verificar_estructura()
+        except Exception as error:
+            messagebox.showerror("No se pudo proteger la base", str(error), parent=self)
+            self.destroy()
+            raise
         self._cargar_comunidades()
-        self._verificar_estructura()
         self.log("", "bienvenida")
         self.log("  👋 Bienvenido. Selecciona comunidad y periodo,", "bienvenida")
         self.log("     deja los PDFs/Excels en entrada/ y pulsa PROCESAR TODO.", "bienvenida")
@@ -314,6 +319,12 @@ class AppGestionFincas(ctk.CTk):
                 self.log("✅ Base de datos creada en data/gestion.db", "ok")
             except Exception as e:
                 self.log(f"❌ Error creando BD: {e}", "error")
+                raise
+        else:
+            result = MOD["database_backup"].backup_database(RUTA_BD, reason="startup")
+            self.log(f"Copia de seguridad verificada: {result.backup_path.name}", "ok")
+            for warning in result.cleanup_warnings:
+                self.log(warning, "aviso")
 
     def _cargar_comunidades(self):
         """Rellena el desplegable de comunidades desde la BD."""
@@ -723,6 +734,10 @@ class AppGestionFincas(ctk.CTk):
             connection = database.conectar(database_path)
             try:
                 ingestion.assert_case_belongs_to_community(connection, case_id, community_id)
+                result = MOD["database_backup"].backup_database(database_path, reason="before_reanalysis")
+                self.log(f"Copia de seguridad verificada: {result.backup_path.name}", "ok")
+                for warning in result.cleanup_warnings:
+                    self.log(warning, "aviso")
                 outcome = ingestion.reevaluate_case_sources(connection, case_id)
             finally:
                 connection.close()
@@ -1023,6 +1038,7 @@ class AppGestionFincas(ctk.CTk):
             "importar_propietarios": ("Importar propietarios", self._accion_anadir_fuentes),
             "revalidar_perfil": ("Revalidar perfil Excel", self._accion_revalidar_perfil),
             "generar_excel": ("Generar Excel oficial", self._accion_generar_excel_expediente),
+            "revisar_gastos_fijos": ("Revisar gastos fijos", self._accion_gastos_fijos),
             "calcular_reparto": ("Calcular reparto", self._accion_calcular_reparto_expediente),
             "generar_cartas": ("Generar cartas", self._accion_generar_cartas_expediente),
             "abrir_salidas": ("Abrir salidas", self._abrir_salidas),
@@ -1327,6 +1343,11 @@ class AppGestionFincas(ctk.CTk):
 
     def _progreso_expediente(self, stage, details):
         """Traduce hitos técnicos a actividad que puede seguir el despacho."""
+        if stage == "backup_database":
+            self.log(f"Copia de seguridad verificada: {Path(details['path']).name}", "ok")
+            for warning in details.get("warnings", ()):
+                self.log(warning, "aviso")
+            return
         messages = {
             "validate_case": ("validacion", "Comprobando el expediente seleccionado…"),
             "importar_modelo": ("fuentes", "Importando el modelo inicial archivado…"),

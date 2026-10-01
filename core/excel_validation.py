@@ -14,7 +14,7 @@ from openpyxl.utils.cell import range_boundaries
 from openpyxl.utils.cell import coordinate_from_string
 
 from excel_profiles import ExcelProfile
-from fixed_costs import FIXED_COST_CELLS
+from fixed_costs import matching_fixed_cost_cells
 
 
 SUPPLY_IDENTITY_CELLS = {
@@ -80,7 +80,7 @@ def _mutable_addresses(profile: ExcelProfile) -> dict[str, set[str]]:
                 result.setdefault(sheet_name, set()).add(f"{column}{row}")
     # Dirección y CUPS de las hojas de suministro: identidad de la comunidad
     # que el exportador rellena en cualquier perfil (ver _write_supply_identity).
-    for sheet_name, addresses in (*SUPPLY_IDENTITY_CELLS.items(), *FIXED_COST_CELLS.items()):
+    for sheet_name, addresses in SUPPLY_IDENTITY_CELLS.items():
         result.setdefault(sheet_name, set()).update(addresses)
     if profile.key == "658_acs_v1":
         # Enlaces históricos añadidos por el exportador sin cambiar el JSON
@@ -281,6 +281,8 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
             value = workbook[sheet_name][address].value if sheet_name in workbook.sheetnames else None
             formulas.append((sheet_name, address, value if isinstance(value, str) else ""))
         mutable = _mutable_addresses(profile)
+        for sheet_name, addresses in matching_fixed_cost_cells(workbook).items():
+            mutable.setdefault(sheet_name, set()).update(addresses)
         immutable_cells = []
         immutable_styles = []
         merges = []
