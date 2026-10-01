@@ -25,6 +25,7 @@ if str(CORE_DIR) not in sys.path:
 
 import excel_generator
 import gestor_bd
+import office_recalculation
 from excel_export_service import (
     ExportBlockedError, _case_context, _expected_totals, _input_hash, _profile_for_community,
     _is_winter, _season_boundary, _validate_normalized_inputs,
@@ -204,7 +205,7 @@ def _make_template(path: Path) -> Path:
 class ExcelExportServiceTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.project_root = self.root / "proyecto"
         config_dir = self.project_root / "config" / "excel_profiles"
         template_dir = self.project_root / "plantillas" / "comunidades" / "658"
@@ -433,6 +434,45 @@ class ExcelExportServiceTest(unittest.TestCase):
             self.assertEqual(100, workbook["GAS"]["M31"].value)
         finally:
             workbook.close()
+
+    def test_restoring_formula_cache_closes_archives_before_replacing_workbook(self):
+        original = self.root / "original.xlsx"
+        calculated = self.root / "calculated.xlsx"
+        workbook = Workbook()
+        workbook.active["A1"] = "=1+1"
+        workbook.save(original)
+        workbook.close()
+        with ZipFile(original) as source, ZipFile(calculated, "w") as target:
+            for part in source.infolist():
+                contents = source.read(part.filename)
+                if part.filename == "xl/worksheets/sheet1.xml":
+                    contents = contents.replace(b"<v></v>", b"<v>2</v>")
+                target.writestr(part, contents)
+
+        archives = []
+        real_replace = office_recalculation.os.replace
+
+        def tracked_archive(*args, **kwargs):
+            archive = ZipFile(*args, **kwargs)
+            archives.append(archive)
+            return archive
+
+        def replace_when_closed(source, destination):
+            self.assertTrue(archives)
+            self.assertTrue(all(archive.fp is None for archive in archives))
+            return real_replace(source, destination)
+
+        with mock.patch("office_recalculation.ZipFile", side_effect=tracked_archive), \
+             mock.patch("office_recalculation.os.replace", side_effect=replace_when_closed):
+            office_recalculation.restore_design_with_calculated_values(original, calculated)
+
+        for data_only, expected in ((False, "=1+1"), (True, 2)):
+            restored = load_workbook(calculated, data_only=data_only)
+            try:
+                self.assertEqual(expected, restored.active["A1"].value)
+            finally:
+                restored.close()
+        self.assertFalse(original.with_name(original.name + ".cached").exists())
 
     def test_export_uses_latest_reliable_reading_for_an_outdated_carry_forward(self):
         owner_id = self.connection.execute(

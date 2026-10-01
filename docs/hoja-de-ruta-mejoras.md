@@ -30,6 +30,12 @@ funciones ya entregadas.
 - `tests/test_dependencies.py` comprueba también `rapidfuzz`, ya declarado en
   los requisitos. Evita confundir una instalación incompleta con un fallo del
   reconocimiento aproximado de proveedores.
+- **Corrección de Windows detectada por CI:** la restauración del diseño del
+  Excel cierra los archivos ZIP antes de reemplazar el libro recalculado.
+  Evita el `PermissionError` que Windows producía al mantener abierto el
+  destino. Una prueba conserva la fórmula y su resultado y comprueba el cierre
+  de los archivos. Las pruebas afectadas también normalizan su directorio
+  temporal para comparar correctamente rutas cortas y largas de Windows.
 
 La versión de LibreOffice instalada por los gestores de paquetes de CI todavía
 puede cambiar. Fijar la misma versión estable y validar todo el recorrido en

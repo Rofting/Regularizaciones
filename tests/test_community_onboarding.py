@@ -74,7 +74,7 @@ def make_pdf(path: Path, text: str) -> Path:
 class CommunityOnboardingTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.project_root = Path(self.directory.name) / "project"
+        self.project_root = Path(self.directory.name).resolve() / "project"
         self.project_root.mkdir()
         self.database = self.project_root / "gestion.db"
         with redirect_stdout(StringIO()):

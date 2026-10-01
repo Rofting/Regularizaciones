@@ -22,7 +22,8 @@ import expedient_service
 class ExpedientServiceTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.database_path = Path(self.directory.name) / "gestion.db"
+        self.root = Path(self.directory.name).resolve()
+        self.database_path = self.root / "gestion.db"
         with redirect_stdout(StringIO()):
             gestor_bd.crear_bd(str(self.database_path))
         self.connection = sqlite3.connect(self.database_path)
@@ -103,9 +104,9 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Fuentes",
             start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
         )
-        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path = self.root / "origen.pdf"
         source_path.write_bytes(b"%PDF-1.4 prueba")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
 
         first, first_created = expedient_service.register_source_document(
             self.connection, case.id_case, source_path=source_path,
@@ -131,9 +132,9 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Recuperación",
             start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
         )
-        source_path = Path(self.directory.name) / "interrumpida.pdf"
+        source_path = self.root / "interrumpida.pdf"
         source_path.write_bytes(b"%PDF-1.4 recuperable")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
 
         archived, created = expedient_service.register_source_document(
             self.connection, case.id_case, source_path=source_path,
@@ -162,9 +163,9 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Recuperación de ruta",
             start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
         )
-        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path = self.root / "origen.pdf"
         source_path.write_bytes(b"%PDF-1.4 ruta recuperable")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
         document, _ = expedient_service.register_source_document(
             self.connection, case.id_case, source_path=source_path,
             archive_root=archive_root, document_kind="invoice",
@@ -192,9 +193,9 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Ruta ambigua",
             start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
         )
-        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path = self.root / "origen.pdf"
         source_path.write_bytes(b"%PDF-1.4 matching copies")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
         document, _ = expedient_service.register_source_document(
             self.connection, case.id_case, source_path=source_path,
             archive_root=archive_root, document_kind="invoice",
@@ -223,9 +224,9 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Copias a elegir",
             start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
         )
-        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path = self.root / "origen.pdf"
         source_path.write_bytes(b"%PDF-1.4 copies to choose")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
         document, _ = expedient_service.register_source_document(
             self.connection, case.id_case, source_path=source_path,
             archive_root=archive_root, document_kind="invoice",
@@ -249,9 +250,9 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Elegir copia",
             start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
         )
-        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path = self.root / "origen.pdf"
         source_path.write_bytes(b"%PDF-1.4 selected copy")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
         document, _ = expedient_service.register_source_document(
             self.connection, case.id_case, source_path=source_path,
             archive_root=archive_root, document_kind="invoice",
@@ -278,14 +279,14 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Enlace externo",
             start_date=date(2026, 1, 1), end_date=date(2026, 1, 31),
         )
-        source_path = Path(self.directory.name) / "origen.pdf"
+        source_path = self.root / "origen.pdf"
         source_path.write_bytes(b"%PDF-1.4 external symbolic link")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
         document, _ = expedient_service.register_source_document(
             self.connection, case.id_case, source_path=source_path,
             archive_root=archive_root, document_kind="invoice",
         )
-        external_copy = Path(self.directory.name) / "external.pdf"
+        external_copy = self.root / "external.pdf"
         external_copy.write_bytes(source_path.read_bytes())
         document.archived_path.unlink()
         internal_copy = document.archived_path.with_name("copia-interna.pdf")
@@ -304,9 +305,9 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Transacción externa",
             start_date=date(2026, 3, 1), end_date=date(2026, 3, 31),
         )
-        source_path = Path(self.directory.name) / "externa.pdf"
+        source_path = self.root / "externa.pdf"
         source_path.write_bytes(b"%PDF-1.4 externa")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
 
         self.connection.execute("BEGIN")
         try:
@@ -328,9 +329,9 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Concurrencia",
             start_date=date(2026, 4, 1), end_date=date(2026, 4, 30),
         )
-        source_path = Path(self.directory.name) / "compartida.pdf"
+        source_path = self.root / "compartida.pdf"
         source_path.write_bytes(b"%PDF-1.4 compartida")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
         first, first_created = expedient_service.register_source_document(
             self.connection, case.id_case, source_path=source_path,
             archive_root=archive_root, document_kind="invoice",
@@ -367,9 +368,9 @@ class ExpedientServiceTest(unittest.TestCase):
             self.connection, self.community_id, name="Sin enlaces duros",
             start_date=date(2026, 5, 1), end_date=date(2026, 5, 31),
         )
-        source_path = Path(self.directory.name) / "portable.pdf"
+        source_path = self.root / "portable.pdf"
         source_path.write_bytes(b"%PDF-1.4 portable")
-        archive_root = Path(self.directory.name) / "expedientes"
+        archive_root = self.root / "expedientes"
 
         with patch("expedient_service.os.link", side_effect=OSError("sin soporte")) as link:
             document, created = expedient_service.register_source_document(
