@@ -1,0 +1,148 @@
+REGULARIZACIONES · MANUAL DE INSTALACIÓN EN WINDOWS 10 / 11
+============================================================
+
+Para un ordenador que no tiene nada instalado. Todo se hace con un doble
+clic en INSTALAR.bat: el instalador descarga e instala lo que falte,
+comprueba que funciona y crea el acceso directo en el escritorio.
+
+Tiempo aproximado: de 10 a 20 minutos (depende de la conexión).
+
+
+1. QUÉ HACE FALTA
+─────────────────
+• Windows 10 u 11 con conexión a Internet durante la instalación.
+• Unos 2 GB libres en el disco.
+• Poder aceptar UNA vez el aviso de administrador de Windows (lo pide la
+  instalación de LibreOffice). Si el ordenador lo gestiona informática,
+  pídeles que estén presentes o que instalen LibreOffice antes.
+
+El instalador pone, sólo si no los encuentra:
+  - Python 3.12 ............ el lenguaje en el que está hecho el programa.
+  - LibreOffice ............ recalcula el Excel oficial. Imprescindible.
+  - Poppler ................ lee PDF escaneados (sin texto). Recomendado.
+  - Las librerías del programa, dentro de su propia carpeta (.venv), sin
+    tocar nada más del ordenador.
+
+
+2. DESCARGAR EL PROGRAMA
+────────────────────────
+Opción A · Desde GitHub (el repositorio es privado: entra con tu cuenta)
+  1. Abre https://github.com/Rofting/Regularizaciones
+  2. Comprueba que arriba a la izquierda pone la rama «main».
+  3. Botón verde «Code» → «Download ZIP».
+
+Opción B · Desde tu ordenador con un USB
+  Copia la carpeta del programa SIN las carpetas «.venv» y «data» (la
+  primera se crea al instalar; la segunda son tus datos, ver apartado 6).
+
+
+3. DESCOMPRIMIR EN SU SITIO
+───────────────────────────
+  1. Clic derecho sobre el ZIP → «Extraer todo...».
+  2. Elige como destino  C:\  y pulsa «Extraer».
+  3. Renombra la carpeta «Regularizaciones-main» a  Regularizaciones
+     Debe quedar  C:\Regularizaciones\INSTALAR.bat
+
+  Evita el Escritorio, «Documentos» o «Descargas» si están en OneDrive: la
+  sincronización puede bloquear la base de datos mientras trabajas.
+  No ejecutes nada desde dentro del ZIP sin descomprimir.
+
+
+4. INSTALAR (UN SOLO PASO)
+──────────────────────────
+  1. Abre C:\Regularizaciones y haz doble clic en  INSTALAR.bat
+  2. Si aparece «Windows protegió su PC»: pulsa «Más información» y después
+     «Ejecutar de todas formas». (Sale porque el archivo viene de Internet.)
+  3. Cuando Windows pregunte «¿Quieres permitir que esta aplicación haga
+     cambios?» para LibreOffice, pulsa «Sí».
+  4. Espera. Verás cinco pasos:
+        [1/5] Python 3.12
+        [2/5] LibreOffice
+        [3/5] Poppler
+        [4/5] Librerías del programa
+        [5/5] Comprobación final
+     En la comprobación cada línea debe decir [OK]. Un [AVISO] en Poppler
+     no impide usar el programa (sólo la lectura de PDF escaneados).
+  5. Al terminar pone «Instalación completada» y pregunta si quieres abrir
+     el programa.
+
+  Si algo falla, el mensaje en rojo dice qué hacer. Puedes ejecutar
+  INSTALAR.bat todas las veces que haga falta: lo ya instalado no se repite.
+  El detalle queda en  C:\Regularizaciones\instalacion.log
+
+
+5. ABRIR Y EMPEZAR
+──────────────────
+• Doble clic en el icono «Regularizaciones» del escritorio (también está en
+  el menú Inicio). O doble clic en  Regularizaciones.bat  dentro de la carpeta.
+• La primera vez pide los datos del despacho (nombre, ciudad...), que salen
+  en las cartas. Se pueden cambiar después en «Ajustes».
+• La base de datos empieza vacía. Para dar de alta comunidades:
+    «Nueva comunidad» → «Alta masiva por subcarpetas» (varias a la vez, una
+    subcarpeta por comunidad, p. ej. «658 - CP Las Flores») o
+    «Alta guiada desde fuentes» (una comunidad, botón «Rellenar desde carpeta»).
+• El resto del trabajo (fuentes, incidencias, Excel, reparto y cartas) está
+  explicado en  GUIA_PROCESAR_TODO.txt
+• «Todas las comunidades» (arriba) muestra el estado de cada expediente.
+
+Para una demostración rápida: ten preparada una carpeta con la subcarpeta de
+una comunidad (listado de propietarios, informe de lecturas y facturas en
+PDF) y usa «Alta masiva por subcarpetas».
+
+
+6. LLEVAR TUS DATOS A OTRO ORDENADOR (p. ej. para enseñarlo)
+────────────────────────────────────────────────────────────
+Los datos no están en GitHub. Para ver en otro equipo las comunidades que ya
+tienes, con el programa CERRADO en los dos ordenadores, copia estas carpetas
+de tu C:\Regularizaciones al mismo sitio del otro:
+
+    data\                          base de datos, expedientes y copias
+    plantillas\comunidades\        plantillas Excel de cada comunidad
+    config\excel_profiles\runtime\ perfiles creados en las altas
+    salidas\                       (opcional) Excel y cartas generados
+
+ATENCIÓN: contienen nombres, viviendas e importes de vecinos. Usa un USB
+de confianza y bórralos del otro ordenador si sólo era una demostración.
+
+
+7. ACTUALIZAR A UNA VERSIÓN NUEVA
+─────────────────────────────────
+  1. Cierra el programa.
+  2. Descarga el ZIP nuevo (apartado 2) y extráelo ENCIMA de
+     C:\Regularizaciones, aceptando «Reemplazar los archivos».
+     Tus datos (data, salidas, plantillas de comunidades) no vienen en el
+     ZIP, así que no se tocan. Aun así, el programa hace una copia de la
+     base de datos cada vez que se abre.
+  3. Vuelve a ejecutar INSTALAR.bat (instala las librerías nuevas si las hay).
+
+
+8. SI ALGO NO VA
+────────────────
+• «No se reconoce winget» o «Falta winget»:
+    Abre Microsoft Store, busca «Instalador de aplicación», actualízalo y
+    repite INSTALAR.bat.
+• El antivirus o la red del despacho bloquea las descargas:
+    Instala a mano Python 3.12 (python.org, marcando «Add python.exe to
+    PATH») y LibreOffice (es.libreoffice.org) y repite INSTALAR.bat: los
+    detectará y sólo instalará las librerías.
+• El programa no se abre al pulsar el icono:
+    Abre una ventana de comandos en C:\Regularizaciones (en la barra de
+    direcciones del Explorador escribe  cmd  y pulsa Intro) y ejecuta
+        Regularizaciones.bat diagnostico
+    Verás el error; haz una captura de pantalla.
+• Comprobar el equipo en cualquier momento:
+        .venv\Scripts\python.exe scripts\comprobar_instalacion.py
+• «No se puede generar el Excel» o aviso de LibreOffice:
+    Repite INSTALAR.bat. Si LibreOffice estaba ya instalado y es antiguo,
+    actualízalo (el programa necesita la versión 24.2 o posterior).
+• Los PDF escaneados no se leen:
+    Falta Poppler. Repite INSTALAR.bat con conexión a Internet.
+
+
+9. DESINSTALAR
+──────────────
+  1. Guarda una copia de C:\Regularizaciones\data si quieres conservar los datos.
+  2. Borra los accesos «Regularizaciones» del escritorio y del menú Inicio.
+  3. Borra la carpeta C:\Regularizaciones.
+  4. Opcional: desinstala Python 3.12, LibreOffice y Poppler desde
+     Configuración → Aplicaciones (sólo si no los usa otro programa).

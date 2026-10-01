@@ -47,6 +47,10 @@ PRODUCT_PATHS = (
     "plantillas/modelo",
     "requirements.txt",
     "GUIA_PROCESAR_TODO.txt",
+    "MANUAL_INSTALACION_WINDOWS.txt",
+    "INSTALAR.bat",
+    "Regularizaciones.bat",
+    ".gitattributes",
 )
 
 # Dentro de las rutas del producto, piezas propias de un despacho concreto.

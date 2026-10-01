@@ -1,0 +1,62 @@
+name: Instalador Windows
+
+# Ejecuta INSTALAR.bat en un Windows recién creado, como en un ordenador del
+# despacho sin nada instalado: Python, LibreOffice y Poppler llegan por winget.
+on:
+  push:
+    paths:
+      - "INSTALAR.bat"
+      - "Regularizaciones.bat"
+      - "scripts/windows/**"
+      - "scripts/comprobar_instalacion.py"
+      - "requirements.txt"
+      - ".github/workflows/instalador-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: instalador-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  instalar:
+    name: INSTALAR.bat · windows-2025
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Equipo de partida
+        shell: pwsh
+        run: |
+          winget --version
+          if (Test-Path "$env:ProgramFiles\LibreOffice") { Write-Host "LibreOffice ya presente en la imagen" }
+
+      - name: Doble clic en INSTALAR.bat (modo desatendido)
+        shell: cmd
+        run: INSTALAR.bat -Desatendido -SinAccesosDirectos
+
+      - name: El programa abre su ventana y crea la base
+        shell: cmd
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          .venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'core'); import ui_moderna, app; ui_moderna.iniciar(); ventana = app.AppGestionFincas(); ventana.after(6000, ventana.destroy); ventana.mainloop()"
+          if not exist data\gestion.db exit /b 1
+
+      - name: Recorrido completo con el LibreOffice instalado
+        shell: cmd
+        env:
+          PYTHONUTF8: "1"
+        run: .venv\Scripts\python.exe -m unittest -v tests.test_libreoffice_journey
+
+      - name: Conservar registro de instalación
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: instalacion-windows
+          path: instalacion.log
+          if-no-files-found: ignore
+          retention-days: 14
