@@ -1,0 +1,5 @@
+# Los scripts de Windows se guardan tal cual, con finales de línea CRLF,
+# para que funcionen igual desde un clon que desde el ZIP de GitHub.
+*.bat -text
+*.cmd -text
+*.ps1 -text

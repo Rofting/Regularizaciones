@@ -2,6 +2,9 @@
   REGULARIZACIÓN DE FACTURAS — FLUJO V3
 ════════════════════════════════════════════════════════════════
 
+INSTALAR EN UN ORDENADOR NUEVO: ver MANUAL_INSTALACION_WINDOWS.txt
+(doble clic en INSTALAR.bat; después, icono «Regularizaciones»).
+
 QUÉ HACE LA APLICACIÓN
 ──────────────────────
 Para cada comunidad y período, la aplicación conserva las fuentes originales,
