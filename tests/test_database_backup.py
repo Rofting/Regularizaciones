@@ -69,6 +69,24 @@ class DatabaseBackupTest(unittest.TestCase):
         self.assertEqual(original, self.database.read_bytes())
         self.assertEqual([previous.backup_path], list((self.root / 'backups').glob('*.db')))
 
+    def test_manifest_collision_does_not_delete_an_existing_record(self):
+        real_open = Path.open
+        existing = []
+
+        def open_after_other_process_creates_manifest(path, mode='r', *args, **kwargs):
+            if mode == 'x' and path.suffix == '.json':
+                with real_open(path, 'w', encoding='utf-8') as stream:
+                    stream.write('registro ajeno')
+                existing.append(path)
+            return real_open(path, mode, *args, **kwargs)
+
+        with patch('database_backup.Path.open', autospec=True,
+                   side_effect=open_after_other_process_creates_manifest):
+            with self.assertRaises(database_backup.DatabaseBackupError):
+                database_backup.backup_database(self.database, reason='startup')
+        self.assertEqual('registro ajeno', existing[0].read_text())
+        self.assertEqual([], list((self.root / 'backups').glob('*.db')))
+
     def test_invalid_retention_stops_before_creating_or_deleting_copies(self):
         for settings in ('{"max_backups": 0}', '{"max_backups": true}', '[]', '{broken'):
             with self.subTest(settings=settings):

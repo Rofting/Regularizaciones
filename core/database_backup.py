@@ -95,6 +95,7 @@ def backup_database(database_path: str | Path, *, reason: str) -> BackupResult:
     source = Path(database_path).resolve()
     destination = None
     manifest = None
+    manifest_created = False
     try:
         if not source.is_file():
             raise DatabaseBackupError(f"No existe la base que se quiere respaldar: {source}")
@@ -128,9 +129,10 @@ def backup_database(database_path: str | Path, *, reason: str) -> BackupResult:
             "created_at": datetime.now(UTC).isoformat(), "sha256": _digest(destination),
         }
         with manifest.open("x", encoding="utf-8") as stream:
+            manifest_created = True
             json.dump(record, stream, ensure_ascii=False, indent=2)
     except (OSError, ValueError, sqlite3.Error, DatabaseBackupError) as error:
-        for path in (manifest, destination):
+        for path in (manifest if manifest_created else None, destination):
             if path is not None:
                 try:
                     path.unlink(missing_ok=True)
