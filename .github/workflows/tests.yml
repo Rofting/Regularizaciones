@@ -25,11 +25,6 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements.txt
 
       - name: Herramientas de documentos · Linux
         if: runner.os == 'Linux'
@@ -46,15 +41,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "No se pudieron instalar las herramientas de documentos" }
           "$env:ProgramFiles\LibreOffice\program" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      # LibreOffice incluye python.exe en su carpeta de programa. Preparar el
+      # Python de las pruebas después deja su intérprete primero en el PATH.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
       - name: Dependencias de Python
         shell: bash
         run: |
-          # antlr4 (dependencia de OmegaConf/RapidOCR) se distribuye como fuente.
-          # Preparar sus herramientas evita el instalador aislado que falla
-          # por permisos en el runner Windows.
+          python -c "import sys; print(sys.executable); assert sys.version_info[:2] == (3, 12), 'Se necesita Python 3.12'; assert 'libreoffice' not in sys.executable.casefold(), 'Se está usando el Python interno de LibreOffice'"
           if ! {
-            python -m pip install --upgrade pip setuptools wheel &&
-            python -m pip install --no-build-isolation 'antlr4-python3-runtime==4.9.3' &&
+            python -m pip install --upgrade pip &&
             python -m pip install -r requirements.txt
           } > dependency-results.txt 2>&1; then
             cat dependency-results.txt
