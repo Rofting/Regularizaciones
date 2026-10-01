@@ -39,6 +39,7 @@ PRODUCT_PATHS = (
     "core",
     "scripts",
     "config/proveedores.json",
+    "config/palabras_clave.json",
     "config/proveedores_despacho.ejemplo.json",
     "config/rutas.ejemplo.json",
     "config/modelo_excel",

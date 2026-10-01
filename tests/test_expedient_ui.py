@@ -953,7 +953,7 @@ class CommunityOnboardingDialogTest(unittest.TestCase):
     def select_sources(self, invoices=False):
         self.click("Continuar a fuentes")
         self.files.askopenfilename.return_value = "owners.csv"
-        self.click("Elegir CSV")
+        self.click("Elegir archivo")
         self.files.askopenfilenames.return_value = ("readings.pdf",)
         self.click("Elegir lecturas")
         if invoices:

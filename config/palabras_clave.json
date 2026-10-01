@@ -1,44 +1,259 @@
 {
   "_descripcion": "Palabras clave del producto para reconocer documentos, servicios y columnas. Cada despacho puede ampliarlas en config/palabras_clave_despacho.json con la misma estructura: sus listas se suman a estas.",
   "servicios": {
-    "ELECTRICIDAD": ["electricidad", "energia electrica", "termino de potencia", "potencia contratada", "peaje de acceso", "tu luz"],
-    "GASOLEO": ["gasoleo", "gasoil", "gasóleo c", "litros de gasoleo"],
-    "GAS": ["gas natural", "suministro de gas", "tur gas", "termino fijo gas", "impuesto sobre hidrocarburos", "glp", "propano"],
-    "AGUA": ["suministro de agua", "abastecimiento", "alcantarillado", "saneamiento", "canon del agua", "consumo de agua", "depuracion"],
-    "ASCENSORES": ["ascensor", "ascensores", "elevador", "aparato elevador"],
-    "LIMPIEZA": ["limpieza", "servicio de limpieza"],
-    "MANTENIMIENTO": ["mantenimiento", "revision periodica", "sala de calderas", "placas solares"],
-    "CONTADORES": ["lectura de contadores", "servicio de lecturas", "repartidores de costes", "telelectura"]
+    "ELECTRICIDAD": [
+      "electricidad",
+      "energia electrica",
+      "termino de potencia",
+      "potencia contratada",
+      "peaje de acceso",
+      "tu luz"
+    ],
+    "GASOLEO": [
+      "gasoleo",
+      "gasoil",
+      "gasóleo c",
+      "litros de gasoleo"
+    ],
+    "GAS": [
+      "gas natural",
+      "suministro de gas",
+      "tur gas",
+      "termino fijo gas",
+      "impuesto sobre hidrocarburos",
+      "glp",
+      "propano"
+    ],
+    "AGUA": [
+      "suministro de agua",
+      "abastecimiento",
+      "alcantarillado",
+      "saneamiento",
+      "canon del agua",
+      "consumo de agua",
+      "depuracion"
+    ],
+    "ASCENSORES": [
+      "ascensor",
+      "ascensores",
+      "elevador",
+      "aparato elevador"
+    ],
+    "LIMPIEZA": [
+      "limpieza",
+      "servicio de limpieza"
+    ],
+    "MANTENIMIENTO": [
+      "mantenimiento",
+      "revision periodica",
+      "sala de calderas",
+      "placas solares"
+    ],
+    "CONTADORES": [
+      "lectura de contadores",
+      "servicio de lecturas",
+      "repartidores de costes",
+      "telelectura"
+    ]
   },
   "cabeceras_lecturas": {
-    "vivienda": ["vivienda", "piso", "propiedad", "inmueble", "puerta", "ubicacion", "unidad", "codigo vivienda", "local", "domicilio", "direccion", "abonado"],
-    "contador": ["contador", "n contador", "numero contador", "n serie", "numero de serie", "serie", "equipo", "aparato", "id contador", "repartidor"],
-    "val_ant": ["lectura anterior", "lect anterior", "lect ant", "lectura ant", "anterior", "lectura inicial", "inicial", "l anterior", "valor anterior", "lectura previa"],
-    "val_act": ["lectura actual", "lect actual", "lect act", "lectura act", "actual", "lectura final", "final", "l actual", "valor actual", "ultima lectura", "lectura nueva"],
-    "consumo": ["consumo", "diferencia", "consumo periodo", "consumo m3", "consumo kwh", "unidades", "uds consumo"],
-    "fecha_ant": ["fecha anterior", "fecha lectura anterior", "fecha inicial", "f anterior"],
-    "fecha_act": ["fecha actual", "fecha lectura actual", "fecha final", "f actual", "fecha lectura"],
-    "nombre": ["nombre", "titular", "propietario", "usuario", "nombre y apellidos", "apellidos y nombre"]
+    "vivienda": [
+      "vivienda",
+      "piso",
+      "propiedad",
+      "inmueble",
+      "puerta",
+      "ubicacion",
+      "unidad",
+      "codigo vivienda",
+      "local",
+      "domicilio",
+      "direccion",
+      "abonado"
+    ],
+    "contador": [
+      "contador",
+      "n contador",
+      "numero contador",
+      "n serie",
+      "numero de serie",
+      "serie",
+      "equipo",
+      "aparato",
+      "id contador",
+      "repartidor"
+    ],
+    "val_ant": [
+      "lectura anterior",
+      "lect anterior",
+      "lect ant",
+      "lectura ant",
+      "anterior",
+      "lectura inicial",
+      "inicial",
+      "l anterior",
+      "valor anterior",
+      "lectura previa"
+    ],
+    "val_act": [
+      "lectura actual",
+      "lect actual",
+      "lect act",
+      "lectura act",
+      "actual",
+      "lectura final",
+      "final",
+      "l actual",
+      "valor actual",
+      "ultima lectura",
+      "lectura nueva"
+    ],
+    "consumo": [
+      "consumo",
+      "diferencia",
+      "consumo periodo",
+      "consumo m3",
+      "consumo kwh",
+      "unidades",
+      "uds consumo"
+    ],
+    "fecha_ant": [
+      "fecha anterior",
+      "fecha lectura anterior",
+      "fecha inicial",
+      "f anterior"
+    ],
+    "fecha_act": [
+      "fecha actual",
+      "fecha lectura actual",
+      "fecha final",
+      "f actual",
+      "fecha lectura"
+    ],
+    "nombre": [
+      "nombre",
+      "titular",
+      "propietario",
+      "usuario",
+      "nombre y apellidos",
+      "apellidos y nombre"
+    ]
   },
   "servicio_lecturas": {
-    "ACS": ["acs", "agua caliente", "a.c.s", "agua caliente sanitaria", "m3 ac"],
-    "CALEFACCION": ["calefaccion", "calef", "kwh", "repartidor", "repartidores", "energia termica", "frigorias"]
+    "ACS": [
+      "acs",
+      "agua caliente",
+      "a.c.s",
+      "agua caliente sanitaria",
+      "m3 ac"
+    ],
+    "CALEFACCION": [
+      "calefaccion",
+      "calef",
+      "kwh",
+      "repartidor",
+      "repartidores",
+      "energia termica",
+      "frigorias"
+    ]
   },
   "empresas_lecturas": {
-    "ISTA": ["ista metering", "ista.es", "ista s.a"],
-    "TECHEM": ["techem"],
-    "METRIGEST": ["metrigest"],
-    "GOMEZ_GROUP_METERING": ["gomez group metering", "gomez group"],
-    "IKOR": ["ikor metering", "ikor"],
-    "ZENNER": ["zenner"],
-    "SONTEX": ["sontex"],
-    "ENGELMANN": ["engelmann"],
-    "KAMSTRUP": ["kamstrup"],
-    "DIEHL": ["diehl metering", "sappel"],
-    "CONTAZARA": ["contazara"],
-    "BRUNATA": ["brunata"],
-    "QUNDIS": ["qundis"],
-    "MEDITRADE": ["meditrade"]
+    "ISTA": [
+      "ista metering",
+      "ista.es",
+      "ista s.a"
+    ],
+    "TECHEM": [
+      "techem"
+    ],
+    "METRIGEST": [
+      "metrigest"
+    ],
+    "GOMEZ_GROUP_METERING": [
+      "gomez group metering",
+      "gomez group"
+    ],
+    "IKOR": [
+      "ikor metering",
+      "ikor"
+    ],
+    "ZENNER": [
+      "zenner"
+    ],
+    "SONTEX": [
+      "sontex"
+    ],
+    "ENGELMANN": [
+      "engelmann"
+    ],
+    "KAMSTRUP": [
+      "kamstrup"
+    ],
+    "DIEHL": [
+      "diehl metering",
+      "sappel"
+    ],
+    "CONTAZARA": [
+      "contazara"
+    ],
+    "BRUNATA": [
+      "brunata"
+    ],
+    "QUNDIS": [
+      "qundis"
+    ],
+    "MEDITRADE": [
+      "meditrade"
+    ]
   },
-  "filas_resumen": ["total", "totales", "suma", "subtotal", "comunidad", "zonas comunes", "media"]
+  "filas_resumen": [
+    "total",
+    "totales",
+    "suma",
+    "subtotal",
+    "comunidad",
+    "zonas comunes",
+    "media"
+  ],
+  "cabeceras_propietarios": {
+    "vivienda": [
+      "fdenominacion",
+      "denominacion",
+      "vivienda",
+      "propiedad",
+      "piso",
+      "inmueble",
+      "codigo vivienda",
+      "finca",
+      "unidad",
+      "puerta",
+      "local"
+    ],
+    "nombre": [
+      "nombre",
+      "titular",
+      "propietario",
+      "nombre propietario",
+      "nombre y apellidos",
+      "apellidos y nombre",
+      "razon social"
+    ],
+    "coeficiente": [
+      "coeficiente",
+      "coef",
+      "participacion",
+      "coeficiente de participacion",
+      "cuota de participacion",
+      "porcentaje",
+      "% participacion",
+      "enteros participacion"
+    ],
+    "email": [
+      "email",
+      "e mail",
+      "correo",
+      "correo electronico",
+      "mail"
+    ]
+  }
 }
