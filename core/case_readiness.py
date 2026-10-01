@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import document_review
+import fixed_costs
 from excel_export_service import ExportBlockedError, calculate_case_input_hash
 from excel_profiles import (
     ExcelProfile,
@@ -361,6 +362,20 @@ def evaluate_case_readiness(
     if profile_blocker is not None:
         blockers.append(profile_blocker)
     if profile is not None:
+        template = root / profile.template_relative_path
+        if "OTROS_GASTOS" in profile.active_modules and template.is_file() and case["id_periodo"] is not None:
+            try:
+                findings = fixed_costs.unconfirmed_template_costs(
+                    template, fixed_costs.load_fixed_costs(connection, case["id_comunidad"], case["id_periodo"]),
+                )
+            except fixed_costs.TemplateCostReviewError as error:
+                blockers.append(ReadinessBlocker("UNREADABLE_TEMPLATE", "excel", str(error), "prepare_excel"))
+            else:
+                if findings:
+                    blockers.append(ReadinessBlocker(
+                        "UNCONFIRMED_FIXED_COSTS", "excel",
+                        fixed_costs.inherited_cost_message(findings), "review_fixed_costs", len(findings),
+                    ))
         missing_parameters = _required_parameter_missing(connection, case, profile)
         if missing_parameters:
             blockers.append(ReadinessBlocker(

@@ -25,6 +25,9 @@ if str(CORE_DIR) not in sys.path:
 
 import excel_generator
 import gestor_bd
+import office_recalculation
+import fixed_costs
+import case_readiness
 from excel_export_service import (
     ExportBlockedError, _case_context, _expected_totals, _input_hash, _profile_for_community,
     _is_winter, _season_boundary, _validate_normalized_inputs,
@@ -204,7 +207,7 @@ def _make_template(path: Path) -> Path:
 class ExcelExportServiceTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.project_root = self.root / "proyecto"
         config_dir = self.project_root / "config" / "excel_profiles"
         template_dir = self.project_root / "plantillas" / "comunidades" / "658"
@@ -416,6 +419,15 @@ class ExcelExportServiceTest(unittest.TestCase):
     def test_real_libreoffice_export_preserves_design_and_formula_results(self):
         from excel_profiles import load_profile
 
+        workbook = load_workbook(self.template)
+        workbook["OTROS GASTOS"]["A6"] = "LECTURAS CONTADORES ACS"
+        workbook["OTROS GASTOS"]["B6"] = "121*2+125,24*6"
+        workbook["OTROS GASTOS"]["C6"] = 993.44
+        workbook.save(self.template)
+        workbook.close()
+        fixed_costs.save_fixed_costs(self.connection, self.community_id, self.period_id,
+                                   {"fixed_cost_meter_reading_acs": ""})
+
         result = generate_official_excel(
             self.connection,
             id_case=self.case_id,
@@ -431,8 +443,112 @@ class ExcelExportServiceTest(unittest.TestCase):
         try:
             self.assertEqual(100, workbook["GAS"]["M10"].value)
             self.assertEqual(100, workbook["GAS"]["M31"].value)
+            self.assertEqual(0, workbook["OTROS GASTOS"]["C6"].value)
         finally:
             workbook.close()
+
+    def test_restoring_formula_cache_closes_archives_before_replacing_workbook(self):
+        original = self.root / "original.xlsx"
+        calculated = self.root / "calculated.xlsx"
+        workbook = Workbook()
+        workbook.active["A1"] = "=1+1"
+        workbook.save(original)
+        workbook.close()
+        with ZipFile(original) as source, ZipFile(calculated, "w") as target:
+            for part in source.infolist():
+                contents = source.read(part.filename)
+                if part.filename == "xl/worksheets/sheet1.xml":
+                    contents = contents.replace(b"<v></v>", b"<v>2</v>")
+                target.writestr(part, contents)
+
+        archives = []
+        real_replace = office_recalculation.os.replace
+
+        def tracked_archive(*args, **kwargs):
+            archive = ZipFile(*args, **kwargs)
+            archives.append(archive)
+            return archive
+
+        def replace_when_closed(source, destination):
+            self.assertTrue(archives)
+            self.assertTrue(all(archive.fp is None for archive in archives))
+            return real_replace(source, destination)
+
+        with mock.patch("office_recalculation.ZipFile", side_effect=tracked_archive), \
+             mock.patch("office_recalculation.os.replace", side_effect=replace_when_closed):
+            office_recalculation.restore_design_with_calculated_values(original, calculated)
+
+        for data_only, expected in ((False, "=1+1"), (True, 2)):
+            restored = load_workbook(calculated, data_only=data_only)
+            try:
+                self.assertEqual(expected, restored.active["A1"].value)
+            finally:
+                restored.close()
+        self.assertFalse(original.with_name(original.name + ".cached").exists())
+
+    def test_inherited_fixed_cost_blocks_export_until_explicitly_cleared(self):
+        workbook = load_workbook(self.template)
+        workbook["OTROS GASTOS"]["A6"] = "LECTURAS CONTADORES ACS"
+        workbook["OTROS GASTOS"]["B6"] = 993.44
+        workbook["OTROS GASTOS"]["C6"] = 993.44
+        workbook.save(self.template)
+        workbook.close()
+        before = self.template.read_bytes()
+        with self.assertRaisesRegex(ExportBlockedError, "OTROS GASTOS!B6"):
+            generate_official_excel(
+                self.connection, id_case=self.case_id, project_root=self.project_root,
+                output_root=self.output_root, recalculator=DeterministicRecalculator(),
+            )
+        self.assertFalse(self.official_output.exists())
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM excel_export_runs").fetchone()[0])
+        fixed_costs.save_fixed_costs(self.connection, self.community_id, self.period_id,
+                                   {"fixed_cost_meter_reading_acs": ""})
+        result = generate_official_excel(
+            self.connection, id_case=self.case_id, project_root=self.project_root,
+            output_root=self.output_root, recalculator=DeterministicRecalculator(),
+        )
+        exported = load_workbook(result.output_path)
+        try:
+            self.assertEqual(0, exported["OTROS GASTOS"]["B6"].value)
+            self.assertEqual("=B6*12", exported["OTROS GASTOS"]["C6"].value)
+        finally:
+            exported.close()
+        self.assertEqual(before, self.template.read_bytes())
+
+    def test_readiness_points_to_fixed_costs_for_an_old_template(self):
+        workbook = load_workbook(self.template)
+        workbook["OTROS GASTOS"]["A6"] = "LECTURAS CONTADORES ACS"
+        workbook["OTROS GASTOS"]["B6"] = 993.44
+        workbook.save(self.template)
+        workbook.close()
+        report = case_readiness.evaluate_case_readiness(self.connection, self.case_id, self.project_root)
+        blockers = [b for b in report.blockers if b.code == "UNCONFIRMED_FIXED_COSTS"]
+        self.assertEqual(1, len(blockers))
+        self.assertEqual("review_fixed_costs", blockers[0].action)
+        fixed_costs.save_fixed_costs(self.connection, self.community_id, self.period_id,
+                                   {"fixed_cost_meter_reading_acs": "993,44"})
+        report = case_readiness.evaluate_case_readiness(self.connection, self.case_id, self.project_root)
+        self.assertNotIn("UNCONFIRMED_FIXED_COSTS", [b.code for b in report.blockers])
+
+    def test_annual_cell_of_an_unrecognized_row_still_has_fingerprint_protection(self):
+        from excel_profiles import load_profile
+        profile = load_profile("658_acs_v1", self.project_root)
+        before = workbook_fingerprint(self.template, profile)
+        workbook = load_workbook(self.template)
+        workbook["OTROS GASTOS"]["C6"] = 993.44
+        workbook.save(self.template)
+        workbook.close()
+        self.assertNotEqual(before, workbook_fingerprint(self.template, profile))
+
+    def test_unreadable_template_cannot_be_treated_as_free_of_inherited_costs(self):
+        self.template.write_bytes(b"libro danado")
+        report = case_readiness.evaluate_case_readiness(self.connection, self.case_id, self.project_root)
+        self.assertIn("UNREADABLE_TEMPLATE", [b.code for b in report.blockers])
+        with self.assertRaises(fixed_costs.TemplateCostReviewError):
+            generate_official_excel(
+                self.connection, id_case=self.case_id, project_root=self.project_root,
+                output_root=self.output_root, recalculator=DeterministicRecalculator(),
+            )
 
     def test_export_uses_latest_reliable_reading_for_an_outdated_carry_forward(self):
         owner_id = self.connection.execute(

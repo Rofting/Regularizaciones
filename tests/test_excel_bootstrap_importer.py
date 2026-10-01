@@ -253,7 +253,7 @@ def _make_readings(
 class ExcelBootstrapImporterTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.database_path = self.root / "gestion.db"
         with redirect_stdout(StringIO()):
             gestor_bd.crear_bd(str(self.database_path))

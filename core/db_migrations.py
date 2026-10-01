@@ -881,6 +881,17 @@ def migrate(connection: sqlite3.Connection) -> int:
     } if connection.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
     ).fetchone() else set()
+    tables = [row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    )]
+    has_data = bool(applied) or any(connection.execute(
+        'SELECT 1 FROM "' + table.replace('"', '""') + '" LIMIT 1'
+    ).fetchone() for table in tables)
+    if set(MIGRATIONS).difference(applied) and has_data:
+        # Antes de BEGIN: respaldar desde otra conexión evita bloquearse con
+        # nuestra propia transacción. Las bases en memoria no necesitan copia.
+        from database_backup import backup_connection
+        backup_connection(connection, reason="before_migration")
     rebuild_review_issues = 10 not in applied
     foreign_keys_enabled = bool(connection.execute("PRAGMA foreign_keys").fetchone()[0])
     if rebuild_review_issues and foreign_keys_enabled:
