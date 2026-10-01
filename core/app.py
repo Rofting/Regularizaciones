@@ -217,6 +217,7 @@ class AppGestionFincas(ctk.CTk):
         for text, command in (
             ("Cuotas cobradas", self._accion_cuotas_cobradas),
             ("Gastos fijos", self._accion_gastos_fijos),
+            ("Coherencia", self._accion_coherencia),
             ("Reevaluar fuentes", self._accion_reanalizar_fuentes),
             ("Historial", self._accion_ver_historial_periodo),
             ("Abrir salidas", self._abrir_salidas),
@@ -822,6 +823,11 @@ class AppGestionFincas(ctk.CTk):
         if period_id and MOD.get("expedient_ui"):
             MOD["expedient_ui"].open_fixed_costs_dialog(self, period_id)
 
+    def _accion_coherencia(self):
+        period_id = self._periodo_enlazado()
+        if period_id and MOD.get('expedient_ui'):
+            MOD['expedient_ui'].open_coherence_dialog(self)
+
     def _accion_resolver_incidencias(self):
         review = MOD.get("document_review")
         ingestion = MOD.get("case_ingestion")
@@ -1039,6 +1045,7 @@ class AppGestionFincas(ctk.CTk):
             "revalidar_perfil": ("Revalidar perfil Excel", self._accion_revalidar_perfil),
             "generar_excel": ("Generar Excel oficial", self._accion_generar_excel_expediente),
             "revisar_gastos_fijos": ("Revisar gastos fijos", self._accion_gastos_fijos),
+            "revisar_coherencia": ("Revisar coherencia", self._accion_coherencia),
             "calcular_reparto": ("Calcular reparto", self._accion_calcular_reparto_expediente),
             "generar_cartas": ("Generar cartas", self._accion_generar_cartas_expediente),
             "abrir_salidas": ("Abrir salidas", self._abrir_salidas),
@@ -1343,6 +1350,10 @@ class AppGestionFincas(ctk.CTk):
 
     def _progreso_expediente(self, stage, details):
         """Traduce hitos técnicos a actividad que puede seguir el despacho."""
+        if stage == 'coherence' or details.get('technical_stage') == 'coherence':
+            for note in details.get('notes', ()):
+                self.log(note, 'info')
+            return
         if stage == "backup_database":
             self.log(f"Copia de seguridad verificada: {Path(details['path']).name}", "ok")
             for warning in details.get("warnings", ()):

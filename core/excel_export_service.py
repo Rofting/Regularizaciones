@@ -20,6 +20,7 @@ from openpyxl import load_workbook
 import document_review
 import cuotas_servicio
 from fixed_costs import load_fixed_costs, write_fixed_costs, unconfirmed_template_costs, inherited_cost_message
+import case_coherence
 from excel_profiles import (
     ExcelProfile,
     calculate_profile_sha256,
@@ -1471,6 +1472,10 @@ def generate_official_excel(
     if profile.community_code != str(case["codigo"]):
         raise ExportBlockedError("El perfil no corresponde a la comunidad del expediente")
     _validate_normalized_inputs(connection, case, profile)
+    coherence = case_coherence.evaluate(connection, id_case, profile)
+    if coherence.pending:
+        raise ExportBlockedError('Revisa la coherencia antes del Excel: ' + '; '.join(f.message for f in coherence.pending))
+    _emit(progress, 'coherence', notes=coherence.notes)
     if "OTROS_GASTOS" in profile.active_modules and (project_root / profile.template_relative_path).is_file():
         findings = unconfirmed_template_costs(
             project_root / profile.template_relative_path,

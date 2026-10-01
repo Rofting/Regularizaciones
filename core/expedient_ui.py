@@ -24,6 +24,7 @@ import community_onboarding
 import document_review
 import expedient_service
 import fixed_costs
+import case_coherence
 import gestor_bd
 import office_settings
 import owner_lists
@@ -292,6 +293,7 @@ def guided_workspace_state(
             "review_owners": ("validar", "importar_propietarios", "Revisar coeficientes"),
             "review_readings": ("validar", "anadir_fuentes", "Completar lecturas"),
             "review_fixed_costs": ("reparto", "revisar_gastos_fijos", "Revisar gastos fijos"),
+            "review_coherence": ("reparto", "revisar_coherencia", "Revisar coherencia"),
             "generate_excel": ("reparto", "generar_excel", "Generar Excel oficial"),
             "calculate_distribution": ("reparto", "calcular_reparto", "Calcular reparto"),
         }
@@ -3186,6 +3188,116 @@ def open_service_fees_dialog(
 
     selector.set(_FEE_SERVICES[state["service"]])
     update_preview()
+    refresh()
+
+
+def open_coherence_dialog(app: "AppGestionFincas") -> None:
+    """Datos comparables, correcciones y justificaciones antes del Excel."""
+    import case_workflow_actions
+    from contextlib import closing
+    case_id, community_id = app.id_expediente, app.id_comunidad
+    root = Path(__file__).resolve().parents[1]
+    try:
+        with closing(gestor_bd.conectar(str(app.ruta_bd_expedientes))) as con:
+            profile = case_workflow_actions.resolve_case_profile(
+                con, id_case=case_id, active_community_id=community_id, project_root=root)
+            case_coherence.evaluate(con, case_id, profile)
+    except (ValueError, LookupError) as error:
+        messagebox.showwarning('Coherencia', str(error), parent=app)
+        return
+    dialog = _dialog(app, 'Coherencia antes del Excel', 820, 720)
+    content = ctk.CTkScrollableFrame(dialog, fg_color=C['panel'])
+    content.pack(fill='both', expand=True, padx=16, pady=16)
+
+    def refresh():
+        for child in content.winfo_children():
+            child.destroy()
+        with closing(gestor_bd.conectar(str(app.ruta_bd_expedientes))) as con:
+            settings = case_coherence.load_settings(con, case_id)
+            report = case_coherence.evaluate(con, case_id, profile)
+            owners = con.execute("SELECT id_propietario,codigo_vivienda,coeficiente FROM propietarios WHERE id_comunidad=? AND activo=1 AND tipo_unidad='vivienda' ORDER BY codigo_vivienda", (community_id,)).fetchall()
+        def label(text):
+            ctk.CTkLabel(content, text=text, wraplength=740, justify='left',
+                        text_color=C['texto'], font=UIM.fuente(12)).pack(anchor='w', padx=12, pady=6)
+        label('Coherencia del expediente · Los avisos impiden generar el Excel hasta corregirlos o justificar una diferencia legítima.')
+        ctk.CTkButton(content, text='Actualizar revisión', command=refresh).pack(anchor='w', padx=12, pady=6)
+        for note in report.notes:
+            label(note)
+        label('Coeficientes: los pesos relativos se normalizan. Los porcentajes deben sumar 100 %; no se convierten automáticamente entre ambas formas.')
+        mode = ctk.CTkComboBox(content, values=['Pesos relativos', 'Porcentajes'])
+        mode.set('Porcentajes' if settings['coefficient_mode'] == 'percent' else 'Pesos relativos')
+        mode.pack(anchor='w', padx=12, pady=4)
+        entries = {}
+        for owner in owners:
+            row = ctk.CTkFrame(content, fg_color='transparent')
+            row.pack(fill='x', padx=12, pady=2)
+            ctk.CTkLabel(row, text=owner['codigo_vivienda'], width=180).pack(side='left')
+            entry = ctk.CTkEntry(row)
+            entry.insert(0, str(owner['coeficiente']))
+            entry.pack(side='left')
+            entries[owner['id_propietario']] = entry
+        label('Tolerancia de diferencia de consumo (%)')
+        tolerance = ctk.CTkEntry(content)
+        tolerance.insert(0, settings['consumption_tolerance_percent'])
+        tolerance.pack(anchor='w', padx=12)
+
+        def save(comparisons):
+            try:
+                with closing(gestor_bd.conectar(str(app.ruta_bd_expedientes))) as con:
+                    case_coherence.save_settings(con, case_id, dict(
+                        coefficient_mode='percent' if mode.get() == 'Porcentajes' else 'weights',
+                        consumption_tolerance_percent=tolerance.get(), comparisons=comparisons),
+                        {owner: entry.get() for owner, entry in entries.items()})
+            except (ValueError, RuntimeError) as error:
+                messagebox.showwarning('Coherencia', str(error), parent=dialog)
+                return
+            refresh()
+            app._refrescar_expediente()
+
+        ctk.CTkButton(content, text='Guardar configuración y coeficientes',
+                      command=lambda: save(settings['comparisons'])).pack(anchor='w', padx=12, pady=10)
+        label('Comparaciones declaradas: sólo declara suministros que miden el mismo consumo. En calefacción confirma que las lecturas son kWh y no unidades de repartidor.')
+        for index, rule in enumerate(settings['comparisons']):
+            label(f"{rule['invoice_type']} [{rule['cups'] or 'un único CUPS'}], {rule['invoice_unit']} → {rule['reading_type']}, {rule['reading_unit']}")
+            ctk.CTkButton(content, text='Quitar comparación', command=lambda i=index:
+                          save([r for j, r in enumerate(settings['comparisons']) if j != i])).pack(anchor='w', padx=12)
+        label('Añadir una equivalencia (no se guarda hasta pulsar el botón):')
+        fields = {}
+        for key, title, values in (
+            ('invoice_type', 'Suministro de las facturas', ['AGUA', 'GAS', 'ELECTRICIDAD', 'ACS', 'CALEFACCION']),
+            ('reading_type', 'Contadores de viviendas', ['ACS', 'CALEFACCION']),
+            ('invoice_unit', 'Unidad de las facturas', ['m³', 'kWh', 'unidades']),
+            ('reading_unit', 'Unidad de las lecturas', ['m³', 'kWh', 'unidades']),
+        ):
+            label(title)
+            fields[key] = ctk.CTkComboBox(content, values=values)
+            fields[key].set(values[0])
+            fields[key].pack(anchor='w', padx=12)
+        label('CUPS o referencia (necesario para seleccionar uno entre varios suministros)')
+        cups = ctk.CTkEntry(content)
+        cups.pack(anchor='w', padx=12)
+        ctk.CTkButton(content, text='Añadir comparación', command=lambda:
+                      save(settings['comparisons'] + [dict(
+                          **{key: entry.get() for key, entry in fields.items()}, cups=cups.get())])).pack(anchor='w', padx=12, pady=10)
+        for finding in report.findings:
+            label(('Justificado · ' if finding.accepted else 'Pendiente · ') + finding.message)
+            if finding.accepted or not finding.can_accept:
+                continue
+            reason = ctk.CTkEntry(content, width=680, placeholder_text='Motivo de la diferencia legítima; se conservará en el registro')
+            reason.pack(anchor='w', padx=12)
+            def accept(key=finding.key, entry=reason):
+                try:
+                    with closing(gestor_bd.conectar(str(app.ruta_bd_expedientes))) as con:
+                        case_coherence.accept_finding(con, case_id, profile, key, entry.get(),
+                                                      expected_signature=report.signature)
+                except (ValueError, RuntimeError) as error:
+                    messagebox.showwarning('Coherencia', str(error), parent=dialog)
+                    return
+                refresh()
+                app._refrescar_expediente()
+            ctk.CTkButton(content, text='Aceptar con motivo', command=accept).pack(anchor='w', padx=12, pady=6)
+        if not report.pending:
+            label('Sin avisos de coherencia pendientes. Los demás requisitos del expediente siguen comprobándose antes del Excel.')
     refresh()
 
 

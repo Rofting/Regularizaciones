@@ -373,7 +373,7 @@ class ExcelExportServiceTest(unittest.TestCase):
             ).fetchone()[0],
         )
         self.assertEqual(
-            ["validate_case", "prepare_template", "write_gas",
+            ["validate_case", "coherence", "prepare_template", "write_gas",
              "write_electricidad", "write_agua", "write_otros_gastos",
              "write_acs", "recalculate", "reconcile", "parameters", "publish"],
             stages,
