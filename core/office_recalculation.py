@@ -103,9 +103,14 @@ def restore_design_with_calculated_values(original: Path, calculated: Path) -> N
             with ZipFile(temporary, "w") as output:
                 for part in source.infolist():
                     output.writestr(part, replacement.get(part.filename, source.read(part.filename)))
-            os.replace(temporary, calculated)
-        finally:
+        except BaseException:
             temporary.unlink(missing_ok=True)
+            raise
+    # Windows no permite reemplazar el libro mientras ZipFile lo tiene abierto.
+    try:
+        os.replace(temporary, calculated)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class RecalculationError(RuntimeError):
