@@ -49,7 +49,14 @@ jobs:
       - name: Dependencias de Python
         shell: bash
         run: |
-          if ! { python -m pip install --upgrade pip && python -m pip install -r requirements.txt; } > dependency-results.txt 2>&1; then
+          # antlr4 (dependencia de OmegaConf/RapidOCR) se distribuye como fuente.
+          # Preparar sus herramientas evita el instalador aislado que falla
+          # por permisos en el runner Windows.
+          if ! {
+            python -m pip install --upgrade pip setuptools wheel &&
+            python -m pip install --no-build-isolation 'antlr4-python3-runtime==4.9.3' &&
+            python -m pip install -r requirements.txt
+          } > dependency-results.txt 2>&1; then
             cat dependency-results.txt
             python - <<'PY'
           from pathlib import Path
@@ -80,7 +87,7 @@ jobs:
 
       - name: Conservar resultado de pruebas
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: pruebas-${{ matrix.os }}
           path: |
