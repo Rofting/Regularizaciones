@@ -41,6 +41,17 @@ USO HABITUAL EN LA APP
 7. Revisa una muestra, adjunta cada carta al correo que corresponda y envíala
    manualmente.
 
+TODAS LAS COMUNIDADES DE UN VISTAZO
+───────────────────────────────────
+El botón "Todas las comunidades" (arriba) abre un panel con los expedientes de
+todas las comunidades activas: su grupo (bloqueado, pendiente, listo para
+calcular, calculado, cartas listas, cerrado), las incidencias abiertas y la
+última salida (Excel o cartas). Filtra por grupo con los botones de arriba o
+busca por código o nombre; por defecto muestra sólo el expediente más reciente
+de cada comunidad. "Abrir" activa esa comunidad y ese expediente exactos, con
+su período. El panel puede quedarse abierto: se actualiza al terminar cada
+acción.
+
 ALTA DE UNA COMUNIDAD
 ─────────────────────
 Lo más rápido: en el primer paso del alta guiada pulsa "Rellenar desde
