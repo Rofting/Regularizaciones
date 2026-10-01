@@ -17,6 +17,7 @@ import customtkinter as ctk
 
 import case_ingestion
 import case_readiness
+import cases_overview
 import community_batch
 import cuotas_servicio
 import community_discovery
@@ -793,6 +794,168 @@ def _show_batch_entries(app: "AppGestionFincas", folder: Path, entries, project_
                   corner_radius=9, font=UIM.fuente(11), fg_color="transparent",
                   border_width=1, border_color=C["borde"], text_color=C["primario"],
                   hover_color=C["acento_suave"]).pack(side="right", padx=(0, 8))
+
+
+_BUCKET_COLOURS = {
+    cases_overview.BLOCKED: "alerta",
+    cases_overview.PENDING: "texto_sec",
+    cases_overview.READY: "primario",
+    cases_overview.CALCULATED: "primario",
+    cases_overview.LETTERS: "exito",
+    cases_overview.CLOSED: "texto_sec",
+}
+
+
+def open_cases_overview_dialog(app: "AppGestionFincas") -> None:
+    """Panel no modal con los expedientes de todas las comunidades.
+
+    Se puede dejar abierto mientras se trabaja: se actualiza tras cada acción
+    del expediente y «Abrir» activa la comunidad y el expediente exactos.
+    """
+    existing = getattr(app, "_panel_comunidades", None)
+    if existing is not None:
+        try:
+            if existing.winfo_exists():
+                existing.deiconify()
+                existing.lift()
+                existing.focus_force()
+                return
+        except tk.TclError:
+            pass
+    window = ctk.CTkToplevel(app, fg_color=C["fondo"])
+    window.title("Todas las comunidades")
+    window.geometry("1040x700")
+    window.minsize(860, 520)
+    window.transient(app)
+    app._panel_comunidades = window
+    state = {"bucket": None, "cases": (), "rows": []}
+    search = tk.StringVar(master=window)
+    latest_only = tk.BooleanVar(master=window, value=True)
+
+    panel = ctk.CTkFrame(window, fg_color=C["panel"], corner_radius=16,
+                         border_width=1, border_color=C["borde"])
+    panel.pack(fill="both", expand=True, padx=14, pady=14)
+    top = ctk.CTkFrame(panel, fg_color="transparent")
+    top.pack(fill="x", padx=18, pady=(16, 6))
+    ctk.CTkLabel(top, text="Todas las comunidades", font=UIM.fuente(20, "bold"),
+                 text_color=C["texto"]).pack(side="left")
+    ctk.CTkButton(top, text="Actualizar", command=lambda: reload(), width=100, height=32,
+                  corner_radius=8, **UIM.secondary_button_kwargs()).pack(side="right")
+
+    chips = ctk.CTkFrame(panel, fg_color="transparent")
+    chips.pack(fill="x", padx=18, pady=(0, 6))
+    chip_buttons: dict[str | None, Any] = {}
+
+    filters = ctk.CTkFrame(panel, fg_color="transparent")
+    filters.pack(fill="x", padx=18, pady=(0, 8))
+    ctk.CTkLabel(filters, text="Buscar", font=UIM.fuente(11, "bold"),
+                 text_color=C["texto_sec"]).pack(side="left", padx=(0, 8))
+    entry = ctk.CTkEntry(filters, textvariable=search, width=300, height=34, corner_radius=8,
+                         border_color=C["borde"], fg_color=C["panel_2"], text_color=C["texto"])
+    entry.pack(side="left")
+    ctk.CTkCheckBox(filters, text="Sólo el expediente más reciente de cada comunidad",
+                    variable=latest_only, command=lambda: render(), font=UIM.fuente(11),
+                    fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left", padx=14)
+    summary = ctk.CTkLabel(filters, text="", font=UIM.fuente(11), text_color=C["texto_sec"])
+    summary.pack(side="right")
+
+    header = ctk.CTkFrame(panel, fg_color="transparent")
+    header.pack(fill="x", padx=26)
+    columns = (("Comunidad", 270), ("Expediente", 180), ("Estado", 170), ("Incidencias", 90),
+               ("Última salida", 150))
+    for title, width in columns:
+        ctk.CTkLabel(header, text=title.upper(), width=width, anchor="w", font=UIM.fuente(9, "bold"),
+                     text_color=C["texto_sec"]).pack(side="left")
+    body = ctk.CTkScrollableFrame(panel, fg_color=C["panel_2"], corner_radius=11)
+    body.pack(fill="both", expand=True, padx=18, pady=(4, 16))
+
+    def set_bucket(bucket):
+        state["bucket"] = None if state["bucket"] == bucket else bucket
+        render()
+
+    def open_case(case):
+        if app.abrir_expediente(case.community_id, case.id_case):
+            app.log(f"Abierto {case.community_label} · {case.case_name}", "info")
+            app.lift()
+            render()
+
+    def render(*_args):
+        cases = state["cases"]
+        scoped = cases_overview.filter_cases(cases, latest_only=latest_only.get())
+        counts = cases_overview.bucket_counts(scoped)
+        for widget in chips.winfo_children():
+            widget.destroy()
+        chip_buttons.clear()
+        for key, label in ((None, "Todos"), *cases_overview.BUCKETS):
+            active = state["bucket"] == key
+            count = len(scoped) if key is None else counts[key]
+            button = ctk.CTkButton(
+                chips, text=f"{label} · {count}", height=30, width=0, corner_radius=15,
+                command=lambda value=key: set_bucket(value), font=UIM.fuente(11, "bold" if active else "normal"),
+                **({"fg_color": C["primario"], "hover_color": C["primario_hover"]} if active
+                   else UIM.secondary_button_kwargs()),
+            )
+            button.pack(side="left", padx=(0, 6))
+            chip_buttons[key] = button
+        visible = cases_overview.filter_cases(
+            cases, bucket=state["bucket"], text=search.get(), latest_only=latest_only.get())
+        summary.configure(text=f"{len(visible)} expediente(s)")
+        for widget in body.winfo_children():
+            widget.destroy()
+        active_case = getattr(app, "id_expediente", None)
+        for case in visible[:300]:
+            current = case.id_case == active_case
+            row = ctk.CTkFrame(body, fg_color=C["acento_suave"] if current else C["panel"], corner_radius=8,
+                               border_width=1, border_color=C["primario"] if current else C["borde"])
+            row.pack(fill="x", padx=6, pady=3)
+            values = (
+                (case.community_label, 270, "texto", "bold"),
+                (f"{case.case_name}\n{case.period_label}", 180, "texto", "normal"),
+                (f"{cases_overview.BUCKET_ROW_LABELS[case.bucket]}\n{case.status_label}", 170,
+                 _BUCKET_COLOURS[case.bucket], "bold"),
+                (str(case.open_issues) if case.open_issues else "—", 90,
+                 "alerta" if case.open_issues else "texto_sec", "bold"),
+                (case.last_output_label, 150, "texto_sec", "normal"),
+            )
+            ctk.CTkButton(row, text="Activo" if current else "Abrir", width=80, height=30, corner_radius=8,
+                          state="disabled" if current else "normal",
+                          command=lambda selected=case: open_case(selected),
+                          fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right", padx=10)
+            for text, width, colour, weight in values:
+                ctk.CTkLabel(row, text=text, width=width, anchor="w", justify="left",
+                             font=UIM.fuente(11, weight), text_color=C.get(colour, C["texto"]),
+                             wraplength=width - 12).pack(side="left", padx=(8, 0), pady=6)
+        if not visible:
+            ctk.CTkLabel(body, text="No hay expedientes con estos filtros.", font=UIM.fuente(11),
+                         text_color=C["texto_sec"]).pack(pady=20)
+
+    def reload():
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            state["cases"] = cases_overview.list_cases(connection)
+        finally:
+            connection.close()
+        render()
+
+    observers = getattr(app, "_observadores_expedientes", None)
+    if not isinstance(observers, set):
+        observers = set()
+        app._observadores_expedientes = observers
+
+    def on_change():
+        if window.winfo_exists():
+            reload()
+
+    observers.add(on_change)
+
+    def close():
+        observers.discard(on_change)
+        app._panel_comunidades = None
+        window.destroy()
+
+    window.protocol("WM_DELETE_WINDOW", close)
+    search.trace_add("write", render)
+    reload()
 
 
 def issue_guidance(field_name: str) -> dict[str, str]:

@@ -166,6 +166,7 @@ class AppGestionFincas(ctk.CTk):
             ("Ajustes", self._configurar_rutas),
             ("Nueva comunidad", self._nueva_comunidad),
             ("Bandeja global", self._accion_bandeja_global),
+            ("Todas las comunidades", self._accion_panel_comunidades),
         ):
             ctk.CTkButton(header, text=text, command=command, height=31, corner_radius=8, font=UIM.fuente(11), **UIM.secondary_button_kwargs()).pack(side="right", padx=(0, 8))
         self.linea = UIM.LineaGradiente(self, altura=2)
@@ -653,6 +654,44 @@ class AppGestionFincas(ctk.CTk):
             self.log("No está disponible la bandeja global de fuentes.", "error")
             return
         ui.open_detect_communities_dialog(self)
+
+    def _accion_panel_comunidades(self):
+        """Expedientes de todas las comunidades con su estado y última salida."""
+        ui = MOD.get("expedient_ui")
+        if ui is None:
+            self.log("No está disponible el panel de comunidades.", "error")
+            return
+        ui.open_cases_overview_dialog(self)
+
+    def abrir_expediente(self, community_id: int, case_id: int) -> bool:
+        """Activa exactamente esa comunidad y ese expediente (y su período).
+
+        Seleccionar la comunidad por el desplegable abriría su primer
+        expediente; aquí se pide el elegido para no cambiar de período.
+        """
+        if self._procesando:
+            messagebox.showwarning("Espera", "Termina la operación actual antes de cambiar de expediente.")
+            return False
+        option = next((label for label, identifier in getattr(self, "_ids_comunidad", {}).items()
+                       if identifier == community_id), None)
+        if option is None:
+            self._cargar_comunidades()
+            option = next((label for label, identifier in getattr(self, "_ids_comunidad", {}).items()
+                           if identifier == community_id), None)
+        if option is None:
+            self.log("La comunidad de ese expediente no está activa.", "aviso")
+            return False
+        self._limpiar_contexto_expediente()
+        self.comunidad_actual.set(option)
+        self.cb_comunidad.set(option)
+        self.id_comunidad = community_id
+        self._refrescar_lista_expedientes(select_case_id=case_id)
+        found = self.id_expediente == case_id
+        if not found:
+            self.log("No se encontró el expediente elegido en esa comunidad.", "aviso")
+        # La pantalla refleja siempre lo que quedó activo, aunque no sea el pedido.
+        self._refrescar_expediente()
+        return found
 
     def _accion_confirmar_fuentes(self):
         if self._procesando or not self._validar_expediente_activo():
@@ -1396,7 +1435,16 @@ class AppGestionFincas(ctk.CTk):
         def refresh():
             self._refrescar_lista_expedientes(select_case_id=case_id)
             self._refrescar_expediente()
+            self._avisar_cambio_expedientes()
         self.after(0, refresh)
+
+    def _avisar_cambio_expedientes(self):
+        """Paneles abiertos (p. ej. «Todas las comunidades») se actualizan solos."""
+        for callback in tuple(getattr(self, "_observadores_expedientes", ())):
+            try:
+                callback()
+            except Exception:
+                self._observadores_expedientes.discard(callback)
 
     def _importar_modelo_inicial_impl(self, master, owners=None, readings=None):
         workflow = MOD["case_workflow_actions"]
