@@ -261,3 +261,17 @@ class PreviousYearComparisonTest(unittest.TestCase):
         before = self.connection.total_changes
         self.assertTrue(any('no hay un período previo' in n for n in self.report().notes))
         self.assertEqual(before, self.connection.total_changes)
+
+
+class GroupedNotesTest(unittest.TestCase):
+    def test_large_communities_get_one_summary_line(self):
+        import case_year_comparison
+        many = [f'V{i}' for i in range(30)]
+        notes = case_year_comparison._grouped_notes(
+            many, [(code, 'ACS', f'{code} sin variación') for code in many])
+        self.assertEqual(2, len(notes))
+        self.assertIn('30 viviendas', notes[0])
+        self.assertIn('ACS: 30 viviendas sin variación', notes[1])
+        few = case_year_comparison._grouped_notes(['V1'], [('V1', 'ACS', 'detalle V1')])
+        self.assertEqual(['Vivienda V1: histórico sin titular registrado; no se puede comprobar '
+                          'un cambio de titular.', 'detalle V1'], few)

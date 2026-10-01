@@ -61,6 +61,15 @@ class CaseCoherenceTest(unittest.TestCase):
         self.connection.execute("UPDATE facturas SET fecha_inicio='2025-09-30' WHERE num_factura='G-2'")
         self.assertEqual((), self.report().pending)
 
+    def test_single_day_service_can_be_accepted_but_inverted_dates_cannot(self):
+        self.duplicate(cups='OTRO PUNTO')
+        self.connection.execute("UPDATE facturas SET fecha_inicio='2025-10-15' WHERE num_factura='G-2'")
+        single = next(f for f in self.report().pending if f.key.startswith('invoice_single_day:'))
+        self.assertTrue(single.can_accept)
+        self.connection.execute("UPDATE facturas SET fecha_inicio='2025-10-20' WHERE num_factura='G-2'")
+        inverted = next(f for f in self.report().pending if f.key.startswith('invoice_dates:'))
+        self.assertFalse(inverted.can_accept)
+
     def test_credit_overlap_can_be_accepted_with_an_audited_reason(self):
         self.duplicate(amount=-100)
         finding = self.report().pending[0]

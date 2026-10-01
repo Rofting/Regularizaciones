@@ -138,6 +138,7 @@ def evaluate(con, case, profile, settings, invoices, owners, reference):
             notes.append(detail + ' Sin variación que alcance el umbral.')
 
     old_case = dict(previous)
+    unnamed, unchanged = [], []
     for kind, prefix in (('ACS', 'acs_'), ('CALEFACCION', 'heating_')):
         concept = next((c for c in profile.concepts if c.allocation_method == 'consumption' and c.key.startswith(prefix)), None)
         if concept is None:
@@ -166,7 +167,7 @@ def evaluate(con, case, profile, settings, invoices, owners, reference):
             if recorded_names and owner['nombre_propietario'] not in recorded_names:
                 notes.append(f'Vivienda {code}: cambio de titular registrado; anterior {", ".join(sorted(recorded_names))}; actual {owner["nombre_propietario"]}. Se compara la vivienda, no la persona.')
             elif not recorded_names:
-                notes.append(f'Vivienda {code}: histórico sin titular registrado; no se puede comprobar un cambio de titular.')
+                unnamed.append(code)
             old_units = {normalise_unit(r['consumption_unit']) for r in old_snapshots
                          if r['concept_key'].startswith(prefix) and r['consumption_unit']}
             if old_units and old_units != {unit}:
@@ -188,5 +189,31 @@ def evaluate(con, case, profile, settings, invoices, owners, reference):
                 findings.append((f'historical_consumption:{owner["id_propietario"]}:{kind}:{previous["id_periodo"]}',
                                  detail + ' ' + change + '. Revisa lecturas, ocupación y cambios de contador.'))
             else:
-                notes.append(detail + ' Sin variación que alcance el umbral.')
+                unchanged.append((code, kind, detail + ' Sin variación que alcance el umbral.'))
+    notes.extend(_grouped_notes(unnamed, unchanged))
     return findings, notes
+
+
+# Por encima de este número de viviendas las notas sin novedad se resumen en
+# una línea: con cien viviendas tapaban los avisos que sí requieren revisión.
+_DETAIL_LIMIT = 10
+
+
+def _grouped_notes(unnamed, unchanged):
+    notes = []
+    names = sorted(set(unnamed))
+    if len(names) <= _DETAIL_LIMIT:
+        notes.extend(f'Vivienda {code}: histórico sin titular registrado; no se puede comprobar un cambio de titular.'
+                     for code in names)
+    else:
+        notes.append(f'{len(names)} viviendas con histórico sin titular registrado (repartos anteriores a '
+                     f'guardar la identidad); no se puede comprobar un cambio de titular: {", ".join(names[:12])}…')
+    by_kind = {}
+    for code, kind, text in unchanged:
+        by_kind.setdefault(kind, []).append((code, text))
+    for kind, items in by_kind.items():
+        if len(items) <= _DETAIL_LIMIT:
+            notes.extend(text for _, text in items)
+        else:
+            notes.append(f'{kind}: {len(items)} viviendas sin variación que alcance el umbral respecto al ejercicio anterior.')
+    return notes

@@ -1,4 +1,5 @@
 import sqlite3
+import functools
 import json
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -1013,6 +1014,51 @@ def _confirmed_number(values: Mapping[str, str], field: str) -> float | None:
     return float(number)
 
 
+@functools.lru_cache(maxsize=4)
+def _provider_names(catalog_path: str) -> dict[str, str]:
+    from provider_registry import load_provider_registry
+    try:
+        return {key: profile.display_name for key, profile in load_provider_registry(catalog_path).items()}
+    except (OSError, ValueError):
+        return {}
+
+
+def _with_invoice_aliases(
+    connection: sqlite3.Connection, document: SourceDocument, values: Mapping[str, str],
+) -> dict[str, str]:
+    """Traduce los nombres de los extractores a las columnas de ``facturas``.
+
+    Los extractores entregan ``cups``, ``consumo_kwh`` y ``consumo_m3``; la
+    factura canónica guarda ``cups_o_referencia``, ``consumo_total`` y
+    ``unidad_consumo``. Sin esta traducción el punto de suministro y el
+    consumo nunca llegaban a la factura, y la coherencia y la comparación con
+    el ejercicio anterior no podían identificar ni comparar suministros. Un
+    valor confirmado con el nombre canónico siempre prevalece.
+    """
+    result = dict(values)
+    if not result.get("cups_o_referencia") and result.get("cups"):
+        result["cups_o_referencia"] = "".join(str(result["cups"]).upper().split())
+    if not result.get("consumo_total"):
+        water = str(result.get("tipo_suministro") or "").upper() == "AGUA"
+        order = (("consumo_m3", "m3"), ("consumo_kwh", "kWh")) if water else (
+            ("consumo_kwh", "kWh"), ("consumo_m3", "m3"))
+        for field, unit in order:
+            if result.get(field):
+                result["consumo_total"] = result[field]
+                result.setdefault("unidad_consumo", unit)
+                break
+    if not result.get("proveedor"):
+        row = connection.execute(
+            "SELECT provider_key FROM source_documents WHERE id_document=?",
+            (document.id_document,),
+        ).fetchone()
+        key = row["provider_key"] if row is not None else None
+        if key:
+            catalog = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+            result["proveedor"] = _provider_names(str(catalog)).get(key, key)
+    return result
+
+
 def _apply_confirmed_invoice(
     connection: sqlite3.Connection,
     case: RegularizationCase,
@@ -1024,6 +1070,7 @@ def _apply_confirmed_invoice(
     _required_confirmed(
         values, "tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total",
     )
+    values = _with_invoice_aliases(connection, document, values)
     numeric_fields = (
         "consumo_total", "termino_fijo", "termino_variable", "impuestos", "iva",
     )
