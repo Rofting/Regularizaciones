@@ -24,8 +24,8 @@ jobs:
     env:
       PYTHONUTF8: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -47,7 +47,19 @@ jobs:
           "$env:ProgramFiles\LibreOffice\program" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Dependencias de Python
-        run: python -m pip install -r requirements.txt
+        shell: bash
+        run: |
+          if ! { python -m pip install --upgrade pip && python -m pip install -r requirements.txt; } > dependency-results.txt 2>&1; then
+            cat dependency-results.txt
+            python - <<'PY'
+          from pathlib import Path
+          lines = Path("dependency-results.txt").read_text(encoding="utf-8", errors="replace").splitlines()
+          message = "\n".join(lines[-40:]).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print("::error title=Instalación de dependencias::" + message)
+          PY
+            exit 1
+          fi
+          cat dependency-results.txt
 
       - name: Comprobar LibreOffice real
         shell: bash
@@ -68,9 +80,11 @@ jobs:
 
       - name: Conservar resultado de pruebas
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: pruebas-${{ matrix.os }}
-          path: test-results.txt
+          path: |
+            dependency-results.txt
+            test-results.txt
           if-no-files-found: ignore
           retention-days: 14
