@@ -1668,7 +1668,7 @@ class AppGestionFincas(ctk.CTk):
 
     def _nueva_comunidad(self):
         """Ofrece el registro rápido existente o el alta guiada desde fuentes."""
-        dialogo = self._preparar_dialogo("Añadir comunidad", 560, 360)
+        dialogo = self._preparar_dialogo("Añadir comunidad", 560, 450)
         panel = ctk.CTkFrame(
             dialogo,
             fg_color=C["panel"],
@@ -1732,6 +1732,11 @@ class AppGestionFincas(ctk.CTk):
             "Analiza una carpeta mixta y propone crear automáticamente las comunidades nuevas.",
             lambda: expedient_ui.open_detect_communities_dialog(self),
             primary=True,
+        )
+        option(
+            "Alta masiva por subcarpetas",
+            "Una subcarpeta por comunidad: crea las listas con propietarios, lecturas y expediente.",
+            lambda: expedient_ui.open_batch_onboarding_dialog(self),
         )
         option(
             "Alta guiada desde fuentes",

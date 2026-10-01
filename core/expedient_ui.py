@@ -17,6 +17,7 @@ import customtkinter as ctk
 
 import case_ingestion
 import case_readiness
+import community_batch
 import cuotas_servicio
 import community_discovery
 import community_folder
@@ -633,6 +634,161 @@ def _show_detected_communities(
                   height=38, corner_radius=9, font=UIM.fuente(11, "bold"),
                   fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right")
     ctk.CTkButton(footer, text="Cancelar", command=dialog.destroy, height=38,
+                  corner_radius=9, font=UIM.fuente(11), fg_color="transparent",
+                  border_width=1, border_color=C["borde"], text_color=C["primario"],
+                  hover_color=C["acento_suave"]).pack(side="right", padx=(0, 8))
+
+
+_BATCH_STATUS = {
+    community_batch.READY: ("Lista para crear", "primario"),
+    community_batch.REVIEW: ("Necesita revisión", "alerta"),
+    community_batch.EXISTING: ("Ya registrada", "texto_sec"),
+    community_batch.FAILED: ("No se pudo analizar", "alerta"),
+}
+
+
+def open_batch_onboarding_dialog(app: "AppGestionFincas") -> None:
+    """Alta masiva: una comunidad por subcarpeta, con aprobación previa."""
+    if getattr(app, "_procesando", False):
+        messagebox.showwarning("Espera", "Termina la operación actual antes de analizar un lote.", parent=app)
+        return
+    folder = filedialog.askdirectory(
+        parent=app, title="Carpeta con una subcarpeta por comunidad (p. ej. «658 - CP Las Flores»)",
+    )
+    if not folder:
+        return
+    project_root = Path(__file__).resolve().parent.parent
+    work_directory = Path(app.ruta_bd_expedientes).parent / "importaciones"
+    app._estado("Analizando el lote de comunidades…", procesando=True)
+
+    def work():
+        connection = None
+        try:
+            connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+            entries = community_batch.scan_batch(
+                Path(folder), connection=connection, project_root=project_root,
+                work_directory=work_directory,
+                progress=lambda name: app.after(0, lambda: app._estado(f"Analizando {name}…", procesando=True)),
+            )
+        except Exception as error:
+            message = str(error)
+
+            def failed():
+                app._estado("No se pudo analizar el lote", procesando=False)
+                messagebox.showerror("No se pudo analizar el lote", message, parent=app)
+            app.after(0, failed)
+            return
+        finally:
+            if connection is not None:
+                connection.close()
+        app.after(0, lambda: _show_batch_entries(app, Path(folder), entries, project_root))
+
+    app._en_hilo(work)
+
+
+def _show_batch_entries(app: "AppGestionFincas", folder: Path, entries, project_root: Path) -> None:
+    app._estado("Lote analizado", procesando=False)
+    dialog = _dialog(app, "Alta masiva de comunidades", 860, 660)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16,
+                         border_width=1, border_color=C["borde"])
+    panel.pack(fill="both", expand=True, padx=18, pady=18)
+    ctk.CTkLabel(panel, text="Alta masiva de comunidades", font=UIM.fuente(21, "bold"),
+                 text_color=C["texto"]).pack(anchor="w", padx=22, pady=(20, 2))
+    ready = sum(entry.can_create for entry in entries)
+    ctk.CTkLabel(
+        panel,
+        text=(f"{len(entries)} subcarpeta(s) en {folder.name}; {ready} lista(s) para crear. "
+              "Revisa cada comunidad y la lectura de ejemplo antes de aprobarla. Se crearán "
+              "comunidad, perfil, expediente, propietarios y lecturas; los originales no se tocan. "
+              "Las que necesitan revisión se completan con «Alta guiada desde fuentes» → «Rellenar desde carpeta»."),
+        font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=780, justify="left",
+    ).pack(anchor="w", padx=22, pady=(0, 12))
+
+    body = ctk.CTkScrollableFrame(panel, fg_color=C["panel_2"], corner_radius=11)
+    body.pack(fill="both", expand=True, padx=22, pady=(0, 12))
+    approvals = []
+    for entry in entries:
+        row = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=10,
+                           border_width=1, border_color=C["borde"])
+        row.pack(fill="x", padx=8, pady=5)
+        variable = tk.BooleanVar(value=entry.can_create, master=dialog)
+        if entry.can_create:
+            approvals.append((entry, variable))
+        ctk.CTkCheckBox(row, text="", variable=variable, width=26,
+                         state="normal" if entry.can_create else "disabled",
+                         fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left", padx=(12, 4), pady=12)
+        details = ctk.CTkFrame(row, fg_color="transparent")
+        details.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=10)
+        status, colour = _BATCH_STATUS[entry.status]
+        title = f"{entry.code or '¿código?'} — {entry.name or entry.folder.name}"
+        ctk.CTkLabel(details, text=f"{title}   ·   {status}", font=UIM.fuente(12, "bold"),
+                     text_color=C["texto"] if entry.can_create else C[colour]).pack(anchor="w")
+        lines = [f"Carpeta: {entry.folder.name} · {entry.summary}"]
+        if entry.invoices_for_inbox:
+            lines.append(f"{len(entry.invoices_for_inbox)} factura(s) dudosa(s) quedarán para la bandeja del expediente.")
+        lines.extend(entry.reasons)
+        ctk.CTkLabel(details, text="\n".join(lines), font=UIM.fuente(10),
+                     text_color=C["texto_sec"], wraplength=680, justify="left").pack(anchor="w", pady=(2, 0))
+
+    footer = ctk.CTkFrame(panel, fg_color="transparent")
+    footer.pack(fill="x", padx=22, pady=(0, 18))
+
+    def create_selected():
+        selected = tuple(entry for entry, variable in approvals if variable.get())
+        if not selected:
+            messagebox.showwarning("Sin comunidades aprobadas", "Marca al menos una comunidad lista.", parent=dialog)
+            return
+        for widget in footer.winfo_children():
+            widget.configure(state="disabled")
+        app._estado("Creando comunidades del lote…", procesando=True)
+
+        def create_work():
+            connection = None
+            try:
+                connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+                outcomes = community_batch.create_batch(
+                    connection, selected, project_root=project_root,
+                    archive_root=Path(app.ruta_archivo_expedientes), actor="usuario_local",
+                    progress=lambda name: app.after(0, lambda: app._estado(f"Creando {name}…", procesando=True)),
+                )
+            except Exception as error:
+                message = str(error)
+
+                def failed():
+                    app._estado("No se pudo crear el lote", procesando=False)
+                    for widget in footer.winfo_children():
+                        widget.configure(state="normal")
+                    messagebox.showerror("No se pudo crear el lote", message, parent=dialog)
+                app.after(0, failed)
+                return
+            finally:
+                if connection is not None:
+                    connection.close()
+
+            def completed():
+                app._estado("Lote de comunidades terminado", procesando=False)
+                app._cargar_comunidades()
+                created = [item for item in outcomes if item.status == "created"]
+                for item in outcomes:
+                    app.log(f"{item.code}: {item.message}", "ok" if item.status == "created" else "aviso")
+                dialog.destroy()
+                labels = {"created": "✓", "skipped": "=", "failed": "✗"}
+                messagebox.showinfo(
+                    "Alta masiva terminada",
+                    f"Creadas {len(created)} de {len(outcomes)} comunidad(es).\n\n"
+                    + "\n".join(f"{labels[item.status]} {item.code}: {item.message}" for item in outcomes)
+                    + "\n\nPuedes repetir el lote: las comunidades ya creadas no se duplican.",
+                    parent=app,
+                )
+            app.after(0, completed)
+
+        app._en_hilo(create_work)
+
+    ctk.CTkButton(footer, text="Crear comunidades aprobadas", command=create_selected,
+                  state="normal" if approvals else "disabled",
+                  height=38, corner_radius=9, font=UIM.fuente(11, "bold"),
+                  fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right")
+    ctk.CTkButton(footer, text="Cerrar", command=dialog.destroy, height=38,
                   corner_radius=9, font=UIM.fuente(11), fg_color="transparent",
                   border_width=1, border_color=C["borde"], text_color=C["primario"],
                   hover_color=C["acento_suave"]).pack(side="right", padx=(0, 8))
