@@ -27,7 +27,8 @@ from invoice_extractors import FieldEvidence
 class ExpedientFlowTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.database_path = Path(self.directory.name) / "gestion.db"
+        self.root = Path(self.directory.name).resolve()
+        self.database_path = self.root / "gestion.db"
         with redirect_stdout(StringIO()):
             gestor_bd.crear_bd(str(self.database_path))
         self.connection = sqlite3.connect(self.database_path)
@@ -43,13 +44,13 @@ class ExpedientFlowTest(unittest.TestCase):
             start_date=date(2026, 1, 1),
             end_date=date(2026, 1, 31),
         )
-        self.source_path = Path(self.directory.name) / "factura.pdf"
+        self.source_path = self.root / "factura.pdf"
         self.source_path.write_bytes(b"%PDF-1.4 factura sintetica")
-        self.reading_file = Path(self.directory.name) / "lecturas.csv"
+        self.reading_file = self.root / "lecturas.csv"
         self.reading_file.write_text("contador;lectura\nA;12\n", encoding="utf-8")
-        self.unknown_file = Path(self.directory.name) / "desconocido.dat"
+        self.unknown_file = self.root / "desconocido.dat"
         self.unknown_file.write_bytes(b"contenido no clasificable")
-        self.archive_root = Path(self.directory.name) / "expedientes"
+        self.archive_root = self.root / "expedientes"
 
     def tearDown(self):
         self.connection.close()
@@ -298,7 +299,7 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertEqual("under_review", result.document.status)
 
     def test_batch_auto_apply_publishes_owners_before_complete_readings(self):
-        owners_file = Path(self.directory.name) / "propietarios.csv"
+        owners_file = self.root / "propietarios.csv"
         owners_file.write_text("vivienda;propietario\nA;Vecino A\n", encoding="utf-8")
         owners = case_ingestion.add_analysed_document_to_case(
             self.connection, self.case.id_case, source_path=owners_file,
@@ -344,7 +345,7 @@ class ExpedientFlowTest(unittest.TestCase):
             (self.community_id,),
         )
         self.connection.commit()
-        owners_file = Path(self.directory.name) / "propietarios-conflicto.csv"
+        owners_file = self.root / "propietarios-conflicto.csv"
         owners_file.write_text("vivienda;propietario;coeficiente\nA;Vecino A;0,752\n", encoding="utf-8")
         document = case_ingestion.add_document_to_case(
             self.connection, self.case.id_case, source_path=owners_file,
@@ -641,7 +642,7 @@ class ExpedientFlowTest(unittest.TestCase):
         self.assertEqual(0, result.open_issue_count)
 
     def test_mixed_classified_sources_create_only_the_unknown_review(self):
-        second_reading = Path(self.directory.name) / "lecturas-b.csv"
+        second_reading = self.root / "lecturas-b.csv"
         second_reading.write_text("contador;lectura\nB;24\n", encoding="utf-8")
         sources = (
             (
@@ -786,7 +787,7 @@ class ExpedientFlowTest(unittest.TestCase):
 
     def test_reanalysis_skips_ambiguous_archived_copy_and_continues_other_documents(self):
         ambiguous = self.add_confirmed_invoice()
-        second_source = Path(self.directory.name) / "segunda_factura.pdf"
+        second_source = self.root / "segunda_factura.pdf"
         second_source.write_bytes(b"%PDF-1.4 segunda factura")
         second = case_ingestion.add_document_to_case(
             self.connection,
@@ -1122,7 +1123,7 @@ class ExpedientFlowTest(unittest.TestCase):
         self._add_invoice_and_resolve_start_date()
         self._prepare_structural_case()
         document_review.validate_case_ready(self.connection, self.case.id_case)
-        second_source = Path(self.directory.name) / "factura-adicional.pdf"
+        second_source = self.root / "factura-adicional.pdf"
         second_source.write_bytes(b"%PDF-1.4 factura adicional")
 
         result = case_ingestion.add_document_to_case(

@@ -17,6 +17,7 @@ import case_ingestion
 import case_letter_service
 import case_readiness
 import document_review
+import database_backup
 import excel_bootstrap_importer
 import excel_export_service
 import expedient_service
@@ -262,6 +263,13 @@ def _prepare_explicit_rerun(
     return None
 
 
+def _backup_action(connection, progress, reason):
+    result = database_backup.backup_connection(connection, reason=reason)
+    if result is not None:
+        _emit(progress, "backup_database", path=str(result.backup_path),
+              warnings=result.cleanup_warnings)
+
+
 def _restore_failed_rerun(
     connection: sqlite3.Connection, id_case: int, original_status: str | None,
 ) -> None:
@@ -470,6 +478,8 @@ def run_generate_excel(
         except LookupError as error:
             raise WorkflowBlockedError(str(error)) from error
 
+        _backup_action(connection, progress, "before_excel")
+
         # La primera exportación de una comunidad es precisamente la que debe
         # crear su perfil común. Resolver el perfil antes de prepararlo dejaba
         # a las comunidades nuevas atrapadas en una falsa "revalidación".
@@ -549,8 +559,10 @@ def run_calculate_distribution(
     except Exception:
         connection.close()
         raise
-    original_status = _prepare_explicit_rerun(connection, id_case, "calculated")
+    original_status = None
     try:
+        _backup_action(connection, progress, "before_distribution")
+        original_status = _prepare_explicit_rerun(connection, id_case, "calculated")
         _emit(progress, "calcular_reparto", id_case=id_case)
         result = calculate_case_distribution(
             connection, id_case=id_case,
@@ -594,7 +606,12 @@ def run_generate_letters(
     except Exception:
         connection.close()
         raise
-    original_status = _prepare_explicit_rerun(connection, id_case, "reconciled")
+    try:
+        _backup_action(connection, progress, "before_letters")
+        original_status = _prepare_explicit_rerun(connection, id_case, "reconciled")
+    except Exception:
+        connection.close()
+        raise
     connection.close()
     _emit(progress, "generar_cartas", id_case=id_case)
     try:
