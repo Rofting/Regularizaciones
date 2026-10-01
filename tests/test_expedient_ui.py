@@ -505,6 +505,8 @@ class SourceActionsTest(unittest.TestCase):
             for widget in self.dialog.descendants():
                 if widget.options.get('value') == '49.0':
                     widget.options['value'] = '50'
+                if widget.options.get('value') == '3':
+                    widget.options['value'] = '4'
             self.click('Guardar configuración y coeficientes')
             for widget in self.dialog.descendants():
                 if 'Motivo de la diferencia' in widget.options.get('placeholder_text', ''):
@@ -512,6 +514,7 @@ class SourceActionsTest(unittest.TestCase):
             self.click('Aceptar con motivo')
         report = case_coherence.evaluate(self.connection, self.case.id_case, profile)
         self.assertEqual((), report.pending)
+        self.assertEqual('4', case_coherence.load_settings(self.connection, self.case.id_case)['historical_change_factor'])
         self.assertEqual(100, self.connection.execute('SELECT SUM(coeficiente) FROM propietarios').fetchone()[0])
 
     def test_fixed_cost_form_can_confirm_no_cost_for_this_period(self):

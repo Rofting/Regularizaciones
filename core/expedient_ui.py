@@ -3241,12 +3241,34 @@ def open_coherence_dialog(app: "AppGestionFincas") -> None:
         tolerance.insert(0, settings['consumption_tolerance_percent'])
         tolerance.pack(anchor='w', padx=12)
 
+        label('Ejercicio anterior · Avisar cuando un importe o consumo suba o baje por este factor (×)')
+        historical_factor = ctk.CTkEntry(content)
+        historical_factor.insert(0, settings['historical_change_factor'])
+        historical_factor.pack(anchor='w', padx=12)
+        label('Diferencia máxima de duración entre intervalos históricos (%)')
+        historical_duration = ctk.CTkEntry(content)
+        historical_duration.insert(0, settings['historical_duration_tolerance_percent'])
+        historical_duration.pack(anchor='w', padx=12)
+        label('Confirma las unidades de contador de ambos ejercicios. Si cambiaron, selecciona «Sin confirmar».')
+        historical_units = {}
+        for kind, values in (('ACS', ['Sin confirmar', 'm³']), ('CALEFACCION', ['Sin confirmar', 'kWh', 'unidades'])):
+            label(kind)
+            field = ctk.CTkComboBox(content, values=values)
+            unit = settings['historical_reading_units'][kind]
+            field.set({'m3': 'm³', 'kwh': 'kWh'}.get(unit, unit or 'Sin confirmar'))
+            field.pack(anchor='w', padx=12)
+            historical_units[kind] = field
+
         def save(comparisons):
             try:
                 with closing(gestor_bd.conectar(str(app.ruta_bd_expedientes))) as con:
                     case_coherence.save_settings(con, case_id, dict(
                         coefficient_mode='percent' if mode.get() == 'Porcentajes' else 'weights',
-                        consumption_tolerance_percent=tolerance.get(), comparisons=comparisons),
+                        consumption_tolerance_percent=tolerance.get(), comparisons=comparisons,
+                        historical_change_factor=historical_factor.get(),
+                        historical_duration_tolerance_percent=historical_duration.get(),
+                        historical_reading_units={kind: '' if field.get() == 'Sin confirmar' else field.get()
+                                                  for kind, field in historical_units.items()}),
                         {owner: entry.get() for owner, entry in entries.items()})
             except (ValueError, RuntimeError) as error:
                 messagebox.showwarning('Coherencia', str(error), parent=dialog)

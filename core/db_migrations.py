@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 
 
 MIGRATION_1_SQL = (
@@ -851,6 +851,14 @@ def _migration_16(connection: sqlite3.Connection) -> None:
     )""")
 
 
+def _migration_17(connection: sqlite3.Connection) -> None:
+    """Identidad del titular al calcular, sin inventarla para repartos antiguos."""
+    columns = {r[1] for r in connection.execute('PRAGMA table_info(owner_distribution_snapshots)')}
+    for column in ('owner_name', 'dwelling_code'):
+        if column not in columns:
+            connection.execute(f'ALTER TABLE owner_distribution_snapshots ADD COLUMN {column} TEXT')
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -868,6 +876,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     14: _migration_14,
     15: _migration_15,
     16: _migration_16,
+    17: _migration_17,
 }
 
 

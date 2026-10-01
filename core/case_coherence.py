@@ -77,6 +77,18 @@ def validate_settings(settings):
     tolerance = _number(settings.get('consumption_tolerance_percent', 10))
     if not tolerance.is_finite() or not 0 <= tolerance <= 100:
         raise ValueError('La tolerancia de consumo debe estar entre 0 y 100 %')
+    factor = _number(settings.get('historical_change_factor', 3))
+    duration = _number(settings.get('historical_duration_tolerance_percent', 10))
+    if not factor.is_finite() or factor <= 1:
+        raise ValueError('El factor de cambio histórico debe ser mayor que 1')
+    if not duration.is_finite() or not 0 <= duration <= 100:
+        raise ValueError('La tolerancia de duración histórica debe estar entre 0 y 100 %')
+    reading_units = settings.get('historical_reading_units', {'ACS': 'm3', 'CALEFACCION': ''})
+    if not isinstance(reading_units, dict):
+        raise ValueError('Indica las unidades de las lecturas históricas')
+    reading_units = {kind: normalise_unit(reading_units.get(kind)) for kind in ('ACS', 'CALEFACCION')}
+    if reading_units['ACS'] not in {'', 'm3'} or reading_units['CALEFACCION'] not in {'', 'kwh', 'unidades'}:
+        raise ValueError('La unidad histórica debe ser m³ para ACS y kWh o unidades para calefacción')
     comparisons = settings.get('comparisons', [])
     if not isinstance(comparisons, list):
         raise ValueError('Las comparaciones deben ser una lista')
@@ -90,7 +102,9 @@ def validate_settings(settings):
             raise ValueError('Indica el suministro y las unidades de facturas y lecturas')
         cleaned.append(dict(invoice_type=supply, reading_type=rule['reading_type'],
                             invoice_unit=units[0], reading_unit=units[1], cups=normalise_cups(rule.get('cups'))))
-    return dict(coefficient_mode=mode, consumption_tolerance_percent=str(tolerance), comparisons=cleaned)
+    return dict(coefficient_mode=mode, consumption_tolerance_percent=str(tolerance), comparisons=cleaned,
+                historical_change_factor=str(factor), historical_duration_tolerance_percent=str(duration),
+                historical_reading_units=reading_units)
 
 
 def load_settings(con, case_id):
@@ -102,13 +116,16 @@ def evaluate(con: sqlite3.Connection, case_id: int, profile) -> CoherenceReport:
     settings = load_settings(con, case_id)
     invoices = con.execute('''SELECT * FROM facturas WHERE id_comunidad=? AND id_periodo=? ORDER BY id_factura''',
                            (case['id_comunidad'], case['id_periodo'])).fetchall()
-    owners = con.execute('''SELECT id_propietario,codigo_vivienda,coeficiente FROM propietarios
+    owners = con.execute('''SELECT id_propietario,codigo_vivienda,coeficiente,nombre_propietario FROM propietarios
         WHERE id_comunidad=? AND activo=1 AND tipo_unidad='vivienda' ORDER BY id_propietario''',
                          (case['id_comunidad'],)).fetchall()
     readings = con.execute('''SELECT r.* FROM period_readings r JOIN propietarios p USING(id_propietario)
         WHERE p.id_comunidad=? AND r.fecha_lectura<=? ORDER BY r.id_propietario,r.tipo,r.fecha_lectura,r.id_periodo''',
                            (case['id_comunidad'], case['fecha_fin'])).fetchall()
+    import case_year_comparison
+    reference = case_year_comparison.reference_snapshot(con, case)
     snapshot = dict(case=dict(case), invoices=[dict(r) for r in invoices], owners=[dict(r) for r in owners],
+                    history=reference,
                     readings=[dict(r) for r in readings], settings=settings,
                     profile=[profile.key, profile.version, profile.source_sha256,
                              [(c.key, c.allocation_method, c.required) for c in profile.concepts]])
@@ -221,6 +238,11 @@ def evaluate(con: sqlite3.Connection, case_id: int, profile) -> CoherenceReport:
             add(f'consumption_difference:{index}', message + f' Supera la tolerancia del {settings["consumption_tolerance_percent"]} %. Revisa lecturas, usos comunes o pérdidas.')
         else:
             notes.append(message + ' Dentro de la tolerancia.')
+    historical_findings, historical_notes = case_year_comparison.evaluate(
+        con, case, profile, settings, invoices, owners, reference)
+    for key, message in historical_findings:
+        add(key, message)
+    notes.extend(historical_notes)
     return CoherenceReport(signature, tuple(findings), tuple(notes))
 
 

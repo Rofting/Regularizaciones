@@ -55,6 +55,23 @@ class DatabaseMigrationTest(unittest.TestCase):
             db_migrations.CURRENT_SCHEMA_VERSION,
         )
 
+    def test_upgrade_preserves_old_distribution_without_inventing_holder_identity(self):
+        earlier = {version: migration for version, migration in db_migrations.MIGRATIONS.items() if version < 17}
+        with patch.dict(db_migrations.MIGRATIONS, earlier, clear=True), redirect_stdout(StringIO()):
+            gestor_bd.crear_bd(str(self.database_path))
+        with closing(self._connect()) as con:
+            community = con.execute("INSERT INTO comunidades(codigo,nombre) VALUES ('TEST','Prueba')").lastrowid
+            period = con.execute("INSERT INTO periodos(id_comunidad,nombre,fecha_inicio,fecha_fin) VALUES (?,'Anterior','2024-01-01','2024-12-31')", (community,)).lastrowid
+            owner = con.execute("INSERT INTO propietarios(id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Titular actual')", (community,)).lastrowid
+            case = con.execute("INSERT INTO regularization_cases(id_comunidad,id_periodo,nombre,fecha_inicio,fecha_fin,estado) VALUES (?,?,'Anterior','2024-01-01','2024-12-31','calculated')", (community, period)).lastrowid
+            run = con.execute("INSERT INTO distribution_runs(id_case,id_periodo,input_sha256,status) VALUES (?,?,'previo','completed')", (case, period)).lastrowid
+            con.execute("INSERT INTO owner_distribution_snapshots(id_distribution_run,id_propietario,concept_key,billed_cents,actual_cents,difference_cents) VALUES (?,?,'acs_variable',100,130,30)", (run, owner))
+            con.commit()
+            self.assertEqual(17, db_migrations.migrate(con))
+            row = con.execute('SELECT owner_name,dwelling_code,billed_cents,actual_cents,difference_cents FROM owner_distribution_snapshots').fetchone()
+            self.assertEqual((None, None, 100, 130, 30), tuple(row))
+            self.assertEqual(17, db_migrations.migrate(con))
+
     def test_crear_bd_applies_version_one_to_empty_database(self):
         with redirect_stdout(StringIO()):
             gestor_bd.crear_bd(str(self.database_path))
