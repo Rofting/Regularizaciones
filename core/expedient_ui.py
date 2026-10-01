@@ -3,6 +3,7 @@ import json
 import sqlite3
 import stat
 import sys
+import threading
 import tkinter as tk
 from collections import Counter
 from dataclasses import dataclass
@@ -18,12 +19,14 @@ import case_ingestion
 import case_readiness
 import cuotas_servicio
 import community_discovery
+import community_folder
 import community_onboarding
 import document_review
 import expedient_service
 import fixed_costs
 import gestor_bd
 import office_settings
+import owner_lists
 import period_selection
 import source_batch
 import ui_moderna as UIM
@@ -1138,12 +1141,94 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
         path = filedialog.askopenfilename(
             parent=dialog,
             title="Selecciona la lista de propietarios",
-            filetypes=(("Listado CSV", "*.csv"),),
+            filetypes=(("Listado Excel o CSV", "*.csv *.xlsx *.xls"),),
         )
         if path:
-            selected["owners"] = Path(path)
-            source_labels["owners"].set(Path(path).name)
-            invalidate_analysis()
+            set_owner_list(Path(path))
+
+    def set_owner_list(path: Path) -> bool:
+        """Acepta listados en Excel o CSV de cualquier programa (se normalizan)."""
+        try:
+            canonical = owner_lists.normalise_owner_list(
+                path, Path(app.ruta_bd_expedientes).parent / "importaciones",
+            )
+        except (ValueError, OSError, ImportError) as error:
+            messagebox.showwarning("Listado de propietarios", str(error), parent=dialog)
+            return False
+        selected["owners"] = canonical
+        source_labels["owners"].set(
+            path.name if canonical == path else f"{path.name} (convertido a formato estándar)"
+        )
+        invalidate_analysis()
+        return True
+
+    def fill_from_folder():
+        if busy["active"]:
+            return
+        folder = filedialog.askdirectory(parent=dialog, title="Carpeta con los documentos de la comunidad")
+        if not folder:
+            return
+        busy["active"] = True
+        app._estado("Analizando la carpeta de la comunidad…", procesando=True)
+
+        def work():
+            try:
+                proposal = community_folder.propose_from_folder(
+                    Path(folder),
+                    progress=lambda name: app.after(0, lambda: app._estado(f"Analizando {name}…", procesando=True)),
+                )
+            except Exception as error:
+                message = str(error)
+
+                def failed():
+                    busy["active"] = False
+                    app._estado("Listo", procesando=False)
+                    messagebox.showerror("No se pudo analizar la carpeta", message, parent=dialog)
+                app.after(0, failed)
+                return
+
+            def apply():
+                busy["active"] = False
+                app._estado("Listo", procesando=False)
+                if proposal.code:
+                    identity["code"].set(proposal.code)
+                if proposal.name:
+                    identity["name"].set(proposal.name)
+                if proposal.start and proposal.end:
+                    start = datetime.strptime(proposal.start, "%Y-%m-%d").date()
+                    end = datetime.strptime(proposal.end, "%Y-%m-%d").date()
+                    identity["start_date"].set(start.strftime("%d/%m/%Y"))
+                    identity["end_date"].set(end.strftime("%d/%m/%Y"))
+                    identity["period_name"].set(period_selection.default_case_name(start, end))
+                if proposal.owners:
+                    set_owner_list(proposal.owners)
+                if proposal.readings:
+                    selected["readings"] = list(proposal.readings)
+                    source_labels["readings"].set(
+                        f"{len(proposal.readings)} archivo(s): "
+                        + ", ".join(path.name for path in proposal.readings)
+                    )
+                if proposal.invoices:
+                    selected["invoices"] = list(proposal.invoices)
+                    source_labels["invoices"].set(
+                        f"{len(proposal.invoices)} factura(s): "
+                        + ", ".join(path.name for path in proposal.invoices)
+                    )
+                invalidate_analysis()
+                render("identity")
+                detail = proposal.summary
+                if proposal.ignored:
+                    detail += "\n\n" + "\n".join(
+                        f"· {path.name}: {reason}" for path, reason in proposal.ignored[:12]
+                    )
+                messagebox.showinfo(
+                    "Datos detectados en la carpeta",
+                    detail + "\n\nRevisa los datos y continúa: nada se guarda hasta el final.",
+                    parent=dialog,
+                )
+            app.after(0, apply)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def select_readings():
         if busy["active"]:
@@ -1448,7 +1533,22 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                 "Identifica la comunidad",
                 "El período inicial es opcional; si lo indicas, se creará también su expediente.",
             )
-            first = entry_field("Código de comunidad", identity["code"], "Ej. 644")
+            shortcut = ctk.CTkFrame(content, fg_color=C["acento_suave"], corner_radius=10)
+            shortcut.pack(fill="x", pady=(0, 6))
+            ctk.CTkLabel(
+                shortcut,
+                text=(
+                    "¿Tienes los documentos de la comunidad en una carpeta? Elígela y se "
+                    "rellenarán código, nombre, período, propietarios, lecturas y facturas."
+                ),
+                font=UIM.fuente(11), text_color=C["primario"], wraplength=520, justify="left",
+            ).pack(side="left", padx=12, pady=10)
+            ctk.CTkButton(
+                shortcut, text="Rellenar desde carpeta…", command=fill_from_folder,
+                height=34, corner_radius=8, font=UIM.fuente(11, "bold"),
+                fg_color=C["primario"], hover_color=C["primario_hover"],
+            ).pack(side="right", padx=12, pady=10)
+            first = entry_field("Código de comunidad", identity["code"], "Ej. 101")
             entry_field("Nombre", identity["name"], "Nombre completo de la comunidad")
             entry_field("Nombre del período (opcional)", identity["period_name"], "Ej. 2026")
             dates = ctk.CTkFrame(content, fg_color="transparent")
@@ -1482,8 +1582,8 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
             )
             source_row(
                 "Lista de propietarios",
-                "Un archivo CSV con las personas y sus viviendas.",
-                source_labels["owners"], select_owners, "Elegir CSV",
+                "Excel o CSV con viviendas, propietarios y coeficientes (cualquier programa).",
+                source_labels["owners"], select_owners, "Elegir archivo",
             )
             source_row(
                 "Lecturas",

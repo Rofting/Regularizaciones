@@ -43,6 +43,15 @@ USO HABITUAL EN LA APP
 
 ALTA DE UNA COMUNIDAD
 ─────────────────────
+Lo más rápido: en el primer paso del alta guiada pulsa "Rellenar desde
+carpeta…" y elige la carpeta con los documentos de la comunidad. Se detectan
+código (nombre de la carpeta o de los archivos), nombre y CIF (de las
+facturas), período (de las lecturas), el listado de propietarios, las lecturas
+y las facturas; presupuestos, albaranes y justificantes se apartan. Revisa lo
+propuesto y continúa. El listado de propietarios puede estar en Excel o CSV de
+cualquier programa: se reconoce por sus columnas (vivienda, nombre,
+coeficiente, correo).
+
 El botón "Nueva comunidad" permite elegir entre "Registro rápido" y "Alta guiada
 desde fuentes". El alta guiada no requiere preparar previamente un Excel
 maestro perfecto y recorre cinco etapas visibles:
@@ -150,6 +159,16 @@ INSTALAR EN OTRO DESPACHO
 3. Sus proveedores locales se añaden en config/proveedores_despacho.json
    (ver config/proveedores_despacho.ejemplo.json). El CIF de cada proveedor se
    aprende solo al confirmar sus primeras facturas.
+
+PALABRAS CLAVE Y EMPRESAS DE LECTURAS
+─────────────────────────────────────
+config/palabras_clave.json contiene las palabras con las que se reconocen
+servicios en facturas, columnas de lecturas y de propietarios, empresas de
+lecturas (ista, Techem, Zenner, Contazara…) y filas de totales. Para añadir
+las de tu despacho crea config/palabras_clave_despacho.json con la misma
+estructura y sólo lo nuevo: se suma a lo del producto. Los informes de
+lecturas de cualquier empresa se leen por el significado de sus columnas; si
+el consumo viene en el informe, se usa para comprobar cada fila.
 
 CONTROLES IMPORTANTES
 ─────────────────────
