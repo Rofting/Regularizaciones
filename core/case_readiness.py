@@ -8,6 +8,7 @@ from pathlib import Path
 
 import document_review
 import fixed_costs
+import case_coherence
 from excel_export_service import ExportBlockedError, calculate_case_input_hash
 from excel_profiles import (
     ExcelProfile,
@@ -362,6 +363,15 @@ def evaluate_case_readiness(
     if profile_blocker is not None:
         blockers.append(profile_blocker)
     if profile is not None:
+        if case['id_periodo'] is not None:
+            try:
+                coherence = case_coherence.evaluate(connection, case_id, profile)
+            except ValueError as error:
+                blockers.append(ReadinessBlocker('INVALID_COHERENCE_SETTINGS', 'excel', str(error), 'review_coherence'))
+            else:
+                for finding in coherence.pending:
+                    blockers.append(ReadinessBlocker('COHERENCE_' + finding.key.split(':')[0].upper(),
+                                                     'excel', finding.message, 'review_coherence'))
         template = root / profile.template_relative_path
         if "OTROS_GASTOS" in profile.active_modules and template.is_file() and case["id_periodo"] is not None:
             try:

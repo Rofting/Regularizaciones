@@ -470,6 +470,50 @@ class SourceActionsTest(unittest.TestCase):
         self.app_module.AppGestionFincas._actualizar_workspace(self.app, state)
         self.assertEqual(self.app._accion_gastos_fijos, self.app._workspace_command)
 
+    def test_coherence_blocker_routes_to_its_review_panel(self):
+        from case_readiness import ReadinessBlocker, CaseReadinessReport
+        state = expedient_ui.guided_workspace_state(
+            has_case=True, document_count=1, open_issue_count=0, case_status='ready_for_calculation',
+            readiness_report=CaseReadinessReport(1, (ReadinessBlocker('COHERENCE_OVERLAP', 'excel', 'Solape', 'review_coherence'),)),
+        )
+        self.assertEqual('revisar_coherencia', state.next_action)
+        self.app_module.AppGestionFincas._actualizar_workspace(self.app, state)
+        self.assertEqual(self.app._accion_coherencia, self.app._workspace_command)
+
+    def test_coherence_panel_corrects_percentages_and_accepts_a_legitimate_overlap(self):
+        from contextlib import ExitStack
+        from excel_profiles import ExcelProfile, ConceptRule
+        import case_coherence
+        period = expedient_ui.expedient_service.link_case_to_period(self.connection, self.case.id_case)
+        profile = ExcelProfile('ui', '1', 'TEST', 'modelo.xlsx', (), (), (), (
+            ConceptRule('other', 'coefficient', 'period_parameters.other', None, True),))
+        for code in ('A', 'B'):
+            self.connection.execute('INSERT INTO propietarios(id_comunidad,codigo_vivienda,nombre_propietario,coeficiente) VALUES (?,?,?,49)', (self.app.id_comunidad, code, 'Vecino ' + code))
+        for number in ('1', '2'):
+            self.connection.execute('''INSERT INTO facturas(id_comunidad,id_periodo,tipo_suministro,
+                num_factura,cups_o_referencia,fecha_inicio,fecha_fin,importe_total)
+                VALUES (?,?,'GAS',?,'ES-PUNTO','2026-01-01','2026-02-01',100)''',
+                (self.app.id_comunidad, period, number))
+        self.connection.commit()
+        case_coherence.save_settings(self.connection, self.case.id_case, dict(coefficient_mode='percent'))
+        with ExitStack() as stack:
+            stack.enter_context(patch('case_workflow_actions.resolve_case_profile', return_value=profile))
+            stack.enter_context(patch.object(FakeWidget, 'set', lambda w, value: w.options.update(value=value), create=True))
+            stack.enter_context(patch.object(FakeWidget, 'get', lambda w: w.options.get('value', ''), create=True))
+            stack.enter_context(patch.object(FakeWidget, 'insert', lambda w, position, value: w.options.update(value=value)))
+            expedient_ui.open_coherence_dialog(self.app)
+            for widget in self.dialog.descendants():
+                if widget.options.get('value') == '49.0':
+                    widget.options['value'] = '50'
+            self.click('Guardar configuración y coeficientes')
+            for widget in self.dialog.descendants():
+                if 'Motivo de la diferencia' in widget.options.get('placeholder_text', ''):
+                    widget.options['value'] = 'Rectificación de la primera factura'
+            self.click('Aceptar con motivo')
+        report = case_coherence.evaluate(self.connection, self.case.id_case, profile)
+        self.assertEqual((), report.pending)
+        self.assertEqual(100, self.connection.execute('SELECT SUM(coeficiente) FROM propietarios').fetchone()[0])
+
     def test_fixed_cost_form_can_confirm_no_cost_for_this_period(self):
         period_id = expedient_ui.expedient_service.link_case_to_period(self.connection, self.case.id_case)
         expedient_ui.open_fixed_costs_dialog(self.app, period_id)
