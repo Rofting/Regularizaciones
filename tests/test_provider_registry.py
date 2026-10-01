@@ -275,5 +275,48 @@ class OfficeCatalogLayerTest(unittest.TestCase):
                 with self.subTest(provider=key, field=field):
                     self.assertNotIn(field, provider)
 
+
+class FuzzyProviderTest(unittest.TestCase):
+    REGISTRY = {"proveedores": {
+        "ACME": {"aliases": ["Ascensores Acme Levante"], "document_types": ["invoice"]},
+        "BRILLO": {"aliases": ["Limpiezas Brillo Total"], "document_types": ["invoice"],
+                   "excluded_signatures": ["PRESUPUESTO"]},
+    }}
+
+    def test_ocr_damaged_name_is_matched_with_medium_confidence(self):
+        registry = provider_registry_from_payload(self.REGISTRY)
+        match = resolve_provider(registry, "FACTURA ASCENS0RES ACME LEVANTF S.L.", "f.pdf", "invoice")
+        self.assertEqual(("ACME", "medium", "provider:fuzzy:v1"),
+                         (match.provider_key, match.confidence, match.rule_id))
+
+    def test_unrelated_text_and_exclusions_never_match(self):
+        registry = provider_registry_from_payload(self.REGISTRY)
+        self.assertIsNone(resolve_provider(registry, "Factura de suministro general", "f.pdf", "invoice"))
+        self.assertIsNone(resolve_provider(
+            registry, "PRESUPUESTO LIMPIEZAS BRILL0 TOTAL", "f.pdf", "invoice"))
+
+    def test_generic_texts_do_not_match_the_real_catalog(self):
+        registry = load_provider_registry(PROJECT_ROOT / "config" / "proveedores.json")
+        for text in ("Factura de limpieza de la comunidad total 121",
+                     "Factura de agua caliente total 50", "Factura mantenimiento ascensor"):
+            with self.subTest(text=text):
+                self.assertIsNone(resolve_provider(registry, text, "x.pdf", "invoice"))
+
+
+class OfficeKeywordsTest(unittest.TestCase):
+    def test_office_keywords_extend_the_product_lists(self):
+        import json
+        import keywords
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "palabras_clave.json").write_text(json.dumps(
+                {"servicios": {"GAS": ["gas natural"]}}), encoding="utf-8")
+            (Path(directory) / "palabras_clave_despacho.json").write_text(json.dumps(
+                {"servicios": {"GAS": ["Butano Ejemplo"], "PISCINA": ["piscina"]}}), encoding="utf-8")
+            keywords.load_keywords.cache_clear()
+            merged = keywords.load_keywords(directory)
+        keywords.load_keywords.cache_clear()
+        self.assertEqual(["gas natural", "Butano Ejemplo"], merged["servicios"]["GAS"])
+        self.assertEqual(["piscina"], merged["servicios"]["PISCINA"])
+
 if __name__ == "__main__":
     unittest.main()

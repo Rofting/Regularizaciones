@@ -397,7 +397,7 @@ def resolve_provider(
         candidates.append((score, profile, aliases, required_ok))
 
     if not candidates:
-        return None
+        return _fuzzy_provider(pool, raw_document, matches)
     candidates.sort(key=lambda item: item[0], reverse=True)
     best_score = candidates[0][0]
     winners = [item for item in candidates if item[0] == best_score]
@@ -412,6 +412,46 @@ def resolve_provider(
         "provider:signature:v1",
         tuple(aliases),
     )
+
+
+_FUZZY_THRESHOLD = 90.0
+_FUZZY_MARGIN = 4.0
+
+
+def _fuzzy_provider(pool, raw_document: str, matches) -> ProviderMatch | None:
+    """Último recurso para nombres mal leídos por el OCR («ENDESA ENERG1A»).
+
+    Sólo alias de texto largos, con un parecido alto y un ganador claro. El
+    resultado queda con confianza media para que se revise y no enseñe CIF.
+    """
+    import keywords
+
+    head = keywords.fold(raw_document[:4000])
+    scored: list[tuple[float, ProviderProfile, str]] = []
+    for profile in pool:
+        if any(matches(pattern) for pattern in profile.excluded_signatures):
+            continue
+        if profile.required_signatures and not all(matches(p) for p in profile.required_signatures):
+            continue
+        best = None
+        for alias in profile.aliases:
+            if re.search(r"[\\\[\](){}?*+|^$.]", alias):
+                continue
+            folded = keywords.fold(alias)
+            if len(folded) < 8:
+                continue
+            score = keywords.partial_similarity(folded, head)
+            if best is None or score > best[0]:
+                best = (score, alias)
+        if best and best[0] >= _FUZZY_THRESHOLD:
+            scored.append((best[0], profile, best[1]))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if len(scored) > 1 and scored[0][0] - scored[1][0] < _FUZZY_MARGIN:
+        return None
+    score, profile, alias = scored[0]
+    return ProviderMatch(profile.key, "medium", "provider:fuzzy:v1", (alias, f"{score:.0f}%"))
 
 
 __all__ = [
