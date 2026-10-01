@@ -1,0 +1,76 @@
+name: Pruebas
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pruebas-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python 3.12 · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Herramientas de documentos · Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libreoffice-calc libreoffice-writer poppler-utils tesseract-ocr
+
+      - name: Herramientas de documentos · Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install libreoffice-fresh poppler tesseract --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "No se pudieron instalar las herramientas de documentos" }
+          "$env:ProgramFiles\LibreOffice\program" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Dependencias de Python
+        run: python -m pip install -r requirements.txt
+
+      - name: Comprobar LibreOffice real
+        shell: bash
+        run: |
+          python -c "import shutil; assert shutil.which('soffice'), 'LibreOffice no está en el PATH'"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            soffice.com --version
+          else
+            soffice --version
+          fi
+
+      - name: Suite completa desde el checkout limpio
+        shell: bash
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+          XDG_CACHE_HOME: ${{ runner.temp }}/cache
+        run: python -m unittest discover -s tests -v 2>&1 | tee test-results.txt
+
+      - name: Conservar resultado de pruebas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pruebas-${{ matrix.os }}
+          path: test-results.txt
+          if-no-files-found: ignore
+          retention-days: 14

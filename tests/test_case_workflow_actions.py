@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from openpyxl import Workbook
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CORE_DIR = PROJECT_ROOT / "core"
@@ -25,6 +27,32 @@ class CaseWorkflowActionsTest(unittest.TestCase):
     def setUp(self):
         self.database = temporary_database()
         self.connection, self.database_path = self.database.__enter__()
+        self.project_root = self.database_path.parent / "project"
+        profile_path = self.project_root / "config/excel_profiles/658_acs_v1.json"
+        profile_path.parent.mkdir(parents=True)
+        profile = json.loads(
+            (PROJECT_ROOT / "config/excel_profiles/658_acs_v1.json").read_text(encoding="utf-8")
+        )
+        profile_path.write_text(json.dumps(profile), encoding="utf-8")
+        # El flujo se prueba con un libro construido aquí, nunca con el maestro
+        # privado instalado en plantillas/comunidades de la máquina del usuario.
+        template = self.project_root / profile["template_relative_path"]
+        template.parent.mkdir(parents=True)
+        workbook = Workbook()
+        workbook.remove(workbook.active)
+        for name in profile["required_sheets"]:
+            workbook.create_sheet(name).print_area = "A1:X100"
+        workbook["DATOS"]["A1"] = "COMUNIDAD SINTÉTICA"
+        for sheet, address in profile["required_formula_cells"]:
+            workbook[sheet][address] = "=0"
+        workbook.save(template)
+        workbook.close()
+        canonical = self.project_root / "plantillas/modelo/modelo_acs_v1.xlsx"
+        canonical.parent.mkdir(parents=True)
+        shutil.copy2(template, canonical)
+        base_profile = self.project_root / "config/modelo_excel/perfil_base.json"
+        base_profile.parent.mkdir(parents=True)
+        shutil.copy2(PROJECT_ROOT / "config/modelo_excel/perfil_base.json", base_profile)
         gestor_bd.crear_bd(str(self.database_path))
         self.community_id = gestor_bd.obtener_o_crear_comunidad(
             self.connection, "658", "Comunidad portátil"
@@ -60,7 +88,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             (
                 self.community_id,
                 hashlib.sha256(
-                    (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+                    (self.project_root / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
                 ).hexdigest(),
             ),
         )
@@ -102,8 +130,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                 self.database_path,
                 id_case=self.other_case_id,
                 active_community_id=self.community_id,
-                project_root=PROJECT_ROOT,
-                output_root=PROJECT_ROOT / "salidas-prueba",
+                project_root=self.project_root,
+                output_root=self.project_root / "salidas-prueba",
             )
 
     def test_resolves_the_active_profile_from_the_community_not_a_fixed_code(self):
@@ -113,7 +141,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             self.connection,
             id_case=self.case_id,
             active_community_id=self.community_id,
-            project_root=PROJECT_ROOT,
+            project_root=self.project_root,
         )
 
         self.assertEqual("658_acs_v1", profile.key)
@@ -127,7 +155,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             profile_path = root / "config" / "excel_profiles" / "658_acs_v1.json"
             profile_path.parent.mkdir(parents=True)
             profile_path.write_bytes(
-                (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+                (self.project_root / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
             )
             registered_hash = hashlib.sha256(profile_path.read_bytes()).hexdigest()
             self.connection.execute(
@@ -148,7 +176,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
     def test_revalidates_a_changed_profile_and_returns_case_to_excel_generation(self):
         from case_workflow_actions import revalidate_case_profile_registration
 
-        template = PROJECT_ROOT / "plantillas" / "comunidades" / "658" / "658_acs_v1.xlsx"
+        template = self.project_root / "plantillas" / "comunidades" / "658" / "658_acs_v1.xlsx"
         template_hash = hashlib.sha256(template.read_bytes()).hexdigest()
         self.connection.execute(
             """UPDATE excel_template_profiles
@@ -166,7 +194,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             self.connection,
             id_case=self.case_id,
             active_community_id=self.community_id,
-            project_root=PROJECT_ROOT,
+            project_root=self.project_root,
         )
 
         registered = self.connection.execute(
@@ -181,7 +209,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         self.assertEqual("658_acs_v1", profile.key)
         self.assertEqual(
             hashlib.sha256(
-                (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
+                (self.project_root / "config" / "excel_profiles" / "658_acs_v1.json").read_bytes()
             ).hexdigest(),
             registered,
         )
@@ -204,7 +232,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                 self.connection,
                 id_case=self.case_id,
                 active_community_id=self.community_id,
-                project_root=PROJECT_ROOT,
+                project_root=self.project_root,
             )
 
         registered = self.connection.execute(
@@ -223,7 +251,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             self.connection,
             id_case=self.case_id,
             active_community_id=self.community_id,
-            project_root=PROJECT_ROOT,
+            project_root=self.project_root,
         )
 
         self.assertEqual("658_acs_v1", profile.key)
@@ -249,7 +277,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         self.connection.execute("DELETE FROM excel_template_profiles WHERE id_comunidad=?", (self.community_id,))
         self.connection.commit()
         reference = json.loads(
-            (PROJECT_ROOT / "config" / "excel_profiles" / "658_acs_v1.json").read_text(encoding="utf-8")
+            (self.project_root / "config" / "excel_profiles" / "658_acs_v1.json").read_text(encoding="utf-8")
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -288,8 +316,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                     self.database_path,
                     id_case=self.case_id,
                     active_community_id=self.community_id,
-                    project_root=PROJECT_ROOT,
-                    output_root=PROJECT_ROOT / "salidas-prueba",
+                    project_root=self.project_root,
+                    output_root=self.project_root / "salidas-prueba",
                 )
 
         self.assertEqual("excel", result)
@@ -314,11 +342,11 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             base_profile.parent.mkdir(parents=True)
             canonical_model.parent.mkdir(parents=True)
             shutil.copy2(
-                PROJECT_ROOT / "config" / "modelo_excel" / "perfil_base.json",
+                self.project_root / "config" / "modelo_excel" / "perfil_base.json",
                 base_profile,
             )
             shutil.copy2(
-                PROJECT_ROOT / "plantillas" / "modelo" / "modelo_acs_v1.xlsx",
+                self.project_root / "plantillas" / "modelo" / "modelo_acs_v1.xlsx",
                 canonical_model,
             )
 
@@ -367,8 +395,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                         self.database_path,
                         id_case=self.case_id,
                         active_community_id=self.community_id,
-                        project_root=PROJECT_ROOT,
-                        output_root=PROJECT_ROOT / "salidas-prueba",
+                        project_root=self.project_root,
+                        output_root=self.project_root / "salidas-prueba",
                     )
 
         export.assert_not_called()
@@ -381,8 +409,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                 self.database_path,
                 id_case=self.case_id,
                 active_community_id=self.community_id,
-                project_root=PROJECT_ROOT,
-                output_root=PROJECT_ROOT / "salidas-prueba",
+                project_root=self.project_root,
+                output_root=self.project_root / "salidas-prueba",
             )
 
         status = self.connection.execute(
@@ -407,8 +435,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                     self.database_path,
                     id_case=self.case_id,
                     active_community_id=self.community_id,
-                    project_root=PROJECT_ROOT,
-                    output_root=PROJECT_ROOT / "salidas-prueba",
+                    project_root=self.project_root,
+                    output_root=self.project_root / "salidas-prueba",
                 )
 
         export.assert_not_called()
@@ -435,7 +463,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                     self.database_path,
                     id_case=self.case_id,
                     active_community_id=self.community_id,
-                    project_root=PROJECT_ROOT,
+                    project_root=self.project_root,
                 )
 
         distribution.assert_not_called()
@@ -462,7 +490,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                     self.database_path,
                     id_case=self.case_id,
                     active_community_id=self.community_id,
-                    project_root=PROJECT_ROOT,
+                    project_root=self.project_root,
                     selected_concepts=("acs_fixed",),
                 )
 
@@ -516,8 +544,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
                     self.database_path,
                     id_case=self.case_id,
                     active_community_id=self.community_id,
-                    project_root=PROJECT_ROOT,
-                    output_root=PROJECT_ROOT / "salidas-prueba",
+                    project_root=self.project_root,
+                    output_root=self.project_root / "salidas-prueba",
                 )
 
         export.assert_not_called()
@@ -544,8 +572,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         with patch("case_workflow_actions.generate_official_excel", return_value="excel") as export:
             result = run_generate_excel(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
-                output_root=PROJECT_ROOT / "salidas-prueba",
+                active_community_id=self.community_id, project_root=self.project_root,
+                output_root=self.project_root / "salidas-prueba",
                 progress=lambda stage, payload: events.append((stage, payload)),
             )
         self.assertEqual("excel", result)
@@ -558,7 +586,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         ) as distribution:
             result = run_calculate_distribution(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
+                active_community_id=self.community_id, project_root=self.project_root,
                 progress=lambda stage, payload: events.append((stage, payload)),
             )
         self.assertEqual("reparto", result)
@@ -569,11 +597,11 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         from case_letter_service import LetterBatchResult
         with patch("case_workflow_actions._require_stage"), patch(
             "case_workflow_actions.generate_case_letters",
-            return_value=LetterBatchResult(1, PROJECT_ROOT / "salidas-prueba", 1, ("pendiente",)),
+            return_value=LetterBatchResult(1, self.project_root / "salidas-prueba", 1, ("pendiente",)),
         ) as letters:
             result = run_generate_letters(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
+                active_community_id=self.community_id, project_root=self.project_root,
                 selected_concepts=("acs_fixed",),
                 progress=lambda stage, payload: events.append((stage, payload)),
             )
@@ -589,7 +617,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         ):
             run_calculate_distribution(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
+                active_community_id=self.community_id, project_root=self.project_root,
             )
 
         self.assertEqual(
@@ -608,13 +636,13 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             (self.case_id,),
         )
         self.connection.commit()
-        batch = LetterBatchResult(1, PROJECT_ROOT / "salidas-prueba", 2, ())
+        batch = LetterBatchResult(1, self.project_root / "salidas-prueba", 2, ())
         with patch("case_workflow_actions._require_stage"), patch(
             "case_workflow_actions.generate_case_letters", return_value=batch
         ):
             run_generate_letters(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
+                active_community_id=self.community_id, project_root=self.project_root,
                 selected_concepts=("acs_fixed",),
             )
 
@@ -636,8 +664,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         with patch("case_workflow_actions.generate_official_excel", return_value="nuevo excel"):
             result = run_generate_excel(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
-                output_root=PROJECT_ROOT / "salidas-prueba",
+                active_community_id=self.community_id, project_root=self.project_root,
+                output_root=self.project_root / "salidas-prueba",
             )
 
         self.assertEqual("nuevo excel", result)
@@ -659,19 +687,19 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         ):
             self.assertEqual("nuevo reparto", run_calculate_distribution(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
+                active_community_id=self.community_id, project_root=self.project_root,
             ))
         self.assertEqual("reconciled", self.connection.execute(
             "SELECT estado FROM regularization_cases WHERE id_case=?", (self.case_id,),
         ).fetchone()[0])
 
-        batch = LetterBatchResult(9, PROJECT_ROOT / "salidas-prueba", 2, ())
+        batch = LetterBatchResult(9, self.project_root / "salidas-prueba", 2, ())
         with patch("case_workflow_actions._require_stage"), patch(
             "case_workflow_actions.generate_case_letters", return_value=batch
         ):
             run_generate_letters(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
+                active_community_id=self.community_id, project_root=self.project_root,
                 selected_concepts=("acs_fixed",),
             )
         self.assertEqual("deliveries_generated", self.connection.execute(
@@ -684,9 +712,9 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowBlockedError, "ambas fuentes complementarias"):
             run_bootstrap_import(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
-                master_path=PROJECT_ROOT / "README.md",
-                owner_list_path=PROJECT_ROOT / "README.md",
+                active_community_id=self.community_id, project_root=self.project_root,
+                master_path=self.project_root / "README.md",
+                owner_list_path=self.project_root / "README.md",
                 readings_path=None,
             )
 
@@ -701,8 +729,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
         ), patch("case_workflow_actions.document_review.validate_case_ready") as ready:
             result, companions = run_bootstrap_import(
                 self.database_path, id_case=self.case_id,
-                active_community_id=self.community_id, project_root=PROJECT_ROOT,
-                master_path=PROJECT_ROOT / "README.md",
+                active_community_id=self.community_id, project_root=self.project_root,
+                master_path=self.project_root / "README.md",
             )
 
         self.assertEqual(imported, result)
@@ -736,7 +764,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
 
         concepts = available_case_letter_concepts(
             self.database_path, id_case=self.case_id,
-            active_community_id=self.community_id, project_root=PROJECT_ROOT,
+            active_community_id=self.community_id, project_root=self.project_root,
         )
 
         self.assertEqual((("acs_fixed", "Cuota fija de ACS"),), concepts)

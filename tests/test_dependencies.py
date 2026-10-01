@@ -25,6 +25,7 @@ class DependencySmokeTest(unittest.TestCase):
                 "pytesseract",
                 "rapidocr",
                 "onnxruntime",
+                "rapidfuzz",
                 "matplotlib",
                 "numpy",
                 "xlrd",
