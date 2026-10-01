@@ -11,6 +11,10 @@ El alcance de esta entrega es corregir el clon limpio, añadir CI y preparar
 esta hoja de ruta. Las demás filas describen trabajo pendiente; no representan
 funciones ya entregadas.
 
+Actualización de la siguiente entrega: se implementan las mejoras 19 y 8,
+documentadas en [Copias automáticas y gastos heredados](copias-y-gastos-heredados.md).
+Las mejoras 10, 9 y 12 siguen pendientes en la entrega B.
+
 ## Primera entrega: pruebas que se pueden repetir
 
 - **11, corregido:** `tests/test_case_workflow_actions.py` construye su proyecto
@@ -73,7 +77,7 @@ de recursos, datos, copias y herramientas externas.
 
 | Nº | Estado comprobado y trabajo pendiente | Criterio de aceptación |
 | --- | --- | --- |
-| 8. Plantillas antiguas con gastos heredados | El modelo común ya tiene los gastos fijos vacíos y `fixed_costs.py` escribe importes del período. Una plantilla antigua puede conservarlos si no se introduce otro valor. Añadir una revisión previa de las filas conocidas de `OTROS GASTOS`. | Si el libro contiene un gasto sin valor confirmado para esa comunidad/período, mostrar celda, importe y acción para confirmar o corregir. `993,44 €` es un indicio que revisar, nunca una razón para borrar un gasto legítimo automáticamente. |
+| 8. Plantillas antiguas con gastos heredados | Implementado: se revisan B6:B9 y C6:C9 de las filas conocidas antes del Excel. La interfaz ofrece «Revisar gastos fijos». Guardar vacío confirma cero y reconstruye el anual mensual × 12 en el libro generado. | Las pruebas comprueban el bloqueo, la confirmación y la sustitución de un total anual heredado, también con LibreOffice real. La plantilla original no se altera. `993,44 €` es un indicio que revisar, nunca una razón para borrar un gasto legítimo automáticamente. |
 | 9. Comparación con el ejercicio previo | La base mantiene períodos y resultados históricos; falta un informe de cambios anómalos. Comparar vivienda/suministro/unidad y períodos de duración comparable, con umbrales configurables. | Un consumo o importe multiplicado por tres genera un aviso explicable con ambos valores. Sin período comparable no se inventa una referencia; rectificaciones y cambios de titular quedan identificados. |
 | 10. Coherencia antes del Excel | Ya existen controles de fuentes, importes obligatorios, lecturas y conciliación monetaria. Añadir comprobación de consumo facturado frente a lecturas cuando suministro, unidad e intervalo sean comparables; suma de coeficientes y solapes de facturas. | Una diferencia relevante o un solape del mismo suministro/CUPS se puede revisar antes de publicar. No comparar kWh con m³ directamente. Los coeficientes expresados como porcentajes deben sumar 100 % dentro de tolerancia; los pesos relativos admitidos por el reparto se normalizan de forma explícita. |
 | 11. Pruebas independientes de la 658 | Corregido en esta entrega: proyecto y workbook temporales sintéticos en las pruebas del flujo guiado. | La suite pasa desde un checkout que nunca ha tenido `plantillas/comunidades/658`. Las pruebas no dejan archivos privados ni salidas en el árbol de trabajo. |
@@ -94,7 +98,7 @@ de recursos, datos, copias y herramientas externas.
 | Nº | Estado comprobado y trabajo pendiente | Criterio de aceptación |
 | --- | --- | --- |
 | 18. Instalador Windows | Hay plan portable y `scripts/exportar_producto.py`, pero no un ejecutable construido. Resolver rutas de datos escribibles, empaquetar con PyInstaller, modelos OCR y herramientas documentales, y generar el instalador en Windows. | Instalar y arrancar en Windows sin Python ni descargas en tiempo de ejecución. Probar rutas con espacios/acentos, primera base vacía, importación y cartas. Actualizar conserva los datos y permite recuperar una copia. |
-| 19. Copias automáticas | `database_reset.py` ya crea una copia SQLite verificada al reiniciar la base; faltan copias al abrir, migrar y regenerar. Crear un servicio común con `sqlite3.backup`, `integrity_check`, retención configurable y registro. | Las copias contienen una base íntegra incluso con WAL; una copia fallida no autoriza una migración destructiva. La limpieza sólo afecta a copias antiguas verificadas y conserva el mínimo acordado; demostrar restauración. |
+| 19. Copias automáticas | Implementado en `database_backup.py`: arranque, migraciones con datos y generación de Excel/reparto/cartas del flujo guiado, además de reevaluación de fuentes desde la interfaz. Retención configurable, 20 por defecto, manifiesto y registro. | Las pruebas recuperan datos confirmados en WAL, comprueban integridad y restauración, y bloquean migraciones/regeneraciones si falla la copia. La limpieza conserva como mínimo 3 copias verificadas y excluye copias manuales, alteradas y de otras bases. |
 | 20. Orden del código y Git | CI se añade en esta entrega. `excel_generator.py` aún importa `excel_writer.py` y existen consumidores de importadores antiguos: inventariar llamadas antes de retirarlos. La limpieza de ramas e historial queda para una entrega específica. | Retirar una pieza sólo tras migrar sus consumidores y pasar la suite. Para quitar la base histórica: guardar un bundle y una copia verificada fuera del repositorio, reescribir la ruta de la BD en todas las referencias que se vayan a publicar, comprobar su ausencia y publicar con control del estado remoto. La rama `feature/global-provider-detection` se elimina tras comprobar que sus cambios están integrados. Los clones de Codex/Claude se renuevan después de reescribir el historial. |
 
 ## Cómo repetir la primera entrega

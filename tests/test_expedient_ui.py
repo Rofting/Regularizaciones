@@ -448,6 +448,37 @@ class SourceActionsTest(unittest.TestCase):
 
         review_ui.open_issue_dialog.assert_called_once_with(self.app, issue)
 
+    def test_startup_creates_a_verified_database_backup(self):
+        with patch.object(self.app_module, "RUTA_BD", self.database_path), \
+             patch.object(self.app_module, "BASE_DIR", self.root), \
+             patch.object(self.app_module, "RUTA_CARTAS", self.root / "cartas"):
+            self.app_module.AppGestionFincas._verificar_estructura(self.app)
+        copies = list((self.root / "backups").glob("*.db"))
+        self.assertEqual(1, len(copies))
+        with closing(sqlite3.connect(copies[0])) as con:
+            self.assertEqual(1, con.execute("SELECT COUNT(*) FROM comunidades").fetchone()[0])
+
+    def test_fixed_cost_blocker_routes_to_the_fixed_cost_form(self):
+        from case_readiness import ReadinessBlocker, CaseReadinessReport
+        state = expedient_ui.guided_workspace_state(
+            has_case=True, document_count=1, open_issue_count=0,
+            case_status="ready_for_calculation", readiness_report=CaseReadinessReport(
+                1, (ReadinessBlocker("UNCONFIRMED_FIXED_COSTS", "excel", "Revisar B6", "review_fixed_costs"),),
+            ),
+        )
+        self.assertEqual("revisar_gastos_fijos", state.next_action)
+        self.app_module.AppGestionFincas._actualizar_workspace(self.app, state)
+        self.assertEqual(self.app._accion_gastos_fijos, self.app._workspace_command)
+
+    def test_fixed_cost_form_can_confirm_no_cost_for_this_period(self):
+        period_id = expedient_ui.expedient_service.link_case_to_period(self.connection, self.case.id_case)
+        expedient_ui.open_fixed_costs_dialog(self.app, period_id)
+        with patch.object(FakeWidget, "get", return_value="", create=True):
+            self.click("Guardar")
+        values = expedient_ui.fixed_costs.load_fixed_costs(self.connection, self.app.id_comunidad, period_id)
+        self.assertEqual(4, len(values))
+        self.assertTrue(all(value == 0 for value in values.values()))
+
     def test_resolve_incidents_action_routes_counter_resets_to_the_grouped_view(self):
         self.ingest()
         document_id = self.connection.execute(

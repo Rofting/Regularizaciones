@@ -578,7 +578,8 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             )
         self.assertEqual("excel", result)
         self.assertEqual(self.case_id, export.call_args.kwargs["id_case"])
-        self.assertEqual(["validate_case", "generar_excel"], [event[0] for event in events])
+        self.assertEqual(["validate_case", "backup_database", "generar_excel"], [event[0] for event in events])
+        self.assertTrue(Path(events[1][1]["path"]).is_file())
 
         events.clear()
         with patch("case_workflow_actions._require_stage"), patch(
@@ -591,7 +592,7 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             )
         self.assertEqual("reparto", result)
         self.assertEqual(self.case_id, distribution.call_args.kwargs["id_case"])
-        self.assertEqual(["validate_case", "calcular_reparto"], [event[0] for event in events])
+        self.assertEqual(["validate_case", "backup_database", "calcular_reparto"], [event[0] for event in events])
 
         events.clear()
         from case_letter_service import LetterBatchResult
@@ -607,7 +608,30 @@ class CaseWorkflowActionsTest(unittest.TestCase):
             )
         self.assertEqual(1, result.id_letter_run)
         self.assertEqual(("acs_fixed",), letters.call_args.kwargs["selected_concepts"])
-        self.assertEqual(["validate_case", "generar_cartas"], [event[0] for event in events])
+        self.assertEqual(["validate_case", "backup_database", "generar_cartas"], [event[0] for event in events])
+
+    def test_failed_backup_prevents_excel_distribution_and_letters_from_running(self):
+        import database_backup
+        import case_workflow_actions as actions
+        functions = (
+            (actions.run_generate_excel, "generate_official_excel", {"output_root": self.project_root / "salidas"}),
+            (actions.run_calculate_distribution, "calculate_case_distribution", {}),
+            (actions.run_generate_letters, "generate_case_letters", {"selected_concepts": ("acs_fixed",)}),
+        )
+        self.connection.execute("UPDATE regularization_cases SET estado='closed' WHERE id_case=?", (self.case_id,))
+        self.connection.commit()
+        for function, service, extra in functions:
+            with self.subTest(action=function.__name__), patch("case_workflow_actions._require_stage"), \
+                 patch("case_workflow_actions.database_backup.backup_connection",
+                       side_effect=database_backup.DatabaseBackupError("fallo de copia")), \
+                 patch("case_workflow_actions." + service) as generation:
+                with self.assertRaises(database_backup.DatabaseBackupError):
+                    function(self.database_path, id_case=self.case_id,
+                             active_community_id=self.community_id, project_root=self.project_root, **extra)
+                generation.assert_not_called()
+                self.assertEqual("closed", self.connection.execute(
+                    "SELECT estado FROM regularization_cases WHERE id_case=?", (self.case_id,),
+                ).fetchone()[0])
 
     def test_successful_distribution_marks_the_case_reconciled_before_letters(self):
         from case_workflow_actions import run_calculate_distribution
