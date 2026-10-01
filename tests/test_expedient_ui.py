@@ -384,7 +384,7 @@ class SourceActionsTest(unittest.TestCase):
         with self.connection:
             self.connection.execute("UPDATE extraction_candidates SET source_context = ? WHERE id_document = ?", ('{"page":2,"fragment":"TOTAL 123"}', issue.id_document))
         expedient_ui.open_issue_dialog(self.app, issue)
-        self.click("Ver contexto")
+        self.click("Ver en la fuente")
         self.assertIn("Página 2", self.messages.showinfo.call_args.args[1])
         self.assertIn("TOTAL 123", self.messages.showinfo.call_args.args[1])
         self.assertTrue(any(w.options.get("text") == "Abrir archivo" for w in self.dialog.descendants()))
