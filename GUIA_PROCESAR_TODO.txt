@@ -52,6 +52,16 @@ propuesto y continúa. El listado de propietarios puede estar en Excel o CSV de
 cualquier programa: se reconoce por sus columnas (vivienda, nombre,
 coeficiente, correo).
 
+VARIAS COMUNIDADES A LA VEZ: "Nueva comunidad" → "Alta masiva por
+subcarpetas". Prepara una carpeta con una subcarpeta por comunidad, nombrada
+con su código y nombre (por ejemplo "658 - CP Las Flores"), y dentro sus
+propietarios, lecturas y facturas. Cada comunidad aparece con su resumen y una
+lectura de ejemplo; las que están completas se crean de una vez con su
+perfil, expediente, propietarios y lecturas. Las que necesitan revisión dicen
+qué falta y se completan con el alta guiada. Las facturas dudosas quedan para
+la bandeja del expediente. Repetir el lote no duplica las ya creadas y el
+fallo de una no detiene a las demás.
+
 El botón "Nueva comunidad" permite elegir entre "Registro rápido" y "Alta guiada
 desde fuentes". El alta guiada no requiere preparar previamente un Excel
 maestro perfecto y recorre cinco etapas visibles:
