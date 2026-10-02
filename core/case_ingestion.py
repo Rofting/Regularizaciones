@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Collection, Iterator, Mapping
 
 import document_review
+from app_paths import ApplicationPaths
 import expedient_service
 import gestor_bd
 from excel_profiles import configured_profile_paths, load_profile
@@ -41,7 +42,7 @@ def _active_modules_for_case(
     ).fetchall()
     if not rows:
         return None
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = ApplicationPaths.resolve().home
     profile_keys = tuple(
         str(item["profile_key"]) for item in rows if item["profile_key"]
     )
@@ -1054,7 +1055,7 @@ def _with_invoice_aliases(
         ).fetchone()
         key = row["provider_key"] if row is not None else None
         if key:
-            catalog = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+            catalog = ApplicationPaths.resolve().home / "config" / "proveedores.json"
             result["proveedor"] = _provider_names(str(catalog)).get(key, key)
     return result
 
@@ -1332,7 +1333,7 @@ def reanalyze_case_documents(
     source_archive_root = (
         Path(archive_root)
         if archive_root is not None
-        else Path(__file__).resolve().parents[1] / "data" / "expedientes"
+        else ApplicationPaths.resolve().sources
     )
     expedient_service.repair_archived_source_paths(
         connection, archive_root=source_archive_root, case_id=case_id,

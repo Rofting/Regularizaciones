@@ -4,7 +4,7 @@ ui_moderna.py
 Capa visual basada en CustomTkinter para la app de Gestión de Fincas.
 
 REQUISITO:  pip install customtkinter
-            (app.py intenta instalarlo automáticamente si falta)
+            (incluido en la instalación)
 
 Incluye:
   - C:        paleta de colores con pares (claro, oscuro) — CustomTkinter
@@ -22,6 +22,7 @@ import tkinter.font as tkfont
 from pathlib import Path
 
 import customtkinter as ctk
+from app_paths import ApplicationPaths
 
 # ---------------------------------------------------------------------------
 # PALETA — cada clave: (modo claro, modo oscuro)
@@ -71,7 +72,7 @@ def secondary_button_kwargs() -> dict[str, object]:
         "text_color": C["texto_sec"],
     }
 
-RUTA_PREFS = Path(__file__).parent.parent / "config" / "ui_prefs.json"
+RUTA_PREFS = ApplicationPaths.resolve().home / "config" / "ui_prefs.json"
 
 
 # ---------------------------------------------------------------------------

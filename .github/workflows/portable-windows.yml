@@ -1,0 +1,73 @@
+name: Distribución Windows portable
+
+on:
+  push:
+    paths:
+      - "core/**"
+      - "config/proveedores.json"
+      - "config/palabras_clave.json"
+      - "config/modelo_excel/**"
+      - "plantillas/Plantilla_Cartas.docx"
+      - "plantillas/modelo/**"
+      - "requirements*.txt"
+      - "Regularizaciones.spec"
+      - "scripts/build_windows.ps1"
+      - ".github/workflows/portable-windows.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "requirements*.txt"
+      - "Regularizaciones.spec"
+      - "scripts/build_windows.ps1"
+      - ".github/workflows/portable-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Dependencias para construir
+        run: python -m pip install -r requirements-build.txt
+      - name: Poppler para PDF escaneados
+        shell: pwsh
+        run: |
+          winget install --exact --id oschwartz10612.Poppler --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189 -and $LASTEXITCODE -ne -1978335135) {
+            throw 'No se pudo instalar Poppler para el paquete'
+          }
+      - name: Construir onedir
+        shell: pwsh
+        run: .\scripts\build_windows.ps1 -SinDependencias
+      - name: Arrancar sin Python y conservar datos al actualizar
+        shell: pwsh
+        run: |
+          if (-not (Test-Path '.\dist\Regularizaciones\_internal\poppler\bin\pdftoppm.exe')) {
+            throw 'La distribución no incluye Poppler'
+          }
+          $models = Get-ChildItem '.\dist\Regularizaciones\_internal\rapidocr' -Recurse -Filter *.onnx -ErrorAction SilentlyContinue
+          if (-not $models) { throw 'La distribución no incluye los modelos OCR' }
+          $env:REGULARIZACIONES_HOME = Join-Path $env:RUNNER_TEMP 'Despacho Álvaro prueba'
+          $exe = '.\dist\Regularizaciones\Regularizaciones.exe'
+          & $exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'No arrancó la distribución empaquetada' }
+          $database = Join-Path $env:REGULARIZACIONES_HOME 'data\gestion.db'
+          if (-not (Test-Path $database)) { throw 'No se creó la base inicial' }
+          python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table prueba_actualizacion(valor text)'); c.execute('insert into prueba_actualizacion values (?)',('conservado',)); c.commit()" "$database"
+          & $exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'No arrancó tras actualizar' }
+          python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); assert c.execute('select valor from prueba_actualizacion').fetchone()[0]=='conservado'" "$database"
+      - name: Publicar distribución sin datos del despacho
+        uses: actions/upload-artifact@v6
+        with:
+          name: Regularizaciones-Windows-onedir
+          path: dist/Regularizaciones/
+          retention-days: 14
