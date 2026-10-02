@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Collection, Iterator, Mapping
 
 from expedient_models import RegularizationCase, ReviewIssue, review_issue_from_row
+from app_paths import ApplicationPaths
 from expedient_service import get_case, link_case_to_period, set_case_status
 
 
@@ -1422,7 +1423,7 @@ def validate_case_ready(
         root = (
             Path(project_root).resolve()
             if project_root is not None
-            else Path(__file__).resolve().parents[1]
+            else ApplicationPaths.resolve().home
         )
         report = case_readiness.evaluate_case_readiness(
             connection, case_id, root
