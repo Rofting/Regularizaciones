@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,9 +19,10 @@ class PipelineBackupTest(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.database = self.root / "gestion.db"
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("CREATE TABLE marker(value TEXT)")
             connection.execute("INSERT INTO marker VALUES ('antes del lote')")
+            connection.commit()
         self.extra = self.root / "extra"
         self.extra.mkdir()
         (self.extra / "factura.pdf").write_bytes(b"documento pendiente")
@@ -54,7 +56,7 @@ class PipelineBackupTest(unittest.TestCase):
         copies = list((self.root / "backups").glob("*.db"))
         self.assertEqual(1, len(copies))
         database_backup.verify_backup(copies[0])
-        with sqlite3.connect(copies[0]) as connection:
+        with closing(sqlite3.connect(copies[0])) as connection:
             self.assertEqual(("antes del lote",), connection.execute(
                 "SELECT value FROM marker"
             ).fetchone())
