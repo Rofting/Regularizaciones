@@ -9,7 +9,7 @@ QUÉ HACE LA APLICACIÓN
 ──────────────────────
 Para cada comunidad y período, la aplicación conserva las fuentes originales,
 registra sus datos en la base de datos, detecta datos dudosos, genera el Excel
-oficial desde datos validados, calcula el reparto y prepara una carta Word por
+oficial desde datos validados, calcula el reparto y prepara una carta Word y PDF por
 propietario. Las cartas se revisan y envían manualmente: la aplicación no
 envía correos.
 
