@@ -34,6 +34,7 @@ MODULES = (
     ("rapidocr", "rapidocr"),
     ("onnxruntime", "onnxruntime"),
     ("rapidfuzz", "rapidfuzz"),
+    ("keyring", "keyring"),
 )
 FILES = (
     "core/app.py",

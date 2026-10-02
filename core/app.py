@@ -220,6 +220,7 @@ class AppGestionFincas(ctk.CTk):
             ("Gastos fijos", self._accion_gastos_fijos),
             ("Coherencia", self._accion_coherencia),
             ("Reevaluar fuentes", self._accion_reanalizar_fuentes),
+            ("Correo de cartas", self._accion_correo_cartas),
             ("Historial", self._accion_ver_historial_periodo),
             ("Abrir salidas", self._abrir_salidas),
         ):
@@ -861,6 +862,13 @@ class AppGestionFincas(ctk.CTk):
         period_id = self._periodo_enlazado()
         if period_id and MOD.get("expedient_ui"):
             MOD["expedient_ui"].open_fixed_costs_dialog(self, period_id)
+
+    def _accion_correo_cartas(self):
+        if self._procesando or not self._validar_expediente_activo():
+            return
+        ui = MOD.get("expedient_ui")
+        if ui:
+            ui.open_mail_dialog(self, self.id_expediente)
 
     def _accion_coherencia(self):
         period_id = self._periodo_enlazado()

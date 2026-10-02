@@ -17,6 +17,8 @@ import customtkinter as ctk
 
 import case_ingestion
 import case_readiness
+import mail_service
+import mail_transport
 import cases_overview
 import community_batch
 import cuotas_servicio
@@ -956,6 +958,326 @@ def open_cases_overview_dialog(app: "AppGestionFincas") -> None:
     window.protocol("WM_DELETE_WINDOW", close)
     search.trace_add("write", render)
     reload()
+
+
+_MAIL_STATUS = {
+    "pending": "Pendiente", "draft": "Borrador .eml", "sent": "Enviado",
+    "failed": "Falló", "skipped": "No incluido",
+}
+
+
+def _open_folder(path: str | Path) -> None:
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))
+    except OSError:
+        pass
+
+
+def open_mail_dialog(app: "AppGestionFincas", case_id: int) -> None:
+    """Correo de las cartas: borradores .eml y envío opcional confirmado."""
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        plan = mail_service.plan_mail(connection, case_id)
+        last_run = mail_service.latest_mail_run(connection, case_id)
+        last = mail_service.mail_run_summary(connection, last_run) if last_run else None
+        smtp = mail_transport.load_smtp_settings(connection)
+        office = office_settings.load_office_settings(connection)
+    finally:
+        connection.close()
+    if plan.letter_run_id is None:
+        messagebox.showinfo("Correo de cartas", "Genera primero las cartas de este expediente.", parent=app)
+        return
+    previous = {row.owner_id: row for row in last.deliveries} if last else {}
+
+    dialog = _dialog(app, "Correo de cartas", 920, 760)
+    dialog.resizable(True, True)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16, border_width=1, border_color=C["borde"])
+    panel.pack(fill="both", expand=True, padx=14, pady=14)
+    ctk.CTkLabel(panel, text="Correo de cartas", font=UIM.fuente(20, "bold"),
+                 text_color=C["texto"]).pack(anchor="w", padx=18, pady=(16, 0))
+    shared = len(plan.duplicates)
+    ctk.CTkLabel(
+        panel,
+        text=(f"{len(plan.candidates)} carta(s) · {len(plan.sendable)} con correo · "
+              f"{len(plan.without_email)} sin correo válido"
+              + (f" · {shared} comparten dirección" if shared else "")
+              + ". Los que no tienen correo no bloquean a los demás: imprime su carta."),
+        font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=860, justify="left",
+    ).pack(anchor="w", padx=18, pady=(2, 8))
+
+    rows = ctk.CTkScrollableFrame(panel, fg_color=C["panel_2"], corner_radius=11, height=250)
+    rows.pack(fill="both", expand=True, padx=18)
+    selection: dict[int, tk.BooleanVar] = {}
+    for item in plan.candidates:
+        row = ctk.CTkFrame(rows, fg_color=C["panel"], corner_radius=8, border_width=1, border_color=C["borde"])
+        row.pack(fill="x", padx=6, pady=3)
+        before = previous.get(item.owner_id)
+        already_sent = before is not None and before.status == "sent"
+        variable = tk.BooleanVar(master=dialog, value=item.sendable and not already_sent)
+        if item.sendable:
+            selection[item.owner_id] = variable
+        ctk.CTkCheckBox(row, text="", variable=variable, width=24, state="normal" if item.sendable else "disabled",
+                        fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="left", padx=(10, 2), pady=6)
+        ctk.CTkLabel(row, text=f"{item.dwelling} — {item.name}", width=260, anchor="w",
+                     font=UIM.fuente(11, "bold"), text_color=C["texto"]).pack(side="left")
+        address = item.email or f"{item.problem}" + (f" («{item.raw_email}»)" if item.raw_email else "")
+        if item.duplicate:
+            address += "  · dirección compartida"
+        ctk.CTkLabel(row, text=address, width=330, anchor="w", font=UIM.fuente(11),
+                     text_color=C["texto_sec"] if item.sendable and not item.duplicate else C["alerta"]).pack(side="left")
+        if before is not None:
+            label = _MAIL_STATUS.get(before.status, before.status)
+            if before.status == "sent" and before.sent_at:
+                label += f" {before.sent_at[8:10]}/{before.sent_at[5:7]} {before.sent_at[11:16]}"
+            elif before.status == "failed" and before.reason:
+                label += f": {before.reason[:40]}"
+            ctk.CTkLabel(row, text=label, anchor="e", font=UIM.fuente(10),
+                         text_color=C["exito"] if before.status == "sent" else
+                         C["alerta"] if before.status == "failed" else C["texto_sec"]).pack(side="right", padx=10)
+
+    form = ctk.CTkFrame(panel, fg_color="transparent")
+    form.pack(fill="x", padx=18, pady=(10, 0))
+    ctk.CTkLabel(form, text="Asunto", font=UIM.fuente(11, "bold"), text_color=C["texto_sec"]).pack(anchor="w")
+    subject = tk.StringVar(master=dialog, value=mail_service.DEFAULT_SUBJECT)
+    ctk.CTkEntry(form, textvariable=subject, height=34, corner_radius=8, border_color=C["borde"],
+                 fg_color=C["panel_2"], text_color=C["texto"]).pack(fill="x", pady=(2, 6))
+    ctk.CTkLabel(form, text="Mensaje", font=UIM.fuente(11, "bold"), text_color=C["texto_sec"]).pack(anchor="w")
+    body = ctk.CTkTextbox(form, height=120, corner_radius=8, border_width=1, border_color=C["borde"],
+                          fg_color=C["panel_2"], text_color=C["texto"], font=UIM.fuente(11))
+    body.pack(fill="x", pady=(2, 2))
+    body.insert("1.0", mail_service.DEFAULT_BODY)
+    ctk.CTkLabel(form, text="Campos: " + ", ".join("{" + name + "}" for name in mail_service.PLACEHOLDERS),
+                 font=UIM.fuente(10), text_color=C["texto_sec"]).pack(anchor="w")
+
+    footer = ctk.CTkFrame(panel, fg_color="transparent")
+    footer.pack(fill="x", padx=18, pady=(10, 16))
+    sender = smtp.from_address or office.email.strip()
+    smtp_ready = smtp.configured and mail_transport.has_password(smtp.username)
+
+    def excluded() -> list[int]:
+        return [owner for owner, variable in selection.items() if not variable.get()]
+
+    def chosen() -> int:
+        return sum(variable.get() for variable in selection.values())
+
+    def templates():
+        values = subject.get().strip(), body.get("1.0", "end").strip()
+        for value in values:
+            mail_service.validate_template(value)
+        return values
+
+    def run_in_background(task, done, busy_text):
+        for widget in footer.winfo_children():
+            widget.configure(state="disabled")
+        app._estado(busy_text, procesando=True)
+
+        def work():
+            connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+            try:
+                result, error = task(connection), None
+            except Exception as caught:  # se muestra; nunca deja la interfaz bloqueada
+                result, error = None, caught
+            finally:
+                connection.close()
+
+            def finish():
+                app._estado("Listo", procesando=False)
+                if dialog.winfo_exists():
+                    for widget in footer.winfo_children():
+                        widget.configure(state="normal")
+                if error is not None:
+                    messagebox.showerror("Correo de cartas", str(error), parent=dialog if dialog.winfo_exists() else app)
+                else:
+                    done(result)
+            app.after(0, finish)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def drafts():
+        try:
+            subject_text, body_text = templates()
+        except ValueError as error:
+            messagebox.showwarning("Plantilla del correo", str(error), parent=dialog)
+            return
+        if not chosen():
+            messagebox.showwarning("Correo de cartas", "No hay ningún propietario marcado.", parent=dialog)
+            return
+
+        def task(connection):
+            run_id = mail_service.prepare_mail_run(
+                connection, case_id, subject_template=subject_text, body_template=body_text,
+                excluded_owner_ids=excluded(), created_by=_actor())
+            return mail_service.generate_eml_drafts(
+                connection, run_id, Path(app.ruta_bd_expedientes).parent.parent / "salidas", sender=sender or None)
+
+        def done(summary):
+            app.log(f"Borradores de correo: {summary.count('draft')} en {summary.output_path}", "ok")
+            failed = [row for row in summary.deliveries if row.status == "failed"]
+            detail = "".join(f"\n· {row.dwelling}: {row.reason}" for row in failed[:8])
+            messagebox.showinfo(
+                "Borradores preparados",
+                f"{summary.count('draft')} borrador(es) .eml en:\n{summary.output_path}\n\n"
+                "Ábrelos con Outlook (doble clic): salen listos para revisar y pulsar «Enviar»."
+                + (f"\n\nNo preparados:{detail}" if failed else ""),
+                parent=dialog,
+            )
+            _open_folder(summary.output_path)
+            dialog.destroy()
+
+        run_in_background(task, done, "Preparando borradores de correo…")
+
+    def send(retry_run: int | None = None):
+        if not smtp_ready:
+            messagebox.showinfo("Envío por correo", "Configura antes la cuenta de envío («Configurar envío…»).", parent=dialog)
+            return
+        if retry_run is None:
+            try:
+                subject_text, body_text = templates()
+            except ValueError as error:
+                messagebox.showwarning("Plantilla del correo", str(error), parent=dialog)
+                return
+            count = chosen()
+        else:
+            count = sum(row.status in {"failed", "pending", "draft"} for row in last.deliveries)
+        if not count:
+            messagebox.showwarning("Envío por correo", "No hay correos que enviar.", parent=dialog)
+            return
+        if not messagebox.askyesno(
+            "Confirmar envío",
+            f"Se van a ENVIAR {count} correo(s) desde {sender} con la carta de cada propietario adjunta.\n\n"
+            "Lo ya enviado antes no se reenvía. ¿Enviar ahora?",
+            icon="warning", parent=dialog,
+        ):
+            return
+
+        def task(connection):
+            run_id = retry_run or mail_service.prepare_mail_run(
+                connection, case_id, subject_template=subject_text, body_template=body_text,
+                excluded_owner_ids=excluded(), created_by=_actor())
+            transport = mail_transport.SmtpTransport(smtp)
+            return mail_service.send_mail_run(connection, run_id, transport, confirmed_by=_actor(), sender=sender)
+
+        def done(summary):
+            sent, failed = summary.count("sent"), [row for row in summary.deliveries if row.status == "failed"]
+            app.log(f"Correo de cartas: {sent} enviado(s), {len(failed)} con error", "ok" if not failed else "aviso")
+            detail = "".join(f"\n· {row.dwelling} ({row.recipient}): {row.reason}" for row in failed[:10])
+            messagebox.showinfo(
+                "Envío terminado",
+                f"Enviados: {sent}. Con error: {len(failed)}." + (f"\n{detail}\n\nPuedes reintentarlos: "
+                                                                 "lo ya enviado no se repite." if failed else ""),
+                parent=dialog,
+            )
+            dialog.destroy()
+
+        run_in_background(task, done, "Enviando correos…")
+
+    ctk.CTkButton(footer, text="Cerrar", command=dialog.destroy, height=36, corner_radius=8,
+                  **UIM.secondary_button_kwargs()).pack(side="left")
+    ctk.CTkButton(footer, text="Configurar envío…", height=36, corner_radius=8,
+                  command=lambda: (dialog.destroy(), open_smtp_settings_dialog(app, case_id)),
+                  **UIM.secondary_button_kwargs()).pack(side="left", padx=8)
+    ctk.CTkButton(footer, text="Generar borradores (.eml)", command=drafts, height=36, corner_radius=8,
+                  font=UIM.fuente(12, "bold"), fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right")
+    ctk.CTkButton(footer, text="Enviar por correo…", command=send, height=36, corner_radius=8,
+                  state="normal" if smtp_ready else "disabled",
+                  **UIM.secondary_button_kwargs()).pack(side="right", padx=8)
+    if last is not None and last.status == "incomplete" and smtp_ready:
+        ctk.CTkButton(footer, text="Reintentar fallidos", command=lambda: send(last.id_mail_run), height=36,
+                      corner_radius=8, **UIM.secondary_button_kwargs()).pack(side="right")
+
+
+def _actor() -> str:
+    try:
+        import getpass
+        return getpass.getuser() or "usuario_local"
+    except Exception:
+        return "usuario_local"
+
+
+def open_smtp_settings_dialog(app: "AppGestionFincas", case_id: int | None = None) -> None:
+    """Cuenta de envío. La contraseña va al almacén de credenciales de Windows."""
+    connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+    try:
+        current = mail_transport.load_smtp_settings(connection)
+    finally:
+        connection.close()
+    dialog = _dialog(app, "Configurar envío de correo", 560, 600)
+    panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16, border_width=1, border_color=C["borde"])
+    panel.pack(fill="both", expand=True, padx=14, pady=14)
+    ctk.CTkLabel(panel, text="Cuenta de envío", font=UIM.fuente(18, "bold"),
+                 text_color=C["texto"]).pack(anchor="w", padx=18, pady=(16, 0))
+    ctk.CTkLabel(
+        panel,
+        text=("Office 365: smtp.office365.com, puerto 587, STARTTLS. Gmail: smtp.gmail.com, 587, STARTTLS "
+              "con una «contraseña de aplicación». La contraseña se guarda en el Administrador de "
+              "credenciales de Windows, nunca en el programa."),
+        font=UIM.fuente(10), text_color=C["texto_sec"], wraplength=500, justify="left",
+    ).pack(anchor="w", padx=18, pady=(2, 8))
+    variables = {
+        "host": tk.StringVar(master=dialog, value=current.host),
+        "port": tk.StringVar(master=dialog, value=str(current.port)),
+        "username": tk.StringVar(master=dialog, value=current.username),
+        "sender": tk.StringVar(master=dialog, value=current.sender),
+        "password": tk.StringVar(master=dialog),
+    }
+    security = tk.StringVar(master=dialog, value="SSL" if current.security == "ssl" else "STARTTLS")
+    for key, label, secret in (("host", "Servidor SMTP", False), ("port", "Puerto", False),
+                               ("username", "Usuario (correo de la cuenta)", False),
+                               ("sender", "Remitente visible (opcional)", False),
+                               ("password", "Contraseña (déjala vacía para conservar la guardada)", True)):
+        ctk.CTkLabel(panel, text=label, font=UIM.fuente(11, "bold"), text_color=C["texto_sec"]).pack(anchor="w", padx=18)
+        ctk.CTkEntry(panel, textvariable=variables[key], height=32, corner_radius=8, show="•" if secret else "",
+                     border_color=C["borde"], fg_color=C["panel_2"], text_color=C["texto"]).pack(fill="x", padx=18, pady=(2, 6))
+    ctk.CTkSegmentedButton(panel, values=["STARTTLS", "SSL"], variable=security).pack(anchor="w", padx=18, pady=(2, 8))
+    status = ctk.CTkLabel(panel, text="", font=UIM.fuente(10), text_color=C["texto_sec"], wraplength=500, justify="left")
+    status.pack(anchor="w", padx=18)
+
+    def collect() -> mail_transport.SmtpSettings:
+        try:
+            port = int(variables["port"].get().strip() or "0")
+        except ValueError as error:
+            raise ValueError("El puerto debe ser un número.") from error
+        settings = mail_transport.SmtpSettings(
+            host=variables["host"].get().strip(), port=port, username=variables["username"].get().strip(),
+            security="ssl" if security.get() == "SSL" else "starttls", sender=variables["sender"].get().strip())
+        settings.validate()
+        return settings
+
+    def save(test: bool = False):
+        try:
+            settings = collect()
+            password = variables["password"].get()
+            if password:
+                mail_transport.store_password(settings.username, password)
+            elif not mail_transport.has_password(settings.username):
+                raise ValueError("Escribe la contraseña de la cuenta.")
+            connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+            try:
+                mail_transport.save_smtp_settings(connection, settings)
+            finally:
+                connection.close()
+            variables["password"].set("")
+            if test:
+                with mail_transport.SmtpTransport(settings):
+                    pass
+                status.configure(text="Conexión correcta: el servidor aceptó la cuenta.", text_color=C["exito"])
+                return
+        except (ValueError, mail_transport.MailTransportError) as error:
+            status.configure(text=str(error), text_color=C["alerta"])
+            return
+        dialog.destroy()
+        if case_id is not None:
+            open_mail_dialog(app, case_id)
+
+    footer = ctk.CTkFrame(panel, fg_color="transparent")
+    footer.pack(fill="x", padx=18, pady=(10, 16), side="bottom")
+    ctk.CTkButton(footer, text="Guardar", command=save, height=34, corner_radius=8,
+                  fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right")
+    ctk.CTkButton(footer, text="Probar conexión", command=lambda: save(test=True), height=34, corner_radius=8,
+                  **UIM.secondary_button_kwargs()).pack(side="right", padx=8)
+    ctk.CTkButton(footer, text="Cancelar", command=dialog.destroy, height=34, corner_radius=8,
+                  **UIM.secondary_button_kwargs()).pack(side="left")
 
 
 def issue_guidance(field_name: str) -> dict[str, str]:
