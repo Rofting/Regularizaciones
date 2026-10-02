@@ -94,6 +94,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import gestor_bd
 import lector_pdf
 import excel_generator
+import database_backup
 
 try:
     import importar_lecturas_metrigest
@@ -477,6 +478,22 @@ def procesar_todo(codigo_comunidad: str = None,
                "log": str(log.ruta)}
 
     log(f"━━━ PROCESAR TODO — {datetime.now():%d/%m/%Y %H:%M} ━━━", "titulo")
+
+    # El flujo desatendido también modifica la base y regenera salidas. Una
+    # sola copia al inicio protege el estado anterior a todas esas acciones.
+    if rutas["bd"].is_file():
+        try:
+            backup = database_backup.backup_database(rutas["bd"], reason="before_pipeline")
+        except database_backup.DatabaseBackupError as error:
+            mensaje = f"No se pudo crear la copia de seguridad: {error}"
+            log(f"❌ {mensaje}", "error")
+            resumen["ok"] = False
+            resumen["errores"].append(mensaje)
+            log.guardar()
+            return resumen
+        log(f"Copia de seguridad verificada: {backup.backup_path.name}", "ok")
+        for warning in backup.cleanup_warnings:
+            log(warning, "aviso")
 
     # 0. Copiar archivos de una carpeta extra (histórico ya descargado)
     if carpeta_extra:
