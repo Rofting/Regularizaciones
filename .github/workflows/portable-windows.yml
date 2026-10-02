@@ -56,14 +56,14 @@ jobs:
           $models = Get-ChildItem '.\dist\Regularizaciones\_internal\rapidocr' -Recurse -Filter *.onnx -ErrorAction SilentlyContinue
           if (-not $models) { throw 'La distribución no incluye los modelos OCR' }
           $env:REGULARIZACIONES_HOME = Join-Path $env:RUNNER_TEMP 'Despacho Álvaro prueba'
-          $exe = '.\dist\Regularizaciones\Regularizaciones.exe'
-          & $exe --self-test
-          if ($LASTEXITCODE -ne 0) { throw 'No arrancó la distribución empaquetada' }
+          $exe = (Resolve-Path '.\dist\Regularizaciones\Regularizaciones.exe').Path
+          $first = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
+          if ($first.ExitCode -ne 0) { throw 'No arrancó la distribución empaquetada' }
           $database = Join-Path $env:REGULARIZACIONES_HOME 'data\gestion.db'
           if (-not (Test-Path $database)) { throw 'No se creó la base inicial' }
           python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('create table prueba_actualizacion(valor text)'); c.execute('insert into prueba_actualizacion values (?)',('conservado',)); c.commit()" "$database"
-          & $exe --self-test
-          if ($LASTEXITCODE -ne 0) { throw 'No arrancó tras actualizar' }
+          $second = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
+          if ($second.ExitCode -ne 0) { throw 'No arrancó tras actualizar' }
           python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); assert c.execute('select valor from prueba_actualizacion').fetchone()[0]=='conservado'" "$database"
       - name: Publicar distribución sin datos del despacho
         uses: actions/upload-artifact@v6
