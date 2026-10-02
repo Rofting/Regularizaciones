@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import document_review
+from app_paths import ApplicationPaths
 from concept_pricing import DerivedPricingError, derive_source_cents
 from excel_profiles import ConceptRule, ExcelProfile, calculate_profile_sha256, load_profile
 from excel_export_service import calculate_case_input_hash
@@ -569,7 +570,7 @@ def calculate_case_distribution(
 ) -> DistributionResult:
     """Calcula todos los conceptos activos de un expediente sin reparto parcial."""
     _emit(progress, "validate_export", id_case=id_case)
-    root = Path(project_root or Path(__file__).resolve().parents[1]).resolve()
+    root = Path(project_root or ApplicationPaths.resolve().home).resolve()
     with _transaction(connection):
         case, profile = _case_and_profile(connection, id_case, root)
         owners = _owners(connection, int(case["id_comunidad"]))

@@ -25,7 +25,9 @@ except ImportError:  # pragma: no cover
     _fuzz = None
 
 
-CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
+from app_paths import ApplicationPaths
+
+CONFIG_DIR = ApplicationPaths.resolve().home / "config"
 PRODUCT_FILE = "palabras_clave.json"
 OFFICE_FILE = "palabras_clave_despacho.json"
 

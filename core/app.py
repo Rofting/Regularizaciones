@@ -41,30 +41,22 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 # ---------------------------------------------------------------------------
-# CUSTOMTKINTER (instalación automática si falta)
+# CUSTOMTKINTER (incluido en la instalación)
 # ---------------------------------------------------------------------------
 try:
     import customtkinter as ctk
 except ImportError:
-    import subprocess
-    print("Instalando customtkinter (primera ejecución)…")
-    codigo = subprocess.call(
-        [sys.executable, "-m", "pip", "install", "customtkinter"])
-    if codigo == 0:
-        import customtkinter as ctk
-    else:
-        raise SystemExit(
-            "No se pudo instalar customtkinter automáticamente.\n"
-            "Ejecuta en una terminal:  pip install customtkinter"
-        )
+    raise SystemExit("Falta customtkinter en esta instalación. Reinstala el programa.")
 
+from app_paths import ApplicationPaths
 import ui_moderna as UIM
 from ui_moderna import C
 
 # ---------------------------------------------------------------------------
 # RUTAS POR DEFECTO
 # ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).parent.parent  # sube un nivel desde core/
+APP_PATHS = ApplicationPaths.resolve()
+BASE_DIR = APP_PATHS.home
 
 RUTA_BD         = BASE_DIR / "data" / "gestion.db"
 RUTA_PLANTILLA  = BASE_DIR / "plantillas" / "Plantilla_Cartas.docx"
@@ -109,6 +101,7 @@ MOD = _importar_modulos()
 # ---------------------------------------------------------------------------
 class AppGestionFincas(ctk.CTk):
     def __init__(self):
+        APP_PATHS.prepare()
         super().__init__(fg_color=C["fondo"])
         self.title("Regularización de facturas")
         self.geometry("1180x760")
@@ -2106,7 +2099,7 @@ class AppGestionFincas(ctk.CTk):
                 row=i + 2, column=1, padx=4, pady=6, sticky="w")
 
         ctk.CTkLabel(ventana,
-                     text="Todos los datos del despacho (base, fuentes y salidas) viven en esta carpeta de instalación.",
+                     text="Los datos del despacho se guardan en una carpeta escribible separada del programa.",
                      font=UIM.fuente(11),
                      text_color=C["texto_sec"]).grid(
             row=len(rutas) + 2, column=0, columnspan=2, pady=14, padx=20, sticky="w")
@@ -2124,6 +2117,16 @@ class AppGestionFincas(ctk.CTk):
 # PUNTO DE ENTRADA
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    UIM.iniciar()
-    app = AppGestionFincas()
-    app.mainloop()
+    if "--self-test" in sys.argv:
+        APP_PATHS.prepare()
+        from gestor_bd import conectar, crear_bd
+        if not RUTA_BD.exists():
+            crear_bd(str(RUTA_BD))
+        with closing(conectar(str(RUTA_BD))) as connection:
+            if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise SystemExit("La base no supera la comprobación de integridad")
+        print(f"Instalación lista: {RUTA_BD}")
+    else:
+        UIM.iniciar()
+        app = AppGestionFincas()
+        app.mainloop()

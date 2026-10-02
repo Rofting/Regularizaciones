@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypeVar
 import customtkinter as ctk
 
 import case_ingestion
+from app_paths import ApplicationPaths
 import case_readiness
 import cases_overview
 import community_batch
@@ -659,7 +660,7 @@ def open_batch_onboarding_dialog(app: "AppGestionFincas") -> None:
     )
     if not folder:
         return
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = ApplicationPaths.resolve().home
     work_directory = Path(app.ruta_bd_expedientes).parent / "importaciones"
     app._estado("Analizando el lote de comunidades…", procesando=True)
 
@@ -1672,7 +1673,7 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                     owner_list_path=owner_path,
                     reading_paths=reading_paths,
                     invoice_paths=invoice_paths,
-                    project_root=Path(__file__).resolve().parent.parent,
+                    project_root=ApplicationPaths.resolve().home,
                 )
             except Exception as exc:
                 def failed(error=exc):
@@ -1788,7 +1789,7 @@ def open_community_onboarding_dialog(app: "AppGestionFincas") -> None:
                     connection,
                     draft=draft,
                     answers=answers,
-                    project_root=Path(__file__).resolve().parent.parent,
+                    project_root=ApplicationPaths.resolve().home,
                     archive_root=Path(app.ruta_archivo_expedientes),
                     period_name=period_name,
                     start_date=start_date,
@@ -2184,7 +2185,7 @@ def open_office_settings_dialog(app: "AppGestionFincas", *, first_run: bool = Fa
         current = office_settings.suggested_settings(connection)
     finally:
         connection.close()
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = ApplicationPaths.resolve().home
 
     dialog = _dialog(app, "Datos del despacho", 640, 720)
     panel = ctk.CTkScrollableFrame(
@@ -2696,7 +2697,7 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 readiness = case_readiness.evaluate_case_readiness(
                     final_connection,
                     case_id,
-                    Path(__file__).resolve().parents[1],
+                    ApplicationPaths.resolve().home,
                 )
             finally:
                 final_connection.close()
@@ -3656,7 +3657,7 @@ def open_coherence_dialog(app: "AppGestionFincas") -> None:
     import case_workflow_actions
     from contextlib import closing
     case_id, community_id = app.id_expediente, app.id_comunidad
-    root = Path(__file__).resolve().parents[1]
+    root = ApplicationPaths.resolve().home
     try:
         with closing(gestor_bd.conectar(str(app.ruta_bd_expedientes))) as con:
             profile = case_workflow_actions.resolve_case_profile(
@@ -3794,7 +3795,7 @@ def open_fixed_costs_dialog(app: "AppGestionFincas", period_id: int) -> None:
         inherited = ()
         if getattr(app, "id_expediente", None):
             import case_workflow_actions
-            project_root = Path(__file__).resolve().parents[1]
+            project_root = ApplicationPaths.resolve().home
             try:
                 profile = case_workflow_actions.resolve_case_profile(
                     connection, id_case=app.id_expediente, active_community_id=app.id_comunidad,
@@ -3953,7 +3954,7 @@ def _catalog_provider_labels() -> dict[str, str]:
 
     try:
         registry = provider_registry.load_provider_registry(
-            Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+            ApplicationPaths.resolve().home / "config" / "proveedores.json"
         )
     except (OSError, ValueError):
         return {}
