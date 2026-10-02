@@ -11,3 +11,4 @@ pytesseract>=0.3,<1
 rapidocr>=3.9,<4
 onnxruntime>=1.20,<2
 rapidfuzz>=3.6,<4
+keyring>=25,<26

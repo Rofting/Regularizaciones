@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 19
 
 
 MIGRATION_1_SQL = (
@@ -868,6 +868,39 @@ def _migration_18(connection: sqlite3.Connection) -> None:
         connection.execute('ALTER TABLE generated_letters ADD COLUMN pdf_pages INTEGER')
 
 
+def _migration_19(connection: sqlite3.Connection) -> None:
+    """Lotes de comunicación y estado independiente de cada destinatario."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS mail_runs (
+        id_mail_run INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_case INTEGER NOT NULL REFERENCES regularization_cases(id_case),
+        id_letter_run INTEGER NOT NULL REFERENCES letter_generation_runs(id_letter_run),
+        input_sha256 TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        output_path TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('draft','partial','sent')),
+        confirmed_by TEXT,
+        confirmed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(id_letter_run,input_sha256)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS mail_deliveries (
+        id_mail_delivery INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_mail_run INTEGER NOT NULL REFERENCES mail_runs(id_mail_run) ON DELETE CASCADE,
+        id_propietario INTEGER NOT NULL REFERENCES propietarios(id_propietario),
+        recipient TEXT,
+        attachment_sha256 TEXT,
+        fingerprint TEXT,
+        message_id TEXT,
+        eml_path TEXT,
+        status TEXT NOT NULL CHECK(status IN ('draft','skipped','duplicate','sent','failed')),
+        error_message TEXT,
+        sent_at TEXT,
+        UNIQUE(id_mail_run,id_propietario)
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_mail_deliveries_fingerprint ON mail_deliveries(fingerprint,status)")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -887,6 +920,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     16: _migration_16,
     17: _migration_17,
     18: _migration_18,
+    19: _migration_19,
 }
 
 

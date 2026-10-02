@@ -28,6 +28,20 @@ aplicación registra ambos archivos y el número de páginas del PDF. Si falla l
 conversión, ese propietario figura como fallido y no se publican archivos
 parciales; revisa el error y vuelve a generar las cartas.
 
+Tras generar todas las cartas, pulsa **Preparar correos**. La aplicación crea
+un borrador EML con el PDF de cada propietario que tenga correo válido, e
+informa de direcciones ausentes o repetidas. Abre la carpeta y revisa los
+destinatarios y adjuntos. Cambiar una carta o un destinatario crea un lote
+distinto al preparar otra vez.
+
+**Enviar correos** es opcional. Requiere confirmar el lote en pantalla e
+indicar los propietarios que quieres excluir con su motivo, si los hay, e
+introducir servidor SMTP con STARTTLS, puerto, usuario y contraseña. La
+contraseña se entrega al almacén de credenciales del sistema; no se guarda en
+la base ni en los borradores. El resultado de cada propietario queda registrado.
+Al reintentar, los envíos ya completados no se repiten. Las pruebas nunca
+establecen conexiones SMTP reales.
+
 El botón lateral **Reparto** nunca salta los pasos anteriores: abre la acción
 pendiente que muestre el panel central.
 
