@@ -346,11 +346,11 @@ def guided_workspace_state(
         headline = "Genera las cartas"
         detail = "El reparto está conciliado y listo para comunicar a cada propietario."
     elif case_status in {"deliveries_generated", "closed"}:
-        active_step, next_action = "cartas", "abrir_salidas"
+        active_step, next_action = "cartas", "preparar_correo"
         headline = "Cartas generadas"
         detail = (
-            "Puedes abrir las salidas o repetir cualquier etapa: reevaluar fuentes, "
-            "Excel, reparto o cartas. Cada repetición conserva las anteriores en el historial."
+            "Prepara los borradores de correo para revisar cada destinatario y PDF "
+            "antes del envío. Puedes repetir las etapas anteriores desde el panel."
         )
     elif document_count <= 0 or case_status in {"draft", "gathering_sources", ""}:
         active_step, next_action = "fuentes", "anadir_fuentes"
@@ -411,10 +411,10 @@ _REPEATABLE_BY_STATUS = {
     "calculated": ("reevaluar_fuentes", "anadir_fuentes", "generar_excel"),
     "reconciled": ("reevaluar_fuentes", "anadir_fuentes", "generar_excel", "calcular_reparto"),
     "deliveries_generated": (
-        "reevaluar_fuentes", "anadir_fuentes", "generar_excel", "calcular_reparto", "generar_cartas",
+        "reevaluar_fuentes", "anadir_fuentes", "generar_excel", "calcular_reparto", "generar_cartas", "abrir_salidas", "enviar_correo",
     ),
     "closed": (
-        "reevaluar_fuentes", "anadir_fuentes", "generar_excel", "calcular_reparto", "generar_cartas",
+        "reevaluar_fuentes", "anadir_fuentes", "generar_excel", "calcular_reparto", "generar_cartas", "abrir_salidas", "enviar_correo",
     ),
 }
 

@@ -26,7 +26,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 
 # Si se lanza desde una consola normal de Windows (doble clic en un .bat,
 # o "python app.py" desde cmd), la consola usa cp1252 y cualquier emoji en
@@ -619,6 +619,100 @@ class AppGestionFincas(ctk.CTk):
         if selected is not None:
             self._en_hilo(lambda: self._generar_cartas_expediente_impl(selected))
 
+    def _accion_preparar_correo(self):
+        if not self._validar_expediente_activo():
+            return
+        from mail_service import prepare_mail_run, generate_eml_drafts
+
+        with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+            try:
+                result = prepare_mail_run(connection, self.id_expediente, BASE_DIR / "salidas" / "correo")
+                result = generate_eml_drafts(connection, result.id_mail_run)
+            except (ValueError, sqlite3.Error, OSError) as error:
+                messagebox.showerror("Correo de cartas", str(error), parent=self)
+                return
+        self.log(f"Borradores EML: {result.draft_count}; sin correo válido: "
+                 f"{result.skipped_count}; duplicados: {result.duplicate_count}.", "info")
+        self._ofrecer_abrir_carpeta(str(result.output_path))
+
+    def _accion_enviar_correo(self):
+        if not self._validar_expediente_activo():
+            return
+        from mail_service import exclude_mail_delivery, send_mail_run
+        from mail_transport import SmtpSettings, SmtpTransport
+
+        with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+            row = connection.execute(
+                "SELECT id_mail_run,output_path FROM mail_runs WHERE id_case=? ORDER BY id_mail_run DESC LIMIT 1",
+                (self.id_expediente,),
+            ).fetchone()
+            if row is None:
+                messagebox.showwarning("Correo de cartas", "Prepara primero los borradores EML.", parent=self)
+                return
+            mail_id, folder = row
+            candidates = connection.execute(
+                "SELECT id_propietario,recipient FROM mail_deliveries WHERE id_mail_run=? AND status='draft' ORDER BY id_propietario",
+                (mail_id,),
+            ).fetchall()
+        if not candidates:
+            messagebox.showinfo("Correo de cartas", "No quedan borradores pendientes de envío.", parent=self)
+            return
+        choices = ", ".join(f"{owner}: {email}" for owner, email in candidates)
+        excluded = simpledialog.askstring(
+            "Revisar destinatarios",
+            f"Destinatarios pendientes:\n{choices}\n\n"
+            "IDs que quieres excluir, separados por comas (vacío para incluir todos):",
+            parent=self,
+        )
+        if excluded is None:
+            return
+        if excluded.strip():
+            try:
+                selected = {int(item.strip()) for item in excluded.split(",")}
+                if not selected.issubset({owner for owner, _email in candidates}):
+                    raise ValueError("Algún propietario no pertenece a los borradores pendientes")
+                reason = simpledialog.askstring("Motivo", "Motivo de la exclusión:", parent=self)
+                if reason is None:
+                    return
+                with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+                    for owner in selected:
+                        exclude_mail_delivery(connection, mail_id, owner, reason=reason)
+            except ValueError as error:
+                messagebox.showerror("Correo de cartas", str(error), parent=self)
+                return
+        with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+            counts = connection.execute(
+                "SELECT status,COUNT(*) FROM mail_deliveries WHERE id_mail_run=? GROUP BY status", (mail_id,)
+            ).fetchall()
+        summary = ", ".join(f"{status}: {count}" for status, count in counts)
+        if not messagebox.askyesno(
+            "Confirmar envío SMTP",
+            f"Revisa los borradores en {folder}.\n\n{summary}\n\n¿Confirmas el envío de este lote?",
+            parent=self,
+        ):
+            return
+        host = simpledialog.askstring("Servidor SMTP", "Servidor SMTP:", parent=self)
+        port_text = simpledialog.askstring("Puerto SMTP", "Puerto con STARTTLS:", initialvalue="587", parent=self)
+        username = simpledialog.askstring("Usuario SMTP", "Usuario:", parent=self)
+        password = simpledialog.askstring("Contraseña SMTP", "Contraseña:", show="*", parent=self)
+        if not all((host, port_text, username, password)):
+            return
+        try:
+            port = int(port_text)
+            settings = SmtpSettings(host, port, username, username)
+            try:
+                import keyring
+                keyring.set_password("Regularizaciones SMTP", username, password)
+                transport = SmtpTransport(settings)
+            except Exception:
+                transport = SmtpTransport(settings, session_password=password)
+            with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+                sent, failed = send_mail_run(connection, mail_id, transport,
+                                             confirmed_by=username)
+            self.log(f"Correo: {sent} enviado(s), {failed} fallo(s).", "ok" if not failed else "aviso")
+        except (ValueError, sqlite3.Error, OSError, ImportError) as error:
+            messagebox.showerror("Correo de cartas", str(error), parent=self)
+
     def _accion_anadir_fuentes(self):
         expedient_ui = MOD.get("expedient_ui")
         ingestion = MOD.get("case_ingestion")
@@ -1088,6 +1182,7 @@ class AppGestionFincas(ctk.CTk):
             "calcular_reparto": ("Calcular reparto", self._accion_calcular_reparto_expediente),
             "generar_cartas": ("Generar cartas", self._accion_generar_cartas_expediente),
             "abrir_salidas": ("Abrir salidas", self._abrir_salidas),
+            "preparar_correo": ("Preparar correos", self._accion_preparar_correo),
         }
         label, command = action_map[workspace.next_action]
         self._workspace_command = command
@@ -1107,6 +1202,8 @@ class AppGestionFincas(ctk.CTk):
         "generar_excel": "Regenerar Excel",
         "calcular_reparto": "Recalcular reparto",
         "generar_cartas": "Repetir cartas",
+        "abrir_salidas": "Abrir salidas",
+        "enviar_correo": "Enviar correos",
     }
 
     def _pintar_acciones_repetibles(self, workspace):
@@ -1120,6 +1217,8 @@ class AppGestionFincas(ctk.CTk):
             "generar_excel": self._accion_generar_excel_expediente,
             "calcular_reparto": self._accion_calcular_reparto_expediente,
             "generar_cartas": self._accion_generar_cartas_expediente,
+            "abrir_salidas": self._abrir_salidas,
+            "enviar_correo": self._accion_enviar_correo,
         }
         actions = [
             key for key in getattr(workspace, "repeat_actions", ())
