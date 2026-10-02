@@ -23,6 +23,11 @@
 8. Pulsa **Generar Excel oficial**, después **Calcular reparto** y, una vez
    conciliado, **Generar cartas**.
 
+Cada propietario recibe un Word y un PDF en la misma carpeta del lote. La
+aplicación registra ambos archivos y el número de páginas del PDF. Si falla la
+conversión, ese propietario figura como fallido y no se publican archivos
+parciales; revisa el error y vuelve a generar las cartas.
+
 El botón lateral **Reparto** nunca salta los pasos anteriores: abre la acción
 pendiente que muestre el panel central.
 

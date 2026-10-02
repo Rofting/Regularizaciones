@@ -67,10 +67,19 @@ class DatabaseMigrationTest(unittest.TestCase):
             run = con.execute("INSERT INTO distribution_runs(id_case,id_periodo,input_sha256,status) VALUES (?,?,'previo','completed')", (case, period)).lastrowid
             con.execute("INSERT INTO owner_distribution_snapshots(id_distribution_run,id_propietario,concept_key,billed_cents,actual_cents,difference_cents) VALUES (?,?,'acs_variable',100,130,30)", (run, owner))
             con.commit()
-            self.assertEqual(17, db_migrations.migrate(con))
+            self.assertEqual(18, db_migrations.migrate(con))
             row = con.execute('SELECT owner_name,dwelling_code,billed_cents,actual_cents,difference_cents FROM owner_distribution_snapshots').fetchone()
             self.assertEqual((None, None, 100, 130, 30), tuple(row))
-            self.assertEqual(17, db_migrations.migrate(con))
+            self.assertEqual(18, db_migrations.migrate(con))
+
+    def test_upgrade_adds_pdf_metadata_without_changing_existing_letter(self):
+        earlier = {version: migration for version, migration in db_migrations.MIGRATIONS.items() if version < 18}
+        with patch.dict(db_migrations.MIGRATIONS, earlier, clear=True), redirect_stdout(StringIO()):
+            gestor_bd.crear_bd(str(self.database_path))
+        with closing(self._connect()) as con:
+            self.assertEqual(18, db_migrations.migrate(con))
+            columns = {row[1] for row in con.execute("PRAGMA table_info(generated_letters)")}
+            self.assertTrue({"pdf_path", "pdf_pages"}.issubset(columns))
 
     def test_crear_bd_applies_version_one_to_empty_database(self):
         with redirect_stdout(StringIO()):

@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 17
+CURRENT_SCHEMA_VERSION = 18
 
 
 MIGRATION_1_SQL = (
@@ -859,6 +859,15 @@ def _migration_17(connection: sqlite3.Connection) -> None:
             connection.execute(f'ALTER TABLE owner_distribution_snapshots ADD COLUMN {column} TEXT')
 
 
+def _migration_18(connection: sqlite3.Connection) -> None:
+    """Asocia el PDF validado a la misma carta y propietario que el Word."""
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(generated_letters)')}
+    if 'pdf_path' not in columns:
+        connection.execute('ALTER TABLE generated_letters ADD COLUMN pdf_path TEXT')
+    if 'pdf_pages' not in columns:
+        connection.execute('ALTER TABLE generated_letters ADD COLUMN pdf_pages INTEGER')
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -877,6 +886,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     15: _migration_15,
     16: _migration_16,
     17: _migration_17,
+    18: _migration_18,
 }
 
 
