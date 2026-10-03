@@ -2,6 +2,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +18,7 @@ class ApplicationPathsTest(unittest.TestCase):
             app = root / "Programa" / "Regularizaciones.exe"
             paths = ApplicationPaths.resolve({}, executable=app,
                 local_app_data=root / "Datos de Álvaro", resources=ROOT, frozen=True)
-            self.assertEqual(root / "Datos de Álvaro" / "Regularizaciones" / "data" / "gestion.db",
+            self.assertEqual((root / "Datos de Álvaro" / "Regularizaciones" / "data" / "gestion.db").resolve(),
                              paths.database)
             portable = ApplicationPaths.resolve(
                 {"REGULARIZACIONES_HOME": str(root / "Mi despacho áé")},
@@ -40,16 +41,18 @@ class ApplicationPathsTest(unittest.TestCase):
             legacy = root / "Programa anterior"
             (legacy / "data").mkdir(parents=True)
             old = legacy / "data" / "gestion.db"
-            with sqlite3.connect(old) as con:
+            with closing(sqlite3.connect(old)) as con:
                 con.execute("CREATE TABLE nota (texto TEXT)")
                 con.execute("INSERT INTO nota VALUES ('conservado')")
+                con.commit()
             paths = ApplicationPaths(ROOT, root / "Nuevo despacho", legacy / "Regularizaciones.exe")
             paths.prepare()
-            with sqlite3.connect(paths.database) as con:
+            with closing(sqlite3.connect(paths.database)) as con:
                 self.assertEqual("conservado", con.execute("SELECT texto FROM nota").fetchone()[0])
                 con.execute("INSERT INTO nota VALUES ('nuevo')")
+                con.commit()
             paths.prepare()
-            with sqlite3.connect(paths.database) as con:
+            with closing(sqlite3.connect(paths.database)) as con:
                 self.assertEqual(2, con.execute("SELECT COUNT(*) FROM nota").fetchone()[0])
 
     def test_unwritable_home_fails_before_creating_window(self):
