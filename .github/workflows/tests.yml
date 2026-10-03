@@ -26,6 +26,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Evitar bases de datos en el árbol publicado
+        shell: bash
+        run: |
+          tracked=$(git ls-files '*.db' '*.sqlite' '*.sqlite3' '*.db-wal' '*.db-shm')
+          if [ -n "$tracked" ]; then
+            echo "No se deben publicar bases de datos en Git:"
+            echo "$tracked"
+            exit 1
+          fi
+
       - name: Herramientas de documentos · Linux
         if: runner.os == 'Linux'
         run: |
