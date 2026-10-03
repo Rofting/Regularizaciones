@@ -33,16 +33,31 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libreoffice-calc libreoffice-writer poppler-utils tesseract-ocr
 
+      - name: Recuperar instalador LibreOffice · Windows
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/LibreOffice_24.2.7.2_Win_x86-64.msi
+          key: libreoffice-windows-24.2.7.2-v1
+
       - name: Herramientas de documentos · Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
           $libreOffice = "$env:ProgramFiles\LibreOffice\program\soffice.com"
-          if (-not (Test-Path $libreOffice) -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-            winget install --exact --id TheDocumentFoundation.LibreOffice --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-          }
           if (-not (Test-Path $libreOffice)) {
-            choco install libreoffice-still --yes --no-progress
+            $installer = Join-Path $env:RUNNER_TEMP 'LibreOffice_24.2.7.2_Win_x86-64.msi'
+            if (-not (Test-Path $installer)) {
+              $url = 'https://downloadarchive.documentfoundation.org/libreoffice/old/24.2.7.2/win/x86_64/LibreOffice_24.2.7.2_Win_x86-64.msi'
+              Invoke-WebRequest -Uri $url -OutFile $installer -TimeoutSec 300
+            }
+            if ((Get-Item $installer).Length -lt 100MB) { throw 'El instalador de LibreOffice está incompleto' }
+            $signature = Get-AuthenticodeSignature $installer
+            if ($signature.Status -ne 'Valid') { throw "Firma de LibreOffice no válida: $($signature.Status)" }
+            $process = Start-Process msiexec.exe -ArgumentList @('/i', "`"$installer`"", '/qn', '/norestart') -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010)) { throw "Falló la instalación de LibreOffice: $($process.ExitCode)" }
           }
           if (-not (Test-Path $libreOffice)) { throw "No se pudo instalar LibreOffice" }
           choco install poppler tesseract --yes --no-progress
