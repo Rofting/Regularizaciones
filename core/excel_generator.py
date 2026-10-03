@@ -43,7 +43,6 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 sys.path.insert(0, str(Path(__file__).parent))
-import excel_writer
 
 BASE_DIR    = Path(__file__).parent.parent
 RUTA_BD     = BASE_DIR / "data" / "gestion.db"
@@ -347,6 +346,9 @@ def regenerar_excel_comunidad(codigo: str,
         finally:
             connection.close()
         return resultado
+
+    # Sólo el regenerador histórico necesita el escritor de bloques antiguos.
+    import excel_writer
 
     # ── Datos de la comunidad y sus periodos ─────────────────────────────
     con = sqlite3.connect(ruta_bd)
