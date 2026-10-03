@@ -6,6 +6,7 @@ import os
 import shutil
 import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -119,11 +120,11 @@ class ApplicationPaths:
             return
         temporary = self.database.with_suffix(".importando")
         try:
-            with sqlite3.connect(old_database.resolve().as_uri() + "?mode=ro", uri=True) as source:
-                with sqlite3.connect(temporary) as target:
-                    source.backup(target)
-                    if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                        raise RuntimeError("La base antigua no supera la comprobación de integridad")
+            with closing(sqlite3.connect(old_database.resolve().as_uri() + "?mode=ro", uri=True)) as source, \
+                 closing(sqlite3.connect(temporary)) as target:
+                source.backup(target)
+                if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise RuntimeError("La base antigua no supera la comprobación de integridad")
             os.replace(temporary, self.database)
             for relative in LEGACY_DATA:
                 source = legacy / relative
