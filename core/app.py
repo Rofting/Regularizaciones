@@ -75,10 +75,8 @@ def _importar_modulos():
         sys.path.insert(0, str(core_dir))
 
     modulos = {}
-    for nombre in ["gestor_bd", "lector_pdf", "motor_reparto",
-                   "excel_writer", "carta_writer", "importar_lecturas_metrigest",
-                   "importar_excel_maestro", "letter_settings", "regularization_flow",
-                   "expedient_service", "document_review", "case_ingestion",
+    for nombre in ["gestor_bd", "letter_settings", "expedient_service",
+                   "document_review", "case_ingestion",
                    "expedient_ui", "case_workflow_actions", "case_readiness",
                    "database_reset", "database_backup", "office_settings"]:
         try:
