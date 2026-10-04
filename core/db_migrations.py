@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 
 
 MIGRATION_1_SQL = (
@@ -901,6 +901,19 @@ def _migration_19(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_mail_deliveries_fingerprint ON mail_deliveries(fingerprint,status)")
 
 
+def _migration_20(connection: sqlite3.Connection) -> None:
+    """Vínculo de CUPS confirmado con una sola comunidad y suministro."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS learned_supply_points (
+        cups TEXT PRIMARY KEY,
+        id_comunidad INTEGER NOT NULL REFERENCES comunidades(id_comunidad),
+        tipo_suministro TEXT NOT NULL,
+        id_document INTEGER REFERENCES source_documents(id_document) ON DELETE SET NULL,
+        id_factura INTEGER REFERENCES facturas(id_factura) ON DELETE SET NULL,
+        learned_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_learned_supply_points_community ON learned_supply_points(id_comunidad)")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -921,6 +934,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     17: _migration_17,
     18: _migration_18,
     19: _migration_19,
+    20: _migration_20,
 }
 
 
