@@ -133,6 +133,27 @@ class CommunityCupsTest(unittest.TestCase):
         self.assertEqual((), accepted)
         self.assertEqual((conflict,), foreign)
 
+    def test_reconfirming_corrected_invoice_retires_old_cups(self):
+        document_id = self.confirm("701", "corregida.pdf", self.CUPS)
+        corrected = "ES9999999999999999BB"
+        self.connection.execute("""UPDATE extraction_candidates
+            SET value=?,validation_status='candidate'
+            WHERE id_document=? AND field_name='cups'""", (corrected, document_id))
+        case_ingestion.confirm_source_candidates(
+            self.connection, self.communities["701"][1], document_id,
+            confirmed_by="Operador",
+        )
+        self.assertIsNone(lookup_supply_point(self.connection, self.CUPS))
+        self.assertEqual("701", lookup_supply_point(self.connection, corrected).community_code)
+        self.connection.execute("""UPDATE extraction_candidates
+            SET value='REFERENCIA',validation_status='candidate'
+            WHERE id_document=? AND field_name='cups'""", (document_id,))
+        case_ingestion.confirm_source_candidates(
+            self.connection, self.communities["701"][1], document_id,
+            confirmed_by="Operador",
+        )
+        self.assertIsNone(lookup_supply_point(self.connection, corrected))
+
     def test_unconfirmed_or_invalid_cups_never_teaches(self):
         self.add_invoice("701", "pendiente.pdf", self.CUPS)
         self.confirm("701", "referencia.pdf", "REFERENCIA 123")

@@ -22,6 +22,7 @@ class LearnedSupplyPoint:
     community_name: str
     supply_type: str
     source_name: str | None
+    document_id: int | None
 
 
 def normalize_cups(value: object) -> str | None:
@@ -42,7 +43,7 @@ def lookup_supply_point(connection: sqlite3.Connection, cups: str) -> LearnedSup
     if normalized is None:
         return None
     row = connection.execute("""SELECT p.cups,p.id_comunidad,c.codigo,c.nombre,
-                                      p.tipo_suministro,d.original_name
+                                      p.tipo_suministro,d.original_name,p.id_document
         FROM learned_supply_points p
         JOIN comunidades c ON c.id_comunidad=p.id_comunidad
         LEFT JOIN source_documents d ON d.id_document=p.id_document
@@ -54,7 +55,7 @@ def lookup_supply_point(connection: sqlite3.Connection, cups: str) -> LearnedSup
 
 def assert_supply_point_compatible(
     connection: sqlite3.Connection, cups: str, community_id: int, supply_type: str,
-    *, current_source: str,
+    *, current_source: str, document_id: int | None = None,
 ) -> str | None:
     """Rechaza una identidad contradictoria e incluye ambas evidencias."""
     normalized = normalize_cups(cups)
@@ -62,7 +63,10 @@ def assert_supply_point_compatible(
         return None
     existing = lookup_supply_point(connection, normalized)
     supply = supply_type.strip().upper()
-    if existing and (existing.community_id != community_id or existing.supply_type != supply):
+    if existing and (
+        existing.community_id != community_id
+        or (existing.document_id != document_id and existing.supply_type != supply)
+    ):
         current = connection.execute(
             "SELECT codigo,nombre FROM comunidades WHERE id_comunidad=?", (community_id,),
         ).fetchone()
@@ -83,13 +87,23 @@ def learn_supply_point(
     *, document_id: int, invoice_id: int, current_source: str,
 ) -> str | None:
     normalized = assert_supply_point_compatible(
-        connection, cups, community_id, supply_type, current_source=current_source,
+        connection, cups, community_id, supply_type,
+        current_source=current_source, document_id=document_id,
+    )
+    connection.execute(
+        "DELETE FROM learned_supply_points WHERE id_document=? AND cups<>?",
+        (document_id, normalized or ""),
     )
     if normalized is None:
         return None
-    connection.execute("""INSERT OR IGNORE INTO learned_supply_points
+    connection.execute("""INSERT INTO learned_supply_points
         (cups,id_comunidad,tipo_suministro,id_document,id_factura)
-        VALUES (?,?,?,?,?)""", (
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(cups) DO UPDATE SET
+            tipo_suministro=excluded.tipo_suministro,
+            id_factura=excluded.id_factura,
+            learned_at=datetime('now')
+        WHERE learned_supply_points.id_document=excluded.id_document""", (
             normalized, community_id, supply_type.strip().upper(), document_id, invoice_id,
         ))
     return normalized

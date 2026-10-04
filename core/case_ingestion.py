@@ -1091,6 +1091,7 @@ def _apply_confirmed_invoice(
     assert_supply_point_compatible(
         connection, values.get("cups_o_referencia", ""), case.community_id,
         values["tipo_suministro"], current_source=document.original_name,
+        document_id=document.id_document,
     )
     numeric_fields = (
         "consumo_total", "termino_fijo", "termino_variable", "impuestos", "iva",
