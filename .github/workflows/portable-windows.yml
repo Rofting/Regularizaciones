@@ -40,8 +40,8 @@ jobs:
       - name: Poppler para PDF escaneados
         shell: pwsh
         run: |
-          winget install --exact --id oschwartz10612.Poppler --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189 -and $LASTEXITCODE -ne -1978335135) {
+          choco install poppler --yes --no-progress
+          if ($LASTEXITCODE -ne 0) {
             throw 'No se pudo instalar Poppler para el paquete'
           }
       - name: Construir onedir
