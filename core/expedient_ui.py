@@ -488,9 +488,12 @@ def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
     app._estado("Detectando comunidades en la carpeta…", procesando=True)
 
     def work():
+        connection = None
         try:
-            proposal = community_discovery.build_global_intake(paths)
-            candidates = community_discovery.discover_communities(paths)
+            connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+            proposal = community_discovery.build_global_intake(paths, connection=connection)
+            candidates = community_discovery.discover_communities(paths, connection=connection)
+            connection.commit()  # caché de texto de los PDF examinados
         except Exception as error:
             message = str(error)
 
@@ -499,6 +502,9 @@ def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
                 messagebox.showerror("No se pudo analizar la carpeta", message, parent=app)
             app.after(0, failed)
             return
+        finally:
+            if connection is not None:
+                connection.close()
         app.after(0, lambda: _show_detected_communities(
             app, Path(folder), candidates, len(paths), proposal,
         ))
@@ -519,7 +525,7 @@ def _show_detected_communities(
     ctk.CTkLabel(
         panel,
         text=(f"Se han revisado {source_count} archivo(s) de {folder.name}. "
-              "Se han agrupado sin usar la comunidad o el período seleccionados. "
+              "Se han agrupado por código o CUPS confirmado, sin usar la comunidad o el período seleccionados. "
               "Los originales no se moverán ni se modificarán."),
         font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=720, justify="left",
     ).pack(anchor="w", padx=22, pady=(0, 14))
@@ -564,7 +570,7 @@ def _show_detected_communities(
         ctk.CTkLabel(
             body,
             text=(f"{len(proposal.unassigned_paths)} documento(s) quedan sin comunidad asignada: "
-                  "no se asociarán a la comunidad activa. Renómbralos con el código o revísalos desde la bandeja."),
+                  "no se asociarán a la comunidad activa. Revise los códigos y CUPS contradictorios."),
             font=UIM.fuente(10), text_color=C["alerta"], wraplength=680, justify="left",
         ).pack(anchor="w", padx=14, pady=(10, 14))
 
@@ -2612,9 +2618,14 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 community_code = community["codigo"]
             finally:
                 lookup.close()
-            accepted_paths, foreign_paths = community_discovery.partition_sources_for_community(
-                (Path(path) for path in paths), community_code,
-            )
+            lookup = gestor_bd.conectar(database_path)
+            try:
+                accepted_paths, foreign_paths = community_discovery.partition_sources_for_community(
+                    (Path(path) for path in paths), community_code, connection=lookup,
+                )
+                lookup.commit()
+            finally:
+                lookup.close()
             if foreign_paths:
                 app.log(
                     f"Se han apartado {len(foreign_paths)} fuente(s) que indican otra comunidad. "

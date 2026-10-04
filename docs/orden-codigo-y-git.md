@@ -18,17 +18,17 @@ exige migrar antes `pipeline.py` y su salida para todos los períodos.
 | `importar_ledger_calderas.py` | Entrada directa por consola | Conservar hasta decidir si se sustituye su función. |
 | `importar_listado_comunidades.py` | Entrada directa por consola | Conservar hasta decidir si se sustituye su función. |
 
-## Limpieza de Git pendiente
+## Limpieza de Git
 
-La rama remota `feature/global-provider-detection` apunta a un commit que ya
-figura en la historia de `main`. Se puede eliminar tras sincronizar el remoto;
-las demás ramas requieren la misma comprobación individual.
+Se comprobó cada rama remota y se eliminaron `feature/global-provider-detection`
+y otras ocho ramas obsoletas. Se conservó la única rama alternativa con cambios
+propios.
 
-La base `data/gestion.db` está ausente del árbol actual, pero aparece en
-commits antiguos. Reescribir el historial publicado cambiaría los SHA de
-`main` y obligaría a renovar los clones. Antes de esa operación hay que
-obtener una copia completa de los refs remotos, guardar un bundle y una copia
-verificada de la base fuera del repositorio, revisar todas las referencias a
-la ruta y acordar el momento de la migración. Este entorno no puede hacer
-`git fetch` por el proxy, así que aún no puede crear ese bundle completo.
-La CI impide incorporar nuevos archivos SQLite al árbol actual.
+Se guardaron un bundle verificable de todos los refs y una copia íntegra de
+`data/gestion.db` fuera del repositorio. Se reescribieron `main` y la rama
+alternativa para retirar esa ruta del historial publicado de ambas. La CI
+impide incorporar nuevos archivos SQLite al árbol actual. Los refs internos
+`refs/pull/1/head` a `refs/pull/5/head` conservan commits antiguos: GitHub
+Support debe purgarlos, junto con las vistas cacheadas y objetos afectados.
+Los clones locales con ramas propias requieren una renovación cuidadosa tras
+guardar su trabajo.

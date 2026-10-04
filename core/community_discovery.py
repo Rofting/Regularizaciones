@@ -8,12 +8,15 @@ assigning a supplier invoice to the wrong community.
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 from lector_pdf import extraer_cif_pdf, extraer_texto
+from community_cups import LearnedSupplyPoint, cups_in_text, lookup_supply_point
+from document_text_service import get_document_text
 
 
 _CODE_AT_START = re.compile(r"^\s*(\d{3,6})(?=[_\s-]|$)")
@@ -127,34 +130,60 @@ def filename_evidence(path: Path) -> FilenameEvidence:
     )
 
 
-def build_global_intake(paths: Iterable[Path]) -> GlobalIntakeProposal:
+def _identity_for_source(
+    path: Path, connection: sqlite3.Connection | None,
+) -> tuple[str | None, LearnedSupplyPoint | None]:
+    code = code_from_path(path)
+    learned = None
+    has_learned_cups = connection is not None and connection.execute(
+        "SELECT 1 FROM learned_supply_points LIMIT 1"
+    ).fetchone() is not None
+    if has_learned_cups and path.suffix.lower() == ".pdf" and path.is_file():
+        text = get_document_text(connection, path).text
+        values = cups_in_text(text)
+        points = [lookup_supply_point(connection, cups) for cups in values]
+        known_communities = {point.community_code for point in points if point}
+        if known_communities and (
+            len(known_communities) != 1 or any(point is None for point in points)
+        ):
+            return None, next(point for point in points if point)
+        learned = points[0] if points else None
+    if learned and code and code != learned.community_code:
+        return None, learned
+    return code or (learned.community_code if learned else None), learned
+
+
+def build_global_intake(
+    paths: Iterable[Path], *, connection: sqlite3.Connection | None = None,
+) -> GlobalIntakeProposal:
     """Agrupa fuentes mixtas por código sin usar la comunidad activa.
 
-    Esta primera fase no abre PDFs ni escribe en SQLite, por lo que responde
-    rápido incluso con carpetas grandes. Los meses del nombre se muestran como
-    ayuda visual, nunca se transforman por sí solos en las fechas oficiales de
-    un expediente.
+    Con una conexión, un CUPS ya confirmado también puede identificar PDFs sin
+    código. Una contradicción entre CUPS y nombre queda sin asignar. Los meses
+    del nombre son sólo indicios, no fechas oficiales de un expediente.
     """
-    grouped: dict[str, list[tuple[Path, FilenameEvidence]]] = defaultdict(list)
+    grouped: dict[str, list[tuple[Path, FilenameEvidence, LearnedSupplyPoint | None]]] = defaultdict(list)
     unassigned: list[Path] = []
     for raw_path in paths:
         path = Path(raw_path)
         evidence = filename_evidence(path)
-        if evidence.community_code is None or evidence.category == "unassigned":
+        code, learned = _identity_for_source(path, connection)
+        if code is None or evidence.category == "unassigned":
             unassigned.append(path)
             continue
-        grouped[evidence.community_code].append((path, evidence))
+        grouped[code].append((path, evidence, learned))
 
     groups: list[GlobalIntakeGroup] = []
     for code in sorted(grouped, key=lambda value: (len(value), value)):
         entries = sorted(grouped[code], key=lambda item: item[0].name.casefold())
-        periods = sorted({(item.month, item.year) for _path, item in entries
+        periods = sorted({(item.month, item.year) for _path, item, _learned in entries
                           if item.month is not None and item.year is not None}, key=lambda value: (value[1], value[0]))
-        supplies = sorted({item.supply_hint for _path, item in entries if item.supply_hint})
-        categories = sorted({item.category for _path, item in entries})
+        supplies = sorted({hint for _path, item, learned in entries
+                           if (hint := item.supply_hint or (learned.supply_type if learned else None))})
+        categories = sorted({item.category for _path, item, _learned in entries})
         groups.append(GlobalIntakeGroup(
             community_code=code,
-            source_paths=tuple(path for path, _item in entries),
+            source_paths=tuple(path for path, _item, _learned in entries),
             period_hints=tuple(periods), supply_hints=tuple(supplies),
             categories=tuple(categories),
         ))
@@ -173,23 +202,33 @@ def _category_from_path(path: Path) -> str:
     return "habitual"
 
 
-def discover_communities(paths: Iterable[Path]) -> tuple[DetectedCommunity, ...]:
-    """Group files that contain an explicit community code.
+def discover_communities(
+    paths: Iterable[Path], *, connection: sqlite3.Connection | None = None,
+) -> tuple[DetectedCommunity, ...]:
+    """Agrupa archivos con código explícito o CUPS previamente confirmado.
 
-    The caller decides whether to create the candidates.  No database or file
-    is modified here, so the user always sees the proposed communities first.
+    El llamador decide si crear las comunidades propuestas. Los originales
+    nunca se modifican; con conexión se guarda la caché de texto del PDF.
     """
     grouped: dict[str, list[Path]] = defaultdict(list)
     for source_path in paths:
         path = Path(source_path)
         if path.is_file() and path.suffix.lower() in _SUPPORTED:
-            code = code_from_path(path)
+            code, _learned = _identity_for_source(path, connection)
             if code:
                 grouped[code].append(path)
 
     candidates: list[DetectedCommunity] = []
     for code in sorted(grouped, key=lambda value: (len(value), value)):
         files = tuple(sorted(grouped[code], key=lambda item: item.name.casefold()))
+        existing = connection.execute(
+            "SELECT nombre,cif FROM comunidades WHERE codigo=?", (code,),
+        ).fetchone() if connection is not None else None
+        if existing is not None:
+            candidates.append(DetectedCommunity(
+                code=code, name=existing[0], cif=existing[1], source_paths=files,
+            ))
+            continue
         names: list[str] = []
         cifs: list[str] = []
         for path in files:
@@ -245,18 +284,21 @@ def code_from_path(path: Path) -> str | None:
 
 def partition_sources_for_community(
     paths: Iterable[Path], community_code: str,
+    *, connection: sqlite3.Connection | None = None,
 ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
-    """Separate compatible sources from files explicitly naming another community.
+    """Aparta fuentes que indican otra comunidad por código o CUPS confirmado.
 
-    Sources without a code remain reviewable in the selected case.  Only an
-    unambiguous code in the path is enough to reject a cross-community file.
+    Las fuentes sin señal siguen revisables en el expediente seleccionado.
     """
     accepted: list[Path] = []
     foreign: list[Path] = []
     expected = str(community_code).strip()
     for raw_path in paths:
         path = Path(raw_path)
-        detected = code_from_path(path)
+        detected, learned = _identity_for_source(path, connection)
+        if learned and detected is None:
+            foreign.append(path)
+            continue
         (foreign if detected and detected != expected else accepted).append(path)
     return tuple(accepted), tuple(foreign)
 
