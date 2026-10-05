@@ -19,7 +19,7 @@ from typing import Callable, Mapping
 # v2 invalidated early cached failures created before the bundled OCR path was
 # available. A document is re-read once and subsequent reanalyses reuse the
 # successful text instead of falling back to the slow legacy reader forever.
-TEXT_EXTRACTOR_VERSION = "document-text-v3"
+TEXT_EXTRACTOR_VERSION = "document-text-v4"  # v4: preparación de escaneos
 _TEXT_PDF_MAX_PAGES = 6
 
 
@@ -186,6 +186,8 @@ def _default_extract(path: Path, max_pages: int) -> TextExtraction:
         "ocr_status": ocr.status,
         "ocr_detail": ocr.detail,
     }
+    if getattr(ocr, "preprocessing", ()):
+        diagnostics["ocr_preprocessing"] = list(ocr.preprocessing)
     if text_error:
         diagnostics["pdf_text_error"] = text_error
     method = ocr.status if ocr.text.strip() else ("pdf_text" if text.strip() else "no_text")

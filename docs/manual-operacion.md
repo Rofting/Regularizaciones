@@ -100,6 +100,15 @@ problema fue la imagen, el motor local o el lector PDF. Abre el original y
 clasifícalo o introduce el campo solicitado; no es necesario seguir enlaces de
 instalación desde la incidencia.
 
+Si la portada escaneada está torcida, tenue o con puntos de polvo, se prepara
+una copia de la imagen (enderezado de hasta ±5°, reducción de ruido y
+contraste) y se lee también. La aplicación se queda con la lectura que trae más
+fechas, importes y CIF, así que una página que ya se leía bien no empeora. El
+original nunca se modifica y el tratamiento aplicado queda en el diagnóstico de
+la fuente. Para comprobarlo con documentos reales:
+`python scripts/comparar_ocr.py CARPETA` muestra, por archivo, los problemas
+detectados y los datos leídos con y sin preparación, sin tocar nada.
+
 El texto se guarda en una caché local por huella SHA-256 y versión del lector.
 Al reanalizar una fuente idéntica no se vuelve a ejecutar OCR. Todo el proceso
 es local: el PDF y su texto no se envían a servicios externos.

@@ -541,6 +541,7 @@ class OCRResult:
     status: str
     detail: str
     language: str | None = None
+    preprocessing: tuple[str, ...] = ()   # pasos aplicados a la imagen (mejora 2)
 
 
 def _tesseract_executable() -> str | None:
@@ -671,13 +672,22 @@ def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
         except Exception as exc:
             cover_render_error = exc
 
-    rapidocr_text = "" if cover_render_error else _rapidocr_text(
-        ruta_archivo, cover_images[0] if cover_images else None,
-    )
+    choice = None
+    if cover_render_error:
+        rapidocr_text = ""
+    elif cover_images:
+        # Se compara el original con la imagen enderezada/limpiada y se usa la
+        # que da más fechas, importes y CIF: una portada legible no empeora.
+        from scan_preprocessing import best_ocr
+        choice = best_ocr(cover_images[0], lambda image: _rapidocr_text(ruta_archivo, image))
+        rapidocr_text = choice.text
+    else:
+        rapidocr_text = _rapidocr_text(ruta_archivo, None)
     if rapidocr_text.strip():
         return OCRResult(
             text=_normalizar_decimales_ocr(rapidocr_text), status="rapidocr",
-            detail="OCR integrado aplicado a la portada.",
+            detail="OCR integrado aplicado a la portada." + (f" {choice.summary}" if choice else ""),
+            preprocessing=choice.steps if choice else (),
         )
 
     try:
@@ -726,14 +736,18 @@ def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
             imagenes = convert_from_path(
                 ruta_archivo, dpi=200, poppler_path=_poppler_path(), first_page=1, last_page=1,
             )
+        from scan_preprocessing import best_ocr
         partes = []
+        pasos: tuple[str, ...] = ()
         for img in imagenes:
             # Los recibos municipales y de suministros suelen tener varias
             # cajas de importes. PSM 6 conserva etiqueta y cifra en la misma
             # línea, a diferencia del modo automático que separa columnas.
             ocr_config = "--psm 6"
-            texto = pytesseract.image_to_string(img, lang=language, config=ocr_config)
-            partes.append(texto)
+            elegido = best_ocr(img, lambda image: pytesseract.image_to_string(
+                image, lang=language, config=ocr_config))
+            partes.append(elegido.text)
+            pasos = pasos or elegido.steps
     except Exception as exc:
         return OCRResult(
             text="", status="render_or_ocr_failed",
@@ -746,7 +760,10 @@ def extraer_texto_ocr_con_diagnostico(ruta_archivo: str) -> OCRResult:
             text="", status="no_text",
             detail="El OCR no obtuvo texto legible de la primera página.", language=language,
         )
-    return OCRResult(text=text, status="ok", detail="OCR aplicado a la portada.", language=language)
+    return OCRResult(
+        text=text, status="ok", language=language, preprocessing=pasos,
+        detail="OCR aplicado a la portada." + (f" Imagen preparada: {', '.join(pasos)}." if pasos else ""),
+    )
 
 
 def extraer_texto_ocr(ruta_archivo: str) -> str:
@@ -777,7 +794,8 @@ def extraer_texto_paginas_ocr(
         )
     except Exception:
         return ""
-    parts = [_rapidocr_text(ruta_archivo, image) for image in images]
+    from scan_preprocessing import best_ocr
+    parts = [best_ocr(image, lambda page: _rapidocr_text(ruta_archivo, page)).text for image in images]
     return _normalizar_decimales_ocr("\n".join(part for part in parts if part.strip()))
 
 
