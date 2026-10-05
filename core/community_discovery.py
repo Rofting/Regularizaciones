@@ -89,6 +89,13 @@ class GlobalIntakeGroup:
     period_hints: tuple[tuple[int, int], ...]
     supply_hints: tuple[str, ...]
     categories: tuple[str, ...]
+    # Por qué cada archivo es de esta comunidad (nombre, CIF, CUPS, archivo ya visto).
+    evidence: tuple[tuple[Path, tuple[str, ...]], ...] = ()
+
+    @property
+    def evidence_summary(self) -> str:
+        counts = Counter(label.split(":", 1)[0] for _path, labels in self.evidence for label in labels)
+        return " · ".join(f"{count} por {kind}" for kind, count in counts.most_common())
 
     @property
     def display_periods(self) -> str:
@@ -103,6 +110,11 @@ class GlobalIntakeProposal:
 
     groups: tuple[GlobalIntakeGroup, ...]
     unassigned_paths: tuple[Path, ...]
+    unassigned_reasons: tuple[tuple[Path, str], ...] = ()
+
+    def reason_for(self, path: Path) -> str:
+        return next((reason for item, reason in self.unassigned_reasons if item == path),
+                    "Sin evidencia de comunidad")
 
 
 def filename_evidence(path: Path) -> FilenameEvidence:
@@ -130,27 +142,112 @@ def filename_evidence(path: Path) -> FilenameEvidence:
     )
 
 
+@dataclass(frozen=True)
+class SourceIdentity:
+    """Comunidad de un archivo y las evidencias que la sostienen."""
+
+    code: str | None
+    evidence: tuple[str, ...]
+    reason: str | None = None          # por qué no se asigna, si no se asigna
+    learned: LearnedSupplyPoint | None = None
+    points_elsewhere: bool = False     # alguna evidencia señala otra comunidad
+
+
+def _sha256(path: Path) -> str | None:
+    import hashlib
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _known_community_cifs(connection: sqlite3.Connection) -> dict[str, str]:
+    cifs = {}
+    for code, cif in connection.execute(
+        "SELECT codigo, cif FROM comunidades WHERE activa=1 AND cif IS NOT NULL AND trim(cif)<>''"
+    ):
+        normalized = re.sub(r"[^A-Z0-9]", "", str(cif).upper())
+        if normalized:
+            cifs[normalized] = str(code)
+    return cifs
+
+
+def identify_source(path: Path, connection: sqlite3.Connection | None = None) -> SourceIdentity:
+    """Reúne evidencias de comunidad y sólo asigna si todas coinciden.
+
+    Evidencias: código en el nombre o la carpeta, el mismo archivo ya archivado
+    en un expediente, CUPS confirmado y CIF de comunidad en el texto (de la
+    caché de texto). Contradicción o ausencia de evidencias: sin asignar.
+    """
+    path = Path(path)
+    votes: dict[str, list[str]] = defaultdict(list)
+    learned = None
+    code = code_from_path(path)
+    if code:
+        votes[code].append(f"nombre: «{path.name}» indica {code}")
+    if connection is None or not path.is_file():
+        return _decide(votes, None, None)
+
+    digest = _sha256(path)
+    if digest:
+        for row in connection.execute(
+            """SELECT DISTINCT c.codigo, r.nombre FROM source_documents d
+               JOIN regularization_cases r ON r.id_case=d.id_case
+               JOIN comunidades c ON c.id_comunidad=r.id_comunidad
+               WHERE d.sha256=?""", (digest,),
+        ):
+            votes[str(row[0])].append(f"archivo ya archivado: expediente «{row[1]}» de {row[0]}")
+
+    cifs = _known_community_cifs(connection)
+    has_learned_cups = connection.execute("SELECT 1 FROM learned_supply_points LIMIT 1").fetchone() is not None
+    conflict = None
+    if (cifs or has_learned_cups) and path.suffix.lower() == ".pdf":
+        text = get_document_text(connection, path).text
+        if has_learned_cups:
+            values = cups_in_text(text)
+            points = [lookup_supply_point(connection, cups) for cups in values]
+            known = [point for point in points if point]
+            if known and any(point is None for point in points):
+                unknown = next(cups for cups, point in zip(values, points) if point is None)
+                conflict = (f"contiene el CUPS {unknown}, sin confirmar, junto a otro de "
+                            f"{known[0].community_code}")
+                learned = known[0]
+            for point in known:
+                learned = learned or point
+                votes[point.community_code].append(
+                    f"CUPS: {point.cups} ({point.supply_type}) confirmado para {point.community_code}")
+        if cifs:
+            from provider_registry import find_tax_ids
+            for tax_id in dict.fromkeys(find_tax_ids(text)):
+                if tax_id in cifs:
+                    votes[cifs[tax_id]].append(f"CIF: {tax_id} de la comunidad {cifs[tax_id]}")
+    return _decide(votes, conflict, learned)
+
+
+def _decide(votes, conflict: str | None, learned) -> SourceIdentity:
+    evidence = tuple(label for labels in votes.values() for label in labels)
+    if conflict:
+        return SourceIdentity(None, evidence, "Evidencia insuficiente: " + conflict, learned, True)
+    if len(votes) > 1:
+        detail = "; ".join(f"{code} por {', '.join(label.split(':', 1)[0] for label in labels)}"
+                           for code, labels in votes.items())
+        return SourceIdentity(None, evidence, "Evidencias contradictorias: " + detail, learned, True)
+    if not votes:
+        return SourceIdentity(None, (), "Sin código en el nombre, CIF de comunidad ni CUPS confirmado", learned)
+    code = next(iter(votes))
+    return SourceIdentity(code, evidence, None, learned)
+
+
 def _identity_for_source(
     path: Path, connection: sqlite3.Connection | None,
 ) -> tuple[str | None, LearnedSupplyPoint | None]:
-    code = code_from_path(path)
-    learned = None
-    has_learned_cups = connection is not None and connection.execute(
-        "SELECT 1 FROM learned_supply_points LIMIT 1"
-    ).fetchone() is not None
-    if has_learned_cups and path.suffix.lower() == ".pdf" and path.is_file():
-        text = get_document_text(connection, path).text
-        values = cups_in_text(text)
-        points = [lookup_supply_point(connection, cups) for cups in values]
-        known_communities = {point.community_code for point in points if point}
-        if known_communities and (
-            len(known_communities) != 1 or any(point is None for point in points)
-        ):
-            return None, next(point for point in points if point)
-        learned = points[0] if points else None
-    if learned and code and code != learned.community_code:
-        return None, learned
-    return code or (learned.community_code if learned else None), learned
+    """Compatibilidad: (código, CUPS aprendido) de ``identify_source``."""
+    identity = identify_source(path, connection)
+    return identity.code, identity.learned
 
 
 def build_global_intake(
@@ -163,15 +260,23 @@ def build_global_intake(
     del nombre son sólo indicios, no fechas oficiales de un expediente.
     """
     grouped: dict[str, list[tuple[Path, FilenameEvidence, LearnedSupplyPoint | None]]] = defaultdict(list)
+    proofs: dict[Path, tuple[str, ...]] = {}
     unassigned: list[Path] = []
+    reasons: list[tuple[Path, str]] = []
     for raw_path in paths:
         path = Path(raw_path)
         evidence = filename_evidence(path)
-        code, learned = _identity_for_source(path, connection)
-        if code is None or evidence.category == "unassigned":
+        identity = identify_source(path, connection)
+        if evidence.category == "unassigned":
             unassigned.append(path)
+            reasons.append((path, "Está en una carpeta «sin comunidad»"))
             continue
-        grouped[code].append((path, evidence, learned))
+        if identity.code is None:
+            unassigned.append(path)
+            reasons.append((path, identity.reason or "Sin evidencia de comunidad"))
+            continue
+        proofs[path] = identity.evidence
+        grouped[identity.code].append((path, evidence, identity.learned))
 
     groups: list[GlobalIntakeGroup] = []
     for code in sorted(grouped, key=lambda value: (len(value), value)):
@@ -186,10 +291,13 @@ def build_global_intake(
             source_paths=tuple(path for path, _item, _learned in entries),
             period_hints=tuple(periods), supply_hints=tuple(supplies),
             categories=tuple(categories),
+            evidence=tuple((path, proofs[path]) for path, _item, _learned in entries),
         ))
+    ordered = tuple(sorted(unassigned, key=lambda path: path.name.casefold()))
     return GlobalIntakeProposal(
         groups=tuple(groups),
-        unassigned_paths=tuple(sorted(unassigned, key=lambda path: path.name.casefold())),
+        unassigned_paths=ordered,
+        unassigned_reasons=tuple(sorted(reasons, key=lambda item: item[0].name.casefold())),
     )
 
 
@@ -286,7 +394,7 @@ def partition_sources_for_community(
     paths: Iterable[Path], community_code: str,
     *, connection: sqlite3.Connection | None = None,
 ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
-    """Aparta fuentes que indican otra comunidad por código o CUPS confirmado.
+    """Aparta fuentes que indican otra comunidad (código, CIF, CUPS o archivo ya visto).
 
     Las fuentes sin señal siguen revisables en el expediente seleccionado.
     """
@@ -295,11 +403,11 @@ def partition_sources_for_community(
     expected = str(community_code).strip()
     for raw_path in paths:
         path = Path(raw_path)
-        detected, learned = _identity_for_source(path, connection)
-        if learned and detected is None:
-            foreign.append(path)
+        identity = identify_source(path, connection)
+        if identity.code is None and identity.points_elsewhere:
+            foreign.append(path)  # evidencias contradictorias: mejor apartarla
             continue
-        (foreign if detected and detected != expected else accepted).append(path)
+        (foreign if identity.code and identity.code != expected else accepted).append(path)
     return tuple(accepted), tuple(foreign)
 
 

@@ -24,6 +24,7 @@ import cuotas_servicio
 import community_discovery
 import community_folder
 import community_onboarding
+import intake_routing
 import document_review
 import expedient_service
 import fixed_costs
@@ -494,6 +495,10 @@ def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
             proposal = community_discovery.build_global_intake(paths, connection=connection)
             candidates = community_discovery.discover_communities(paths, connection=connection)
             connection.commit()  # caché de texto de los PDF examinados
+            routes = {target.code: target for target in intake_routing.plan_routes(
+                connection, intake_routing.assignments_from_proposal(proposal))}
+            communities = [(str(row[0]), str(row[1] or "")) for row in connection.execute(
+                "SELECT codigo, nombre FROM comunidades WHERE activa=1 ORDER BY codigo")]
         except Exception as error:
             message = str(error)
 
@@ -506,7 +511,7 @@ def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
             if connection is not None:
                 connection.close()
         app.after(0, lambda: _show_detected_communities(
-            app, Path(folder), candidates, len(paths), proposal,
+            app, Path(folder), candidates, len(paths), proposal, routes, communities,
         ))
 
     app._en_hilo(work)
@@ -514,9 +519,12 @@ def open_detect_communities_dialog(app: "AppGestionFincas") -> None:
 
 def _show_detected_communities(
     app: "AppGestionFincas", folder: Path, candidates, source_count: int, proposal,
+    routes=None, communities=(),
 ) -> None:
     app._estado("Detección de comunidades lista", procesando=False)
-    dialog = _dialog(app, "Comunidades detectadas", 800, 620)
+    routes = routes or {}
+    dialog = _dialog(app, "Comunidades detectadas", 880, 700)
+    dialog.resizable(True, True)
     panel = ctk.CTkFrame(dialog, fg_color=C["panel"], corner_radius=16,
                          border_width=1, border_color=C["borde"])
     panel.pack(fill="both", expand=True, padx=18, pady=18)
@@ -525,7 +533,8 @@ def _show_detected_communities(
     ctk.CTkLabel(
         panel,
         text=(f"Se han revisado {source_count} archivo(s) de {folder.name}. "
-              "Se han agrupado por código o CUPS confirmado, sin usar la comunidad o el período seleccionados. "
+              "Se han agrupado por código en el nombre, CIF de la comunidad, CUPS confirmado o archivo ya "
+              "archivado, sin usar la comunidad o el período seleccionados. "
               "Los originales no se moverán ni se modificarán."),
         font=UIM.fuente(11), text_color=C["texto_sec"], wraplength=720, justify="left",
     ).pack(anchor="w", padx=22, pady=(0, 14))
@@ -555,24 +564,44 @@ def _show_detected_communities(
             services = ", ".join(group.supply_hints) or "tipo por revisar"
             group_detail = (
                 f"{len(group.source_paths)} documento(s) · {group.display_periods} · "
-                f"{services}"
+                f"{services}" + (f" · {group.evidence_summary}" if group.evidence_summary else "")
             )
+        route = routes.get(candidate.code)
+        destination = ""
+        if route is not None:
+            destination = "\n→ " + (route.case_label or route.blocked_reason)
         ctk.CTkLabel(
             details,
             text=(candidate.blocked_reason or
-                  f"{group_detail or f'{len(candidate.source_paths)} documento(s)'} · {cif_text}"),
+                  f"{group_detail or f'{len(candidate.source_paths)} documento(s)'} · {cif_text}{destination}"),
             font=UIM.fuente(10),
             text_color=C["alerta"] if candidate.blocked_reason else C["texto_sec"],
             wraplength=560, justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
+    manual: dict[Path, tk.StringVar] = {}
     if proposal.unassigned_paths:
         ctk.CTkLabel(
             body,
-            text=(f"{len(proposal.unassigned_paths)} documento(s) quedan sin comunidad asignada: "
-                  "no se asociarán a la comunidad activa. Revise los códigos y CUPS contradictorios."),
-            font=UIM.fuente(10), text_color=C["alerta"], wraplength=680, justify="left",
-        ).pack(anchor="w", padx=14, pady=(10, 14))
+            text=(f"{len(proposal.unassigned_paths)} documento(s) sin comunidad: elige la comunidad de "
+                  "cada uno si la conoces; si no, se quedan fuera del reparto."),
+            font=UIM.fuente(11, "bold"), text_color=C["alerta"], wraplength=760, justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 4))
+        unassigned_label = "— Sin asignar —"
+        options = [unassigned_label] + [f"{code} — {name}" for code, name in communities]
+        for path in proposal.unassigned_paths:
+            row = ctk.CTkFrame(body, fg_color=C["panel"], corner_radius=8, border_width=1, border_color=C["borde"])
+            row.pack(fill="x", padx=8, pady=3)
+            text = ctk.CTkFrame(row, fg_color="transparent")
+            text.pack(side="left", fill="x", expand=True, padx=12, pady=6)
+            ctk.CTkLabel(text, text=path.name, font=UIM.fuente(11, "bold"), text_color=C["texto"],
+                         anchor="w").pack(anchor="w")
+            ctk.CTkLabel(text, text=proposal.reason_for(path), font=UIM.fuente(10), text_color=C["texto_sec"],
+                         wraplength=520, justify="left", anchor="w").pack(anchor="w")
+            variable = tk.StringVar(master=dialog, value=unassigned_label)
+            manual[path] = variable
+            ctk.CTkComboBox(row, values=options, variable=variable, width=240, state="readonly",
+                            border_color=C["borde"]).pack(side="right", padx=10)
 
     if not candidates:
         ctk.CTkLabel(
@@ -639,9 +668,75 @@ def _show_detected_communities(
 
         app._en_hilo(create_work)
 
-    ctk.CTkButton(footer, text="Crear comunidades seleccionadas", command=create_selected,
+    def distribute():
+        chosen = {path: variable.get().split(" — ", 1)[0] for path, variable in manual.items()
+                  if " — " in variable.get()}
+        assignments = intake_routing.assignments_from_proposal(proposal, chosen)
+        connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+        try:
+            targets = intake_routing.plan_routes(connection, assignments)
+        finally:
+            connection.close()
+        ready = [target for target in targets if not target.blocked_reason]
+        if not ready:
+            messagebox.showwarning(
+                "Repartir en expedientes",
+                "Ningún grupo tiene un expediente abierto de su comunidad. Crea las comunidades y su "
+                "expediente y vuelve a usar la bandeja.", parent=dialog)
+            return
+        lines = [f"• {t.code} → {t.case_label}: {len(t.paths)} archivo(s)" for t in ready]
+        lines += [f"• {t.code}: {t.blocked_reason} ({len(t.paths)} archivo(s) no se repartirán)"
+                  for t in targets if t.blocked_reason]
+        if not messagebox.askyesno(
+            "Repartir en expedientes",
+            "Se añadirán como fuentes de cada expediente (los originales no se mueven):\n\n"
+            + "\n".join(lines) + "\n\n¿Continuar?", parent=dialog):
+            return
+        for widget in footer.winfo_children():
+            widget.configure(state="disabled")
+        database_path = app.ruta_bd_expedientes
+        archive_root = Path(app.ruta_archivo_expedientes)
+
+        def route_work():
+            results = []
+            for target in ready:
+                results.append(intake_routing.ingest_route(
+                    database_path, target, archive_root=archive_root,
+                    progress=lambda text: app.after(0, lambda: app._estado(f"Repartiendo {text}", procesando=True)),
+                ))
+
+            def completed():
+                app._estado("Reparto terminado", procesando=False)
+                summary = []
+                for result in results:
+                    line = (f"{result.target.code} ({result.target.case_label}): {result.created} nueva(s), "
+                            f"{result.duplicates} ya estaban")
+                    if result.foreign:
+                        line += f", {len(result.foreign)} apartada(s) por indicar otra comunidad"
+                    if result.errors:
+                        line += f", {len(result.errors)} con error"
+                    summary.append(line)
+                    app.log(line, "ok" if not result.errors else "aviso")
+                errors = [f"{name}: {error}" for result in results for name, error in result.errors][:8]
+                dialog.destroy()
+                app._refrescar_despues_de_accion(getattr(app, "id_expediente", None))
+                messagebox.showinfo(
+                    "Reparto terminado",
+                    "\n".join(summary) + ("\n\nErrores:\n" + "\n".join(errors) if errors else "")
+                    + "\n\nRevisa las incidencias de cada expediente desde «Todas las comunidades».",
+                    parent=app)
+            app.after(0, completed)
+
+        app._en_hilo(route_work)
+
+    any_route = any(not target.blocked_reason for target in routes.values()) or bool(manual)
+    ctk.CTkButton(footer, text="Repartir en expedientes", command=distribute,
+                  state="normal" if any_route else "disabled",
                   height=38, corner_radius=9, font=UIM.fuente(11, "bold"),
                   fg_color=C["primario"], hover_color=C["primario_hover"]).pack(side="right")
+    ctk.CTkButton(footer, text="Crear comunidades seleccionadas", command=create_selected,
+                  height=38, corner_radius=9, font=UIM.fuente(11),
+                  **UIM.secondary_button_kwargs()).pack(side="right", padx=(0, 8))
     ctk.CTkButton(footer, text="Cancelar", command=dialog.destroy, height=38,
                   corner_radius=9, font=UIM.fuente(11), fg_color="transparent",
                   border_width=1, border_color=C["borde"], text_color=C["primario"],

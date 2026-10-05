@@ -71,15 +71,26 @@ un botón oculto: usa la acción principal que aparece en el centro.
 
 1. Pulsa **Bandeja global** sin seleccionar comunidad ni período.
 2. Elige la carpeta que contiene las facturas, lecturas o listados.
-3. La aplicación agrupa por el código al comienzo del nombre, por ejemplo
-   `658 - Factura feb 2026.pdf`. También muestra el mes/año y el tipo orientativo
-   detectados en el nombre.
-4. Las comunidades nuevas aparecen marcadas para crearse. Confirma sólo las
-   filas correctas. Los documentos sin código o en `Sin_Comunidad` quedan sin
-   asignar: nunca se envían a la comunidad que esté abierta en pantalla.
-5. Crea o selecciona después el expediente de cada grupo para incorporar sus
-   fuentes y completar la validación. El mes del nombre es una ayuda de
-   clasificación, no sustituye las fechas exactas que se extraen de la factura.
+3. Cada archivo se asigna a una comunidad sólo si todas sus evidencias
+   coinciden: código en el nombre o la carpeta (`658 - Factura feb 2026.pdf`),
+   CIF de una comunidad registrada en el texto, CUPS ya confirmado o el mismo
+   archivo ya archivado en un expediente (aunque se haya renombrado). Cada
+   grupo muestra cuántos archivos se reconocieron por cada evidencia y el
+   expediente abierto al que irán.
+4. Los archivos con evidencias contradictorias (por ejemplo, el nombre dice 701
+   y el CIF es de 658) o sin ninguna quedan sin asignar con su motivo. Elige su
+   comunidad en el desplegable si la conoces; nunca se envían a la comunidad
+   que esté abierta en pantalla.
+5. **Repartir en expedientes** añade cada grupo como fuentes del expediente
+   abierto más reciente de su comunidad, con el mismo análisis que «Añadir
+   fuentes». Las comunidades sin alta o sin expediente abierto se indican y no
+   se reparten. Repetir el reparto no duplica documentos.
+6. Las comunidades nuevas siguen pudiéndose crear con **Crear comunidades
+   seleccionadas**. El mes del nombre es una ayuda de clasificación, no
+   sustituye las fechas exactas que se extraen de la factura.
+
+Al añadir fuentes a un expediente también se apartan los archivos cuyo
+contenido indica otra comunidad (CIF, CUPS o archivo ya archivado en ella).
 
 ## PDF escaneados
 
