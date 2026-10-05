@@ -695,7 +695,9 @@ def generate_case_letters(
             }
             try:
                 generar_carta(letter_data, str(template), str(temporary_destination))
-                pdf_work = Path(tempfile.mkdtemp(prefix="regularizacion-pdf-"))
+                # Junto a la carta final y no en %TEMP%: os.replace no puede
+                # mover entre unidades (salidas en D: y TEMP en C:).
+                pdf_work = Path(tempfile.mkdtemp(prefix=".pdf-", dir=output_path))
                 converted_pdf, pdf_pages = _convert_letter_to_pdf(temporary_destination, pdf_work)
                 os.replace(temporary_destination, destination)
                 os.replace(converted_pdf, pdf_destination)

@@ -377,6 +377,28 @@ class CaseLetterServiceTest(unittest.TestCase):
         self.assertIsNone(failed["pdf_path"])
         self.assertIsNone(failed["output_path"])
 
+    def test_pdf_is_prepared_beside_the_letter_so_it_can_be_moved_on_any_drive(self):
+        """os.replace no cruza unidades: el PDF no puede nacer en %TEMP% si salidas está en D:."""
+        from case_letter_service import generate_case_letters
+        work_directories = []
+
+        def fake_pdf(document, output_directory):
+            work_directories.append(Path(output_directory))
+            pdf = Path(output_directory) / f"{document.stem}.pdf"
+            pdf.write_bytes(b"%PDF-1.4 carta")
+            return pdf, 1
+
+        with patch("case_letter_service._convert_letter_to_pdf", side_effect=fake_pdf):
+            result = generate_case_letters(
+                self.database_path, id_case=self.case_id, project_root=self.root
+            )
+        self.assertEqual((), result.failures)
+        for directory in work_directories:
+            self.assertEqual(result.output_path.resolve(), directory.resolve().parent)
+            self.assertFalse(directory.exists())
+        self.assertEqual(2, len(list(result.output_path.glob("*.pdf"))))
+        self.assertEqual([], [item for item in result.output_path.iterdir() if item.name.startswith(".")])
+
     def test_completed_identical_run_is_reused_without_writing_or_auditing_again(self):
         from case_letter_service import generate_case_letters
 

@@ -37,6 +37,29 @@ class MailTransport(Protocol):
     def send(self, message: EmailMessage) -> None: ...
 
 
+def _transport_error(error: BaseException) -> str:
+    """Motivo comprensible sin copiar la respuesta del servidor (puede tener datos)."""
+    import smtplib
+    import ssl
+    if isinstance(error, ValueError):
+        return str(error)
+    if isinstance(error, smtplib.SMTPAuthenticationError):
+        return "El servidor rechazó el usuario o la contraseña SMTP"
+    if isinstance(error, smtplib.SMTPRecipientsRefused):
+        return "El servidor rechazó la dirección del destinatario"
+    if isinstance(error, smtplib.SMTPSenderRefused):
+        return "El servidor no permite enviar con el correo del despacho como remitente"
+    if isinstance(error, ssl.SSLError):
+        return "Falló la conexión segura (TLS) con el servidor de correo"
+    if isinstance(error, (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected)):
+        return "No se pudo conectar con el servidor de correo (servidor, puerto o red)"
+    if isinstance(error, smtplib.SMTPException):  # hereda de OSError: va antes
+        return "El servidor de correo rechazó el envío"
+    if isinstance(error, (TimeoutError, ConnectionError, OSError)):
+        return "No se pudo conectar con el servidor de correo (servidor, puerto o red)"
+    return "Error de transporte SMTP"
+
+
 def _sha(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -312,14 +335,15 @@ def send_mail_run(connection: sqlite3.Connection, id_mail_run: int,
             sent += 1
         except Exception as error:
             # Las respuestas de servidores ajenos pueden contener datos sensibles.
-            detail = str(error) if isinstance(error, ValueError) else "Error de transporte SMTP"
+            detail = _transport_error(error)
             connection.execute("UPDATE mail_deliveries SET status='failed',error_message=? WHERE id_mail_delivery=?",
                                (detail[:300], row["id_mail_delivery"]),
             )
             failed += 1
         connection.commit()
     pending = connection.execute(
-        "SELECT COUNT(*) FROM mail_deliveries WHERE id_mail_run=? AND status!='sent'",
+        # Sin correo, duplicados y exclusiones son decisiones registradas, no envíos pendientes.
+        "SELECT COUNT(*) FROM mail_deliveries WHERE id_mail_run=? AND status IN ('draft','failed')",
         (id_mail_run,),
     ).fetchone()[0]
     connection.execute("UPDATE mail_runs SET status=? WHERE id_mail_run=?",

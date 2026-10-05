@@ -697,12 +697,33 @@ class AppGestionFincas(ctk.CTk):
                 transport = SmtpTransport(settings)
             except Exception:
                 transport = SmtpTransport(settings, session_password=password)
-            with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
-                sent, failed = send_mail_run(connection, mail_id, transport,
-                                             confirmed_by=username)
-            self.log(f"Correo: {sent} enviado(s), {failed} fallo(s).", "ok" if not failed else "aviso")
-        except (ValueError, sqlite3.Error, OSError, ImportError) as error:
+        except (ValueError, ImportError) as error:
             messagebox.showerror("Correo de cartas", str(error), parent=self)
+            return
+
+        def enviar():
+            # En segundo plano: con muchas cartas la ventana no debe quedar «No responde».
+            self.after(0, lambda: self._estado("Enviando correos…", procesando=True))
+            try:
+                with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+                    sent, failed = send_mail_run(connection, mail_id, transport,
+                                                 confirmed_by=username)
+            except (ValueError, sqlite3.Error, OSError) as error:
+                message = str(error)
+                self.after(0, lambda: messagebox.showerror("Correo de cartas", message, parent=self))
+                return
+            finally:
+                self.after(0, lambda: self._estado("Listo", procesando=False))
+            self.log(f"Correo: {sent} enviado(s), {failed} fallo(s).", "ok" if not failed else "aviso")
+            if failed:
+                self.after(0, lambda: messagebox.showwarning(
+                    "Correo de cartas",
+                    f"Enviados: {sent}. Con error: {failed}. El motivo de cada uno queda en el "
+                    "lote; vuelve a pulsar «Enviar correos» para reintentar sólo los fallidos.",
+                    parent=self,
+                ))
+
+        self._en_hilo(enviar)
 
     def _accion_anadir_fuentes(self):
         expedient_ui = MOD.get("expedient_ui")

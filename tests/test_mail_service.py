@@ -96,6 +96,42 @@ class MailServiceTest(unittest.TestCase):
         self.assertEqual((0, 0), send_mail_run(f.connection, result.id_mail_run,
                                                transport, confirmed_by="gestor"))
 
+    def test_smtp_errors_are_explained_without_server_details(self):
+        import smtplib
+        result = self._prepare()
+        f = self.fixture
+
+        class Refuses:
+            def __init__(self, error):
+                self.error = error
+
+            def send(self, message):
+                raise self.error
+
+        cases = (
+            (smtplib.SMTPAuthenticationError(535, b"5.7.3 secreto-del-servidor"), "usuario o la contraseña"),
+            (TimeoutError("timed out"), "No se pudo conectar"),
+            (smtplib.SMTPRecipientsRefused({"ana@example.org": (550, b"no existe")}), "rechazó la dirección"),
+        )
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__):
+                send_mail_run(f.connection, result.id_mail_run, Refuses(error), confirmed_by="gestor")
+                message = f.connection.execute(
+                    "SELECT error_message FROM mail_deliveries WHERE id_mail_run=? AND status='failed'",
+                    (result.id_mail_run,),
+                ).fetchone()[0]
+                self.assertIn(expected, message)
+                self.assertNotIn("secreto", message)
+
+    def test_run_is_sent_when_every_sendable_letter_went_out(self):
+        result = self._prepare()  # Bruno no tiene correo: queda «skipped»
+        f = self.fixture
+        self.assertEqual((1, 0), send_mail_run(f.connection, result.id_mail_run,
+                                               FakeMailTransport(), confirmed_by="gestor"))
+        status = f.connection.execute("SELECT status FROM mail_runs WHERE id_mail_run=?",
+                                      (result.id_mail_run,)).fetchone()[0]
+        self.assertEqual("sent", status)
+
     def test_excluded_owner_has_no_sendable_draft(self):
         result = self._prepare()
         f = self.fixture
