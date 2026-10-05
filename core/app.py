@@ -26,7 +26,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 
 # Si se lanza desde una consola normal de Windows (doble clic en un .bat,
 # o "python app.py" desde cmd), la consola usa cp1252 y cualquier emoji en
@@ -41,30 +41,22 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 
 # ---------------------------------------------------------------------------
-# CUSTOMTKINTER (instalación automática si falta)
+# CUSTOMTKINTER (incluido en la instalación)
 # ---------------------------------------------------------------------------
 try:
     import customtkinter as ctk
 except ImportError:
-    import subprocess
-    print("Instalando customtkinter (primera ejecución)…")
-    codigo = subprocess.call(
-        [sys.executable, "-m", "pip", "install", "customtkinter"])
-    if codigo == 0:
-        import customtkinter as ctk
-    else:
-        raise SystemExit(
-            "No se pudo instalar customtkinter automáticamente.\n"
-            "Ejecuta en una terminal:  pip install customtkinter"
-        )
+    raise SystemExit("Falta customtkinter en esta instalación. Reinstala el programa.")
 
+from app_paths import ApplicationPaths
 import ui_moderna as UIM
 from ui_moderna import C
 
 # ---------------------------------------------------------------------------
 # RUTAS POR DEFECTO
 # ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).parent.parent  # sube un nivel desde core/
+APP_PATHS = ApplicationPaths.resolve()
+BASE_DIR = APP_PATHS.home
 
 RUTA_BD         = BASE_DIR / "data" / "gestion.db"
 RUTA_PLANTILLA  = BASE_DIR / "plantillas" / "Plantilla_Cartas.docx"
@@ -83,10 +75,8 @@ def _importar_modulos():
         sys.path.insert(0, str(core_dir))
 
     modulos = {}
-    for nombre in ["gestor_bd", "lector_pdf", "motor_reparto",
-                   "excel_writer", "carta_writer", "importar_lecturas_metrigest",
-                   "importar_excel_maestro", "letter_settings", "regularization_flow",
-                   "expedient_service", "document_review", "case_ingestion",
+    for nombre in ["gestor_bd", "letter_settings", "expedient_service",
+                   "document_review", "case_ingestion",
                    "expedient_ui", "case_workflow_actions", "case_readiness",
                    "database_reset", "database_backup", "office_settings"]:
         try:
@@ -109,6 +99,7 @@ MOD = _importar_modulos()
 # ---------------------------------------------------------------------------
 class AppGestionFincas(ctk.CTk):
     def __init__(self):
+        APP_PATHS.prepare()
         super().__init__(fg_color=C["fondo"])
         self.title("Regularización de facturas")
         self.geometry("1180x760")
@@ -220,7 +211,6 @@ class AppGestionFincas(ctk.CTk):
             ("Gastos fijos", self._accion_gastos_fijos),
             ("Coherencia", self._accion_coherencia),
             ("Reevaluar fuentes", self._accion_reanalizar_fuentes),
-            ("Correo de cartas", self._accion_correo_cartas),
             ("Historial", self._accion_ver_historial_periodo),
             ("Abrir salidas", self._abrir_salidas),
         ):
@@ -620,6 +610,100 @@ class AppGestionFincas(ctk.CTk):
         if selected is not None:
             self._en_hilo(lambda: self._generar_cartas_expediente_impl(selected))
 
+    def _accion_preparar_correo(self):
+        if not self._validar_expediente_activo():
+            return
+        from mail_service import prepare_mail_run, generate_eml_drafts
+
+        with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+            try:
+                result = prepare_mail_run(connection, self.id_expediente, BASE_DIR / "salidas" / "correo")
+                result = generate_eml_drafts(connection, result.id_mail_run)
+            except (ValueError, sqlite3.Error, OSError) as error:
+                messagebox.showerror("Correo de cartas", str(error), parent=self)
+                return
+        self.log(f"Borradores EML: {result.draft_count}; sin correo válido: "
+                 f"{result.skipped_count}; duplicados: {result.duplicate_count}.", "info")
+        self._ofrecer_abrir_carpeta(str(result.output_path))
+
+    def _accion_enviar_correo(self):
+        if not self._validar_expediente_activo():
+            return
+        from mail_service import exclude_mail_delivery, send_mail_run
+        from mail_transport import SmtpSettings, SmtpTransport
+
+        with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+            row = connection.execute(
+                "SELECT id_mail_run,output_path FROM mail_runs WHERE id_case=? ORDER BY id_mail_run DESC LIMIT 1",
+                (self.id_expediente,),
+            ).fetchone()
+            if row is None:
+                messagebox.showwarning("Correo de cartas", "Prepara primero los borradores EML.", parent=self)
+                return
+            mail_id, folder = row
+            candidates = connection.execute(
+                "SELECT id_propietario,recipient FROM mail_deliveries WHERE id_mail_run=? AND status='draft' ORDER BY id_propietario",
+                (mail_id,),
+            ).fetchall()
+        if not candidates:
+            messagebox.showinfo("Correo de cartas", "No quedan borradores pendientes de envío.", parent=self)
+            return
+        choices = ", ".join(f"{owner}: {email}" for owner, email in candidates)
+        excluded = simpledialog.askstring(
+            "Revisar destinatarios",
+            f"Destinatarios pendientes:\n{choices}\n\n"
+            "IDs que quieres excluir, separados por comas (vacío para incluir todos):",
+            parent=self,
+        )
+        if excluded is None:
+            return
+        if excluded.strip():
+            try:
+                selected = {int(item.strip()) for item in excluded.split(",")}
+                if not selected.issubset({owner for owner, _email in candidates}):
+                    raise ValueError("Algún propietario no pertenece a los borradores pendientes")
+                reason = simpledialog.askstring("Motivo", "Motivo de la exclusión:", parent=self)
+                if reason is None:
+                    return
+                with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+                    for owner in selected:
+                        exclude_mail_delivery(connection, mail_id, owner, reason=reason)
+            except ValueError as error:
+                messagebox.showerror("Correo de cartas", str(error), parent=self)
+                return
+        with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+            counts = connection.execute(
+                "SELECT status,COUNT(*) FROM mail_deliveries WHERE id_mail_run=? GROUP BY status", (mail_id,)
+            ).fetchall()
+        summary = ", ".join(f"{status}: {count}" for status, count in counts)
+        if not messagebox.askyesno(
+            "Confirmar envío SMTP",
+            f"Revisa los borradores en {folder}.\n\n{summary}\n\n¿Confirmas el envío de este lote?",
+            parent=self,
+        ):
+            return
+        host = simpledialog.askstring("Servidor SMTP", "Servidor SMTP:", parent=self)
+        port_text = simpledialog.askstring("Puerto SMTP", "Puerto con STARTTLS:", initialvalue="587", parent=self)
+        username = simpledialog.askstring("Usuario SMTP", "Usuario:", parent=self)
+        password = simpledialog.askstring("Contraseña SMTP", "Contraseña:", show="*", parent=self)
+        if not all((host, port_text, username, password)):
+            return
+        try:
+            port = int(port_text)
+            settings = SmtpSettings(host, port, username, username)
+            try:
+                import keyring
+                keyring.set_password("Regularizaciones SMTP", username, password)
+                transport = SmtpTransport(settings)
+            except Exception:
+                transport = SmtpTransport(settings, session_password=password)
+            with closing(sqlite3.connect(str(self.ruta_bd_expedientes))) as connection:
+                sent, failed = send_mail_run(connection, mail_id, transport,
+                                             confirmed_by=username)
+            self.log(f"Correo: {sent} enviado(s), {failed} fallo(s).", "ok" if not failed else "aviso")
+        except (ValueError, sqlite3.Error, OSError, ImportError) as error:
+            messagebox.showerror("Correo de cartas", str(error), parent=self)
+
     def _accion_anadir_fuentes(self):
         expedient_ui = MOD.get("expedient_ui")
         ingestion = MOD.get("case_ingestion")
@@ -863,13 +947,6 @@ class AppGestionFincas(ctk.CTk):
         if period_id and MOD.get("expedient_ui"):
             MOD["expedient_ui"].open_fixed_costs_dialog(self, period_id)
 
-    def _accion_correo_cartas(self):
-        if self._procesando or not self._validar_expediente_activo():
-            return
-        ui = MOD.get("expedient_ui")
-        if ui:
-            ui.open_mail_dialog(self, self.id_expediente)
-
     def _accion_coherencia(self):
         period_id = self._periodo_enlazado()
         if period_id and MOD.get('expedient_ui'):
@@ -1096,6 +1173,7 @@ class AppGestionFincas(ctk.CTk):
             "calcular_reparto": ("Calcular reparto", self._accion_calcular_reparto_expediente),
             "generar_cartas": ("Generar cartas", self._accion_generar_cartas_expediente),
             "abrir_salidas": ("Abrir salidas", self._abrir_salidas),
+            "preparar_correo": ("Preparar correos", self._accion_preparar_correo),
         }
         label, command = action_map[workspace.next_action]
         self._workspace_command = command
@@ -1115,6 +1193,8 @@ class AppGestionFincas(ctk.CTk):
         "generar_excel": "Regenerar Excel",
         "calcular_reparto": "Recalcular reparto",
         "generar_cartas": "Repetir cartas",
+        "abrir_salidas": "Abrir salidas",
+        "enviar_correo": "Enviar correos",
     }
 
     def _pintar_acciones_repetibles(self, workspace):
@@ -1128,6 +1208,8 @@ class AppGestionFincas(ctk.CTk):
             "generar_excel": self._accion_generar_excel_expediente,
             "calcular_reparto": self._accion_calcular_reparto_expediente,
             "generar_cartas": self._accion_generar_cartas_expediente,
+            "abrir_salidas": self._abrir_salidas,
+            "enviar_correo": self._accion_enviar_correo,
         }
         actions = [
             key for key in getattr(workspace, "repeat_actions", ())
@@ -2015,7 +2097,7 @@ class AppGestionFincas(ctk.CTk):
                 row=i + 2, column=1, padx=4, pady=6, sticky="w")
 
         ctk.CTkLabel(ventana,
-                     text="Todos los datos del despacho (base, fuentes y salidas) viven en esta carpeta de instalación.",
+                     text="Los datos del despacho se guardan en una carpeta escribible separada del programa.",
                      font=UIM.fuente(11),
                      text_color=C["texto_sec"]).grid(
             row=len(rutas) + 2, column=0, columnspan=2, pady=14, padx=20, sticky="w")
@@ -2033,6 +2115,16 @@ class AppGestionFincas(ctk.CTk):
 # PUNTO DE ENTRADA
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    UIM.iniciar()
-    app = AppGestionFincas()
-    app.mainloop()
+    if "--self-test" in sys.argv:
+        APP_PATHS.prepare()
+        from gestor_bd import conectar, crear_bd
+        if not RUTA_BD.exists():
+            crear_bd(str(RUTA_BD))
+        with closing(conectar(str(RUTA_BD))) as connection:
+            if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise SystemExit("La base no supera la comprobación de integridad")
+        print(f"Instalación lista: {RUTA_BD}")
+    else:
+        UIM.iniciar()
+        app = AppGestionFincas()
+        app.mainloop()

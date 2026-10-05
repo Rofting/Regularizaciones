@@ -9,10 +9,9 @@ QUÉ HACE LA APLICACIÓN
 ──────────────────────
 Para cada comunidad y período, la aplicación conserva las fuentes originales,
 registra sus datos en la base de datos, detecta datos dudosos, genera el Excel
-oficial desde datos validados, calcula el reparto y prepara una carta Word por
-propietario. Las cartas se pueden enviar por correo desde «Correo de cartas»:
-primero como borradores para revisar y, si se configura una cuenta, enviadas
-directamente tras una confirmación.
+oficial desde datos validados, calcula el reparto y prepara una carta Word y PDF por
+propietario. Las cartas se revisan y envían manualmente: la aplicación no
+envía correos.
 
 ARRANQUE
 ────────
@@ -42,7 +41,8 @@ USO HABITUAL EN LA APP
 6. Revisa los conceptos activos que propone la pantalla y pulsa
    "Generar cartas". Se preparan en salidas/cartas, separadas por comunidad y
    período.
-7. Revisa una muestra y abre "Correo de cartas" (ver CORREO DE CARTAS).
+7. Revisa una muestra, adjunta cada carta al correo que corresponda y envíala
+   manualmente.
 
 TODAS LAS COMUNIDADES DE UN VISTAZO
 ───────────────────────────────────
@@ -54,29 +54,6 @@ busca por código o nombre; por defecto muestra sólo el expediente más recient
 de cada comunidad. "Abrir" activa esa comunidad y ese expediente exactos, con
 su período. El panel puede quedarse abierto: se actualiza al terminar cada
 acción.
-
-CORREO DE CARTAS
-────────────────
-Herramienta "Correo de cartas" (columna izquierda), después de generar las
-cartas. Muestra cada propietario con su correo; los que no tienen correo o lo
-tienen mal escrito salen en rojo y no impiden enviar a los demás (imprime su
-carta). Si dos viviendas comparten dirección también se avisa.
-
-• "Generar borradores (.eml)": crea un correo por propietario con su carta
-  adjunta en salidas\correo\<comunidad>\<expediente>. Haz doble clic en uno y
-  Outlook lo abre listo para revisar y pulsar "Enviar". No se envía nada solo.
-• "Enviar por correo…": envía directamente. Antes, en "Configurar envío…",
-  indica servidor, puerto y usuario de la cuenta del despacho (Office 365:
-  smtp.office365.com, 587, STARTTLS) y la contraseña, que se guarda en el
-  Administrador de credenciales de Windows y nunca en el programa. Antes de
-  enviar pide confirmación con el número de correos.
-• Cada envío queda registrado por propietario (enviado, falló y por qué, no
-  incluido). "Reintentar fallidos" sólo envía los que fallaron: lo ya enviado
-  nunca se repite, ni aunque se prepare otro lote igual.
-• Si una carta cambia después de preparar el lote, ese correo no se envía:
-  prepara un lote nuevo con la carta corregida.
-• El asunto y el mensaje se pueden cambiar; admiten los campos {propietario},
-  {vivienda}, {comunidad}, {expediente}, {periodo} y {despacho}.
 
 ALTA DE UNA COMUNIDAD
 ─────────────────────
@@ -150,7 +127,7 @@ Entonces:
 2. Abre el resultado y revisa hojas, período, importes y lecturas.
 3. Pulsa "Calcular reparto final" y comprueba que cada concepto cuadra al céntimo.
 4. Pulsa "Generar cartas", revisa conceptos y destinatarios y abre una muestra.
-5. Envíalas con "Correo de cartas" (borradores o envío confirmado) o imprímelas.
+5. Envía las cartas manualmente; la aplicación nunca las remite por correo.
 
 USO POSTERIOR: FACTURAS Y PDF
 ─────────────────────────────

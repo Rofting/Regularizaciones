@@ -1,4 +1,4 @@
-"""Generación auditable de cartas Word para un expediente ya conciliado."""
+"""Generación auditable de cartas Word y PDF para un expediente conciliado."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -17,6 +19,7 @@ from excel_export_service import ExportBlockedError, calculate_case_input_hash
 from excel_profiles import ExcelProfile, calculate_profile_sha256, load_profile
 from letter_settings import LetterIdentity, load_community_letter_identity
 from office_settings import load_office_settings
+from office_recalculation import LibreOfficeRecalculator
 
 
 class LetterGenerationBlockedError(ValueError):
@@ -476,7 +479,7 @@ def _reusable_completed_run(
         except (OSError, TypeError):
             continue
         rows = connection.execute(
-            """SELECT id_propietario,status,output_path FROM generated_letters
+            """SELECT id_propietario,status,output_path,pdf_path,pdf_pages FROM generated_letters
                WHERE id_letter_run=? ORDER BY id_propietario""",
             (run["id_letter_run"],),
         ).fetchall()
@@ -487,6 +490,8 @@ def _reusable_completed_run(
         if all(
             row["status"] == "generated"
             and _is_safe_generated_path(row["output_path"], run_directory)
+            and _is_safe_generated_path(row["pdf_path"], run_directory)
+            and row["pdf_pages"] is not None and row["pdf_pages"] > 0
             for row in rows
         ):
             return LetterBatchResult(
@@ -497,17 +502,51 @@ def _reusable_completed_run(
 
 def _temporary_destination(destination: Path) -> Path:
     """Reserva un nombre hermano no visible como carta final."""
-    return destination.with_name(f".{destination.stem}.{uuid.uuid4().hex}.tmp")
+    return destination.with_name(f".{destination.stem}.{uuid.uuid4().hex}{destination.suffix}")
+
+
+def _convert_letter_to_pdf(document: Path, output_directory: Path) -> tuple[Path, int]:
+    """Convierte en un perfil aislado y comprueba que Writer produjo páginas."""
+    import pdfplumber
+
+    executable = LibreOfficeRecalculator()._find_executable()
+    output_directory.mkdir(parents=True, exist_ok=True)
+    pdf = output_directory / f"{document.stem}.pdf"
+    with tempfile.TemporaryDirectory(prefix="regularizacion-carta-lo-") as profile_root:
+        profile = Path(profile_root).resolve().as_uri()
+        try:
+            completed = subprocess.run(
+                [str(executable), "--headless", f"-env:UserInstallation={profile}",
+                 "--convert-to", "pdf:writer_pdf_Export", "--outdir", str(output_directory),
+                 str(document)],
+                capture_output=True, text=True, timeout=90, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"No se pudo convertir la carta a PDF: {error}") from error
+    if completed.returncode != 0 or not pdf.is_file() or pdf.stat().st_size == 0:
+        raise RuntimeError(
+            "LibreOffice no produjo el PDF de la carta: "
+            + (completed.stderr or completed.stdout or "sin diagnóstico").strip()[:300]
+        )
+    try:
+        with pdfplumber.open(pdf) as source:
+            pages = len(source.pages)
+    except Exception as error:
+        raise RuntimeError(f"El PDF generado no se puede abrir: {error}") from error
+    if pages < 1:
+        raise RuntimeError("El PDF generado no contiene páginas")
+    return pdf, pages
 
 
 def _mark_generated(
-    connection: sqlite3.Connection, generated_row: int, destination: Path
+    connection: sqlite3.Connection, generated_row: int, destination: Path,
+    pdf_destination: Path, pdf_pages: int,
 ) -> None:
     """Confirma que el archivo publicado tiene una auditoría coherente."""
     connection.execute(
-        """UPDATE generated_letters SET status='generated',output_path=?,error_message=NULL,
+        """UPDATE generated_letters SET status='generated',output_path=?,pdf_path=?,pdf_pages=?,error_message=NULL,
                updated_at=datetime('now') WHERE id_generated_letter=?""",
-        (str(destination), generated_row),
+        (str(destination), str(pdf_destination), pdf_pages, generated_row),
     )
     connection.commit()
 
@@ -628,7 +667,9 @@ def generate_case_letters(
                 _safe_file_part(owner["nombre"], fallback=f"P{owner_id}"),
             )
             destination = output_path / filename
+            pdf_destination = destination.with_suffix(".pdf")
             temporary_destination = _temporary_destination(destination)
+            pdf_work = None
             generated_row = connection.execute(
                 """INSERT INTO generated_letters
                    (id_letter_run,id_propietario,input_sha256,template_sha256,status)
@@ -652,17 +693,18 @@ def generate_case_letters(
                     "logo_path": identity.logo_path,
                 },
             }
-            published = False
             try:
                 generar_carta(letter_data, str(template), str(temporary_destination))
+                pdf_work = Path(tempfile.mkdtemp(prefix="regularizacion-pdf-"))
+                converted_pdf, pdf_pages = _convert_letter_to_pdf(temporary_destination, pdf_work)
                 os.replace(temporary_destination, destination)
-                published = True
-                _mark_generated(connection, generated_row, destination)
+                os.replace(converted_pdf, pdf_destination)
+                _mark_generated(connection, generated_row, destination, pdf_destination, pdf_pages)
                 generated += 1
             except Exception as error:
-                if published:
+                for path in (destination, pdf_destination):
                     try:
-                        destination.unlink(missing_ok=True)
+                        path.unlink(missing_ok=True)
                     except OSError:
                         pass
                 try:
@@ -674,7 +716,7 @@ def generate_case_letters(
                 try:
                     connection.rollback()
                     connection.execute(
-                        """UPDATE generated_letters SET status='failed',output_path=NULL,error_message=?,
+                        """UPDATE generated_letters SET status='failed',output_path=NULL,pdf_path=NULL,pdf_pages=NULL,error_message=?,
                                updated_at=datetime('now') WHERE id_generated_letter=?""",
                         (message, generated_row),
                     )
@@ -684,6 +726,10 @@ def generate_case_letters(
                         connection.rollback()
                     except sqlite3.Error:
                         pass
+            finally:
+                if pdf_work is not None:
+                    import shutil
+                    shutil.rmtree(pdf_work, ignore_errors=True)
 
         status = "completed" if not failures else "incomplete"
         _write_run_status(connection, run_id, status, "; ".join(failures) if failures else None)

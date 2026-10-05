@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 20
 
 
 MIGRATION_1_SQL = (
@@ -860,54 +860,58 @@ def _migration_17(connection: sqlite3.Connection) -> None:
 
 
 def _migration_18(connection: sqlite3.Connection) -> None:
-    """Correo de cartas: un lote por envío y una entrega auditada por propietario.
+    """Asocia el PDF validado a la misma carta y propietario que el Word."""
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(generated_letters)')}
+    if 'pdf_path' not in columns:
+        connection.execute('ALTER TABLE generated_letters ADD COLUMN pdf_path TEXT')
+    if 'pdf_pages' not in columns:
+        connection.execute('ALTER TABLE generated_letters ADD COLUMN pdf_pages INTEGER')
 
-    La huella (destinatario, carta, asunto y cuerpo) evita enviar dos veces lo
-    mismo. La contraseña SMTP nunca se guarda aquí: vive en el almacén de
-    credenciales del sistema; ``mail_settings`` sólo guarda servidor y usuario.
-    """
+
+def _migration_19(connection: sqlite3.Connection) -> None:
+    """Lotes de comunicación y estado independiente de cada destinatario."""
     connection.execute("""CREATE TABLE IF NOT EXISTS mail_runs (
         id_mail_run INTEGER PRIMARY KEY AUTOINCREMENT,
         id_case INTEGER NOT NULL REFERENCES regularization_cases(id_case),
         id_letter_run INTEGER NOT NULL REFERENCES letter_generation_runs(id_letter_run),
-        status TEXT NOT NULL DEFAULT 'prepared' CHECK(status IN (
-            'prepared','drafted','sending','completed','incomplete'
-        )),
-        subject_template TEXT NOT NULL,
-        body_template TEXT NOT NULL,
-        output_path TEXT,
-        created_by TEXT NOT NULL,
+        input_sha256 TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        output_path TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('draft','partial','sent')),
         confirmed_by TEXT,
+        confirmed_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-        completed_at TEXT
+        UNIQUE(id_letter_run,input_sha256)
     )""")
     connection.execute("""CREATE TABLE IF NOT EXISTS mail_deliveries (
-        id_delivery INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_mail_delivery INTEGER PRIMARY KEY AUTOINCREMENT,
         id_mail_run INTEGER NOT NULL REFERENCES mail_runs(id_mail_run) ON DELETE CASCADE,
         id_propietario INTEGER NOT NULL REFERENCES propietarios(id_propietario),
-        id_generated_letter INTEGER REFERENCES generated_letters(id_generated_letter),
         recipient TEXT,
-        attachment_path TEXT,
         attachment_sha256 TEXT,
-        subject TEXT,
         fingerprint TEXT,
-        status TEXT NOT NULL CHECK(status IN ('pending','draft','sent','failed','skipped')),
-        reason TEXT,
-        eml_path TEXT,
         message_id TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        eml_path TEXT,
+        status TEXT NOT NULL CHECK(status IN ('draft','skipped','duplicate','sent','failed')),
+        error_message TEXT,
         sent_at TEXT,
-        UNIQUE(id_mail_run, id_propietario)
+        UNIQUE(id_mail_run,id_propietario)
     )""")
-    connection.execute("""CREATE INDEX IF NOT EXISTS idx_mail_deliveries_fingerprint
-        ON mail_deliveries(fingerprint, status)""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS mail_settings (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        settings_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_mail_deliveries_fingerprint ON mail_deliveries(fingerprint,status)")
+
+
+def _migration_20(connection: sqlite3.Connection) -> None:
+    """Vínculo de CUPS confirmado con una sola comunidad y suministro."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS learned_supply_points (
+        cups TEXT PRIMARY KEY,
+        id_comunidad INTEGER NOT NULL REFERENCES comunidades(id_comunidad),
+        tipo_suministro TEXT NOT NULL,
+        id_document INTEGER REFERENCES source_documents(id_document) ON DELETE SET NULL,
+        id_factura INTEGER REFERENCES facturas(id_factura) ON DELETE SET NULL,
+        learned_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_learned_supply_points_community ON learned_supply_points(id_comunidad)")
 
 
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -929,6 +933,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     16: _migration_16,
     17: _migration_17,
     18: _migration_18,
+    19: _migration_19,
+    20: _migration_20,
 }
 
 

@@ -771,6 +771,14 @@ class GuidedWorkspaceStateTest(unittest.TestCase):
         self.assertNotIn("generar_cartas", repeats("calculated"))
         self.assertIn("calcular_reparto", repeats("reconciled"))
         self.assertIn("generar_cartas", repeats("deliveries_generated"))
+        self.assertIn("enviar_correo", repeats("deliveries_generated"))
+
+    def test_generated_letters_route_to_mail_drafts(self):
+        state = expedient_ui.guided_workspace_state(
+            has_case=True, document_count=3, open_issue_count=0,
+            case_status="deliveries_generated",
+        )
+        self.assertEqual("preparar_correo", state.next_action)
 
     def test_profile_mismatch_routes_to_an_actionable_revalidation(self):
         state = expedient_ui.guided_workspace_state(

@@ -161,7 +161,7 @@ class CaseLetterServiceTest(unittest.TestCase):
 
     def _run_rows(self, run_id):
         return self.connection.execute(
-            """SELECT id_propietario,status,output_path,error_message
+            """SELECT id_propietario,status,output_path,pdf_path,pdf_pages,error_message
                FROM generated_letters WHERE id_letter_run=? ORDER BY id_propietario""",
             (run_id,),
         ).fetchall()
@@ -187,6 +187,17 @@ class CaseLetterServiceTest(unittest.TestCase):
         rows = self._run_rows(result.id_letter_run)
         self.assertEqual({"generated"}, {row["status"] for row in rows})
         self.assertEqual(2, len(list(result.output_path.glob("*.docx"))))
+        self.assertEqual(2, len(list(result.output_path.glob("*.pdf"))))
+        self.assertTrue(all(row["pdf_pages"] >= 1 for row in rows))
+        self.assertTrue(all(Path(row["pdf_path"]).is_file() for row in rows))
+        import pdfplumber
+        for owner, amount in (("ANA_VECINA", "109,00 €"), ("BRUNO_VECINO", "8,00 €")):
+            pdf_path = next(result.output_path.glob(f"*{owner}.pdf"))
+            with pdfplumber.open(pdf_path) as pdf:
+                self.assertEqual(1, len(pdf.pages))
+                content = pdf.pages[0].extract_text()
+                self.assertIn(owner.replace("_", " ").title(), content)
+                self.assertIn(amount, content)
         self.assertEqual(
             "completed",
             self.connection.execute(
@@ -316,6 +327,7 @@ class CaseLetterServiceTest(unittest.TestCase):
         self.assertEqual(["generated", "failed"], [row["status"] for row in rows])
         self.assertTrue(Path(rows[0]["output_path"]).is_file())
         self.assertIsNone(rows[1]["output_path"])
+        self.assertIsNone(rows[1]["pdf_path"])
         self.assertEqual(
             "incomplete",
             self.connection.execute(
@@ -341,7 +353,29 @@ class CaseLetterServiceTest(unittest.TestCase):
         failed = next(row for row in self._run_rows(result.id_letter_run) if row["status"] == "failed")
         self.assertIsNone(failed["output_path"])
         self.assertFalse((result.output_path / "CARTA_B-2_BRUNO_VECINO.docx").exists())
-        self.assertEqual([], list(result.output_path.glob("*.tmp")))
+        self.assertFalse((result.output_path / "CARTA_B-2_BRUNO_VECINO.pdf").exists())
+        self.assertEqual([], list(result.output_path.glob(".*.docx")))
+
+    def test_pdf_conversion_failure_is_audited_without_publishing_partial_pair(self):
+        from case_letter_service import generate_case_letters, _convert_letter_to_pdf
+
+        def fail_for_bruno(document, output_directory):
+            if "BRUNO_VECINO" in document.name:
+                (output_directory / f"{document.stem}.pdf").write_bytes(b"partial")
+                raise RuntimeError("fallo de Writer")
+            return _convert_letter_to_pdf(document, output_directory)
+
+        with patch("case_letter_service._convert_letter_to_pdf", side_effect=fail_for_bruno):
+            result = generate_case_letters(
+                self.database_path, id_case=self.case_id, project_root=self.root
+            )
+        self.assertEqual(1, result.generated_count)
+        self.assertIn("fallo de Writer", result.failures[0])
+        self.assertEqual(1, len(list(result.output_path.glob("*.docx"))))
+        self.assertEqual(1, len(list(result.output_path.glob("*.pdf"))))
+        failed = next(row for row in self._run_rows(result.id_letter_run) if row["status"] == "failed")
+        self.assertIsNone(failed["pdf_path"])
+        self.assertIsNone(failed["output_path"])
 
     def test_completed_identical_run_is_reused_without_writing_or_auditing_again(self):
         from case_letter_service import generate_case_letters
@@ -566,7 +600,8 @@ class CaseLetterServiceTest(unittest.TestCase):
         self.assertEqual(0, result.generated_count)
         self.assertEqual(2, len(result.failures))
         self.assertEqual([], list(result.output_path.glob("*.docx")))
-        self.assertEqual([], list(result.output_path.glob("*.tmp")))
+        self.assertEqual([], list(result.output_path.glob("*.pdf")))
+        self.assertEqual([], list(result.output_path.glob(".*.docx")))
         self.assertEqual({"failed"}, {row["status"] for row in self._run_rows(result.id_letter_run)})
 
     def test_new_run_uses_its_own_directory_without_reusing_old_owner_document(self):

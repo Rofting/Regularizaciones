@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Callable, Collection, Iterator, Mapping
 
 import document_review
+from community_cups import assert_supply_point_compatible, learn_supply_point
+from app_paths import ApplicationPaths
 import expedient_service
 import gestor_bd
 from excel_profiles import configured_profile_paths, load_profile
@@ -41,7 +43,7 @@ def _active_modules_for_case(
     ).fetchall()
     if not rows:
         return None
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = ApplicationPaths.resolve().home
     profile_keys = tuple(
         str(item["profile_key"]) for item in rows if item["profile_key"]
     )
@@ -909,6 +911,21 @@ def confirm_source_candidates(connection: sqlite3.Connection, case_id: int,
             _required_confirmed(_confirmed_candidate_values(connection, document_id),
                                 "tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total")
         result = apply_confirmed_source(connection, case_id, document_id)
+        if document.document_kind == "invoice" and result.status == "validated":
+            case = expedient_service.get_case(connection, case_id)
+            values = _with_invoice_aliases(
+                connection, document, _confirmed_candidate_values(connection, document_id),
+            )
+            marker = connection.execute(
+                "SELECT id_factura FROM archivos_procesados WHERE nombre_archivo=?",
+                (f"source_document:{document_id}",),
+            ).fetchone()
+            if marker is not None and marker["id_factura"] is not None:
+                learn_supply_point(
+                    connection, values.get("cups_o_referencia", ""), case.community_id,
+                    values["tipo_suministro"], document_id=document_id,
+                    invoice_id=marker["id_factura"], current_source=document.original_name,
+                )
         connection.execute("""UPDATE source_documents SET confirmed_by=?,confirmed_at=datetime('now')
             WHERE id_document=?""", (confirmed_by.strip(), document_id))
         return result
@@ -1054,7 +1071,7 @@ def _with_invoice_aliases(
         ).fetchone()
         key = row["provider_key"] if row is not None else None
         if key:
-            catalog = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+            catalog = ApplicationPaths.resolve().home / "config" / "proveedores.json"
             result["proveedor"] = _provider_names(str(catalog)).get(key, key)
     return result
 
@@ -1071,6 +1088,11 @@ def _apply_confirmed_invoice(
         values, "tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total",
     )
     values = _with_invoice_aliases(connection, document, values)
+    assert_supply_point_compatible(
+        connection, values.get("cups_o_referencia", ""), case.community_id,
+        values["tipo_suministro"], current_source=document.original_name,
+        document_id=document.id_document,
+    )
     numeric_fields = (
         "consumo_total", "termino_fijo", "termino_variable", "impuestos", "iva",
     )
@@ -1332,7 +1354,7 @@ def reanalyze_case_documents(
     source_archive_root = (
         Path(archive_root)
         if archive_root is not None
-        else Path(__file__).resolve().parents[1] / "data" / "expedientes"
+        else ApplicationPaths.resolve().sources
     )
     expedient_service.repair_archived_source_paths(
         connection, archive_root=source_archive_root, case_id=case_id,

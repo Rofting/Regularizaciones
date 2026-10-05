@@ -10,6 +10,9 @@ La aplicación crea una copia de la base:
 - Antes de aplicar un lote de migraciones a una base que ya contiene datos.
 - Antes de generar o regenerar Excel, reparto o cartas desde el flujo guiado.
 - Antes de reevaluar las fuentes desde la interfaz.
+- Antes de iniciar el flujo desatendido `core/pipeline.py`, incluidos la ingesta,
+  el reparto y la regeneración de Excel y cartas. Una base nueva todavía vacía
+  no requiere copia.
 
 Una base nueva vacía y las conexiones en memoria no generan copias de
 migración. La copia usa la API de SQLite, incluye los cambios confirmados en
@@ -21,8 +24,9 @@ fecha, motivo, base de origen y SHA-256. El arranque y las acciones muestran
 la copia creada en el registro de la aplicación.
 
 Si no se puede crear o verificar la copia, la operación se detiene antes de
-regenerar o migrar. Si falla únicamente la limpieza de copias antiguas, la
-copia nueva se conserva y se registra el problema.
+regenerar o migrar. El flujo desatendido también se detiene antes de copiar
+archivos de una carpeta extra o ingerirlos. Si falla únicamente la limpieza
+de copias antiguas, la copia nueva se conserva y se registra el problema.
 
 ### Retención
 

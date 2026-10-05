@@ -26,8 +26,6 @@ class DependencySmokeTest(unittest.TestCase):
                 "rapidocr",
                 "onnxruntime",
                 "rapidfuzz",
-                "keyring",
-                "mail_service",
                 "matplotlib",
                 "numpy",
                 "xlrd",

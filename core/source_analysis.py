@@ -16,6 +16,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 
 from document_classifier import DocumentClassification, classify_document
+from app_paths import ApplicationPaths
 from document_text_service import TextExtraction, get_document_text
 from invoice_extractors import FieldEvidence
 from invoice_extractors import extract_invoice_fields
@@ -179,7 +180,7 @@ def analyse_pdf(path: Path, *, pdf_processor=None, community_code: str | None = 
     """Classify a PDF using the existing provider/reading parser."""
     if pdf_processor is None:
         from lector_pdf import procesar_archivo
-        provider_config = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+        provider_config = ApplicationPaths.resolve().home / "config" / "proveedores.json"
         processor_args = {"ruta_proveedores": str(provider_config)}
         if providers is not None:
             processor_args["proveedores"] = providers
@@ -476,7 +477,7 @@ def analyse_pdf_pipeline(
     if classification.kind == "reading":
         def process_preloaded(_path, selected_community):
             from lector_pdf import procesar_archivo
-            provider_config = Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+            provider_config = ApplicationPaths.resolve().home / "config" / "proveedores.json"
             arguments = {
                 "ruta_proveedores": str(provider_config),
                 "extracted_text": extraction.text,
@@ -510,7 +511,7 @@ def analyse_pdf_pipeline(
             provider_registry = provider_registry_from_payload(providers)
         else:
             provider_registry = load_provider_registry(
-                Path(__file__).resolve().parents[1] / "config" / "proveedores.json"
+                ApplicationPaths.resolve().home / "config" / "proveedores.json"
             )
     match = resolve_provider(
         provider_registry,

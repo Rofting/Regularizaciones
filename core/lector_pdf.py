@@ -49,9 +49,8 @@ def cargar_proveedores(ruta_json: str | None = None) -> dict:
     """
     if ruta_json is None:
         legacy_path = os.path.join(os.path.dirname(__file__), "proveedores.json")
-        project_config = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "config", "proveedores.json"
-        )
+        from app_paths import ApplicationPaths
+        project_config = str(ApplicationPaths.resolve().home / "config" / "proveedores.json")
         ruta_json = legacy_path if os.path.exists(legacy_path) else project_config
     from provider_registry import load_catalog_payload
     return load_catalog_payload(ruta_json)
@@ -589,6 +588,10 @@ def poppler_candidatos() -> list[str]:
 
 def _poppler_path() -> str | None:
     """Carpeta de Poppler, o None si ya está accesible desde el PATH."""
+    from app_paths import ApplicationPaths
+    bundled = ApplicationPaths.resolve().resources / "poppler" / "bin"
+    if (bundled / "pdftoppm.exe").is_file():
+        return str(bundled)
     manual = os.environ.get("POPPLER_PATH")
     if manual and os.path.isdir(manual):
         return manual
