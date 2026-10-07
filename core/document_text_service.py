@@ -208,6 +208,39 @@ def _process_worker(path_value: str, max_pages: int, output) -> None:
         output.put(("error", f"{type(error).__name__}: {error}"))
 
 
+def _ocr_page_worker(path_value: str, page: int, output) -> None:
+    try:
+        from lector_pdf import extraer_texto_paginas_ocr
+        output.put(("ok", extraer_texto_paginas_ocr(path_value, page, page)))
+    except Exception as error:
+        output.put(("error", f"{type(error).__name__}: {error}"))
+
+
+def extract_ocr_page_with_timeout(path: str | Path, page: int, timeout_seconds: int = 25) -> str:
+    """Lee una página en otro proceso para poder detener un OCR bloqueado."""
+    context = multiprocessing.get_context("spawn")
+    output = context.Queue(maxsize=1)
+    process = context.Process(
+        target=_ocr_page_worker, args=(str(path), page, output), daemon=True,
+    )
+    process.start()
+    try:
+        process.join(timeout_seconds)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+            raise TimeoutError(f"OCR de la página {page} excedió {timeout_seconds} segundos")
+        try:
+            state, payload = output.get(timeout=1)
+        except queue.Empty as error:
+            raise RuntimeError("El OCR terminó sin devolver texto") from error
+        if state == "error":
+            raise RuntimeError(str(payload))
+        return str(payload)
+    finally:
+        output.close()
+
+
 def _extract_with_timeout(
     path: Path,
     max_pages: int,
@@ -285,6 +318,7 @@ def get_document_text(
 __all__ = [
     "TEXT_EXTRACTOR_VERSION",
     "TextExtraction",
+    "extract_ocr_page_with_timeout",
     "file_sha256",
     "get_document_text",
 ]
