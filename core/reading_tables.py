@@ -222,12 +222,21 @@ def parse_reading_rows(rows: Sequence[Sequence[object]], text: str = "") -> Read
     )
     extracted: list[dict] = []
     checked = matched = negatives = 0
+    consumption_values: list[float] = []
+    summary_consumptions: list[float] = []
+    consumption_col = role_index.get("consumo")
     for raw in rows[header_index + 1:]:
         cells = list(raw)
         if {keywords.fold(cell) for cell in cells if cell} & header_keys == header_keys:
             continue  # cabecera repetida en otra página
         vivienda = str(cells[vivienda_col] if vivienda_col < len(cells) and cells[vivienda_col] is not None else "").strip()
-        if not vivienda or _is_summary(vivienda) or len(vivienda) > 60:
+        if _is_summary(vivienda):
+            if consumption_col is not None and consumption_col < len(cells) and len(pairs) == 1:
+                summary = _number(cells[consumption_col])
+                if summary is not None:
+                    summary_consumptions.append(summary)
+            continue
+        if not vivienda or len(vivienda) > 60:
             continue
         for (service_key, (previous, current)), service in zip(pairs.items(), services):
             before = _number(cells[previous.index]) if previous.index < len(cells) else None
@@ -246,9 +255,10 @@ def parse_reading_rows(rows: Sequence[Sequence[object]], text: str = "") -> Read
                 row["fecha_ant"] = previous.when.isoformat()
             if current.when and not current.month_only:
                 row["fecha_act"] = current.when.isoformat()
-            consumption_col = role_index.get("consumo")
             if consumption_col is not None and consumption_col < len(cells) and len(pairs) == 1:
                 consumption = _number(cells[consumption_col])
+                if consumption is not None:
+                    consumption_values.append(consumption)
                 if consumption is not None and before is not None and after is not None:
                     checked += 1
                     matched += abs((after - before) - consumption) <= 0.6
@@ -270,6 +280,10 @@ def parse_reading_rows(rows: Sequence[Sequence[object]], text: str = "") -> Read
         confidence = "high" if complete == len(extracted) and len(extracted) >= 2 else "medium"
     if negatives:
         diagnostics.append(f"lecturas_decrecientes:{negatives}")
+    if summary_consumptions and len(consumption_values) == len(extracted):
+        if abs(sum(consumption_values) - sum(summary_consumptions)) > 0.6:
+            confidence = "medium"
+            diagnostics.append("total_consumo_no_cuadra")
     if any(service is None for service in services):
         confidence = "medium"
         diagnostics.append("servicio_sin_identificar")
@@ -327,22 +341,39 @@ def rows_from_text(text: str) -> list[list[str]]:
     return rows
 
 
-def tables_from_pdf(path: str | Path, *, max_pages: int = 15) -> list[list[object]]:
-    """Filas de todas las tablas del PDF, en orden, para tratarlas como una."""
+def tables_from_pdf(path: str | Path, *, max_pages: int = 15, text: str = "") -> list[list[object]]:
+    """Elige una estrategia de tablas válida, sin sumar filas duplicadas."""
     try:
         import pdfplumber
     except ImportError:
         return []
-    rows: list[list[object]] = []
+    settings = (
+        None,
+        {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
+        {"vertical_strategy": "text", "horizontal_strategy": "text"},
+    )
+    candidates: list[list[list[object]]] = [[] for _ in settings]
     try:
         with pdfplumber.open(str(path)) as pdf:
             for page in pdf.pages[:max_pages]:
-                for table in page.extract_tables() or ():
-                    rows.extend([cell if cell is None else str(cell).replace("\n", " ") for cell in row]
-                                for row in table)
+                for index, setting in enumerate(settings):
+                    try:
+                        tables = page.extract_tables(table_settings=setting) if setting else page.extract_tables()
+                    except Exception:
+                        continue
+                    for table in tables or ():
+                        candidates[index].extend(
+                            [cell if cell is None else str(cell).replace("\n", " ") for cell in row]
+                            for row in table if row is not None
+                        )
     except Exception:
         return []
-    return rows
+    scored = []
+    for index, rows in enumerate(candidates):
+        parsed = parse_reading_rows(rows, text) if rows else None
+        scored.append((len(parsed.rows) if parsed else 0,
+                       parsed.confidence == "high" if parsed else False, -index, rows))
+    return max(scored, key=lambda item: item[:3])[3]
 
 
 def parse_reading_document(
@@ -354,7 +385,10 @@ def parse_reading_document(
     if best is None or best.confidence != "high":
         from_text = parse_reading_rows(rows_from_text(text), text) if text else None
         if from_text is not None and (best is None or len(from_text.rows) > len(best.rows)
-                                      or from_text.confidence == "high"):
+                                      or (len(from_text.rows) == len(best.rows)
+                                          and from_text.confidence == "high"
+                                          and not any(note.startswith(("consumo_no_cuadra", "total_consumo_no_cuadra"))
+                                                      for note in best.diagnostics))):
             best = from_text
     return best
 

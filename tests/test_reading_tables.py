@@ -13,7 +13,7 @@ if str(CORE_DIR) not in sys.path:
 import keywords
 import source_analysis
 from document_text_service import TextExtraction
-from reading_tables import detect_company, parse_reading_document, parse_reading_rows, rows_from_text
+from reading_tables import detect_company, parse_reading_document, parse_reading_rows, rows_from_text, tables_from_pdf
 
 ISTA_TEXT = """ista Metering Services España
 Informe de lecturas de agua caliente sanitaria
@@ -60,6 +60,50 @@ class ReadingTablesTest(unittest.TestCase):
                 ["Vivienda", "Lectura anterior", "Lectura actual"], ["1B", "3", "5"],
                 ["Totales", "4", "7"]]
         self.assertEqual(["1A", "1B"], [row["vivienda"] for row in parse_reading_rows(rows, "ACS").rows])
+
+    def test_summary_consumption_is_checked_without_becoming_a_dwelling(self):
+        rows = [["Vivienda", "Lectura anterior", "Lectura actual", "Consumo"],
+                ["1A", "10", "15", "5"], ["1B", "20", "23", "3"],
+                ["TOTAL", "", "", "9"]]
+        table = parse_reading_rows(rows, "ACS")
+        self.assertEqual(["1A", "1B"], [row["vivienda"] for row in table.rows])
+        self.assertEqual("medium", table.confidence)
+        self.assertIn("total_consumo_no_cuadra", table.diagnostics)
+        from_text = "Vivienda  Lectura anterior  Lectura actual  Consumo\n1A  10  15  5\n1B  20  23  3"
+        combined = parse_reading_document(text=from_text, table_rows=rows)
+        self.assertIn("total_consumo_no_cuadra", combined.diagnostics)
+        rows[-1][-1] = "8"
+        self.assertEqual((), parse_reading_rows(rows, "ACS").diagnostics)
+
+    def test_lined_and_unlined_pdf_tables_have_the_same_readings(self):
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+
+        data = [["Vivienda", "Lectura anterior", "Lectura actual", "Consumo"],
+                ["1A", "10", "15", "5"], ["1B", "20", "23", "3"],
+                ["TOTAL", "", "", "8"]]
+        with tempfile.TemporaryDirectory() as directory:
+            for lined in (True, False):
+                path = Path(directory) / ("lineas.pdf" if lined else "sin_lineas.pdf")
+                figure, axis = plt.subplots(figsize=(8, 4))
+                axis.axis("off")
+                grid = axis.table(cellText=data, loc="center", cellLoc="left",
+                                  colWidths=[.2, .28, .25, .2])
+                for cell in grid.get_celld().values():
+                    cell.set_edgecolor("black" if lined else "white")
+                    cell.set_linewidth(1 if lined else 0)
+                with PdfPages(path) as pdf:
+                    pdf.savefig(figure)
+                plt.close(figure)
+                table = parse_reading_document(
+                    text="Informe de lecturas ACS, del 01/01/2026 al 31/01/2026",
+                    table_rows=tables_from_pdf(path, text="Informe de lecturas ACS"),
+                )
+                self.assertEqual([("1A", 10.0, 15.0), ("1B", 20.0, 23.0)],
+                                 [(row["vivienda"], row["val_ant"], row["val_act"])
+                                  for row in table.rows])
+                self.assertEqual("high", table.confidence)
+                self.assertEqual(("2026-01-01", "2026-01-31"), (table.start, table.end))
 
     def test_consumption_that_does_not_match_lowers_confidence(self):
         rows = [["Vivienda", "Lectura anterior", "Lectura actual", "Consumo"], ["1A", "1", "2", "9"], ["1B", "1", "3", "7"]]

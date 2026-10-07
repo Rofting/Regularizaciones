@@ -142,7 +142,7 @@ def _reading_table(path: Path, text_reader: Callable[[Path], str] | None):
     from reading_tables import parse_reading_document, parse_reading_rows, tables_from_pdf
     if path.suffix.lower() == ".pdf":
         text = (text_reader or _default_text)(path)
-        return parse_reading_document(text=text, table_rows=tables_from_pdf(path))
+        return parse_reading_document(text=text, table_rows=tables_from_pdf(path, text=text))
     from source_analysis import _tabular_sheets
     for rows, sheet in _tabular_sheets(path):
         title = " ".join(str(cell) for row in rows[:6] for cell in row if cell)
