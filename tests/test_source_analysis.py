@@ -21,6 +21,90 @@ from provider_registry import provider_registry_from_payload
 
 
 class SourceAnalysisTest(unittest.TestCase):
+    def test_missing_fields_trigger_bounded_cached_ocr_on_later_pages(self):
+        from test_source_preview import write_pdf
+
+        registry = provider_registry_from_payload({"proveedores": {
+            "ACME": {
+                "tax_ids": ["B12345678"], "aliases": ["ACME ENERGIA"],
+                "document_types": ["invoice"], "service_family": "ELECTRICIDAD",
+                "extractor_family": "electricity", "required_signatures": [r"\bFACTURA\b"],
+                "regex": {
+                    "termino_fijo": r"Fijo (?P<valor>[\d,]+)",
+                    "termino_variable": r"Variable (?P<valor>[\d,]+)",
+                },
+            },
+        }})
+        cover = "ACME ENERGIA B12345678 FACTURA F-12 Fecha factura: 03/03/2026 Total factura"
+        per_page = {
+            2: "Anexo sin cifras de consumo",
+            3: "Consumo total 450 kWh",
+            4: ("Periodo de facturacion 01/02/2026 al 28/02/2026 "
+                "Base imponible 100,00 EUR IVA 21,00 EUR Total factura 121,00 EUR "
+                "Fijo 10,00 Variable 90,00"),
+        }
+        calls = []
+
+        def read_page(_path, first, last):
+            self.assertEqual(first, last)
+            calls.append(first)
+            return per_page[first]
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "factura.pdf"
+            write_pdf(path, [["Portada"], ["Anexo"], ["Consumo"], ["Importe"]])
+            connection = sqlite3.connect(":memory:")
+            connection.execute(
+                """CREATE TABLE document_text_cache (
+                    sha256 TEXT NOT NULL, extractor_version TEXT NOT NULL,
+                    text_content TEXT NOT NULL, method TEXT NOT NULL,
+                    pages_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (sha256, extractor_version))"""
+            )
+            try:
+                for _ in range(2):
+                    result = source_analysis.analyse_pdf_pipeline(
+                        path, connection=connection, community_code="658",
+                        provider_registry=registry,
+                        text_extractor=lambda *_: TextExtraction(
+                            cover, "rapidocr", (1,), {}, 1, False),
+                        provider_detail_extractor=read_page,
+                    )
+                pages = [row[0] for row in connection.execute(
+                    "SELECT extractor_version FROM document_text_cache "
+                    "WHERE extractor_version LIKE 'invoice-ocr-page:%' ORDER BY extractor_version"
+                )]
+                complete_cover = cover + " " + per_page[3] + " " + per_page[4]
+                source_analysis.analyse_pdf_pipeline(
+                    path, connection=None, community_code="658",
+                    provider_registry=registry,
+                    text_extractor=lambda *_: TextExtraction(
+                        complete_cover, "rapidocr", (1,), {}, 1, False),
+                    provider_detail_extractor=read_page,
+                )
+                early_calls = []
+                source_analysis.analyse_pdf_pipeline(
+                    path, connection=None, community_code="658",
+                    provider_registry=registry,
+                    text_extractor=lambda *_: TextExtraction(
+                        cover, "rapidocr", (1,), {}, 1, False),
+                    provider_detail_extractor=lambda _path, first, _last: (
+                        early_calls.append(first) or
+                        (per_page[3] + " " + per_page[4] if first == 3 else "Anexo")
+                    ),
+                )
+            finally:
+                connection.close()
+        self.assertEqual([2, 3, 4], calls)
+        self.assertEqual([2, 3], early_calls)
+        self.assertEqual([f"invoice-ocr-page:{page}:v1" for page in (2, 3, 4)], pages)
+        self.assertEqual(("2026-02-01", "2026-02-28", "121.00", "450"),
+                         tuple(result.candidates[key] for key in
+                               ("fecha_inicio", "fecha_fin", "importe_total", "consumo_kwh")))
+        self.assertEqual(("10.0", "90.0"),
+                         (result.candidates["termino_fijo"], result.candidates["termino_variable"]))
+
     def test_connected_pdf_analysis_uses_global_pipeline_and_field_evidence(self):
         registry = provider_registry_from_payload({"proveedores": {
             "ACME": {

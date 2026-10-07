@@ -17,7 +17,7 @@ from typing import Callable, Mapping
 
 from document_classifier import DocumentClassification, classify_document
 from app_paths import ApplicationPaths
-from document_text_service import TextExtraction, get_document_text
+from document_text_service import TextExtraction, extract_ocr_page_with_timeout, get_document_text
 from invoice_extractors import FieldEvidence
 from invoice_extractors import extract_invoice_fields
 from provider_registry import (
@@ -433,6 +433,75 @@ def _generic_reading_from_pdf(path: Path, text: str, locator: SourceLocator) -> 
     return reading_table_analysis(table, locator)
 
 
+def _missing_invoice_evidence(
+    profile: ProviderProfile, text: str, locator: SourceLocator, *, include_detail: bool,
+) -> set[str]:
+    values = {name for name, item in extract_invoice_fields(profile, text).fields.items() if item.value}
+    legacy, _ = _legacy_invoice_candidates(profile, text, locator)
+    values.update(name for name, value in legacy.items() if value)
+    expected = set(INVOICE_FIELDS)
+    if include_detail:
+        if profile.service_family in {"ELECTRICIDAD", "GAS", "CALEFACCION"}:
+            expected.add("consumo_kwh")
+        elif profile.service_family in {"AGUA", "ACS"}:
+            expected.add("consumo_m3")
+        regex = profile.legacy.get("regex")
+        if isinstance(regex, Mapping):
+            expected.update(name for name in ("termino_fijo", "termino_variable") if name in regex)
+    if "consumo_total" in values:
+        values.update({"consumo_kwh", "consumo_m3"})
+    return expected - values
+
+
+def _recover_missing_invoice_pages(
+    path: Path, connection: sqlite3.Connection | None, profile: ProviderProfile,
+    text: str, locator: SourceLocator, *, start_page: int,
+    include_detail: bool, page_extractor: Callable[[Path, int, int], str] | None,
+) -> str:
+    """Busca campos ausentes hasta la página 4, con caché y 50 s de presupuesto."""
+    import time
+
+    missing = _missing_invoice_evidence(profile, text, locator, include_detail=include_detail)
+    if not missing:
+        return text
+    try:
+        import pdfplumber
+        with pdfplumber.open(str(path)) as pdf:
+            last_page = min(4, len(pdf.pages))
+    except Exception:
+        if page_extractor is None:
+            return text
+        last_page = 4  # inyector de pruebas para PDFs sintéticos
+    deadline = time.monotonic() + 50
+    for page in range(start_page, last_page + 1):
+        remaining = int(deadline - time.monotonic())
+        if remaining <= 0:
+            break
+
+        def extract_page(document_path: Path, _max_pages: int) -> TextExtraction:
+            started = time.monotonic()
+            page_text = (
+                page_extractor(document_path, page, page)
+                if page_extractor is not None
+                else extract_ocr_page_with_timeout(document_path, page, min(remaining, 25))
+            )
+            return TextExtraction(
+                page_text, "invoice_page_ocr" if page_text.strip() else "no_text",
+                (page,), {}, int((time.monotonic() - started) * 1000), False,
+            )
+
+        result = get_document_text(
+            connection, path, extractor_version=f"invoice-ocr-page:{page}:v1",
+            max_pages=page, extractor=extract_page,
+        )
+        if result.text.strip():
+            text += "\n" + result.text
+            missing = _missing_invoice_evidence(profile, text, locator, include_detail=include_detail)
+            if not missing:
+                break
+    return text
+
+
 def analyse_pdf_pipeline(
     path: Path,
     *,
@@ -525,7 +594,13 @@ def analyse_pdf_pipeline(
         if confirmed is not None:
             match = ProviderMatch(confirmed.key, "high", "provider:manual:v1", (forced_provider,))
     if match is None:
-        bundle = extract_invoice_fields(_generic_invoice_profile(), extraction.text)
+        generic_profile = _generic_invoice_profile()
+        generic_text = _recover_missing_invoice_pages(
+            path, connection, generic_profile, extraction.text, locator,
+            start_page=2, include_detail=False,
+            page_extractor=provider_detail_extractor,
+        )
+        bundle = extract_invoice_fields(generic_profile, generic_text)
         return SourceAnalysis.invoice(
             {"proveedor": forced_provider} if forced_provider else None,
             confidence="medium",
@@ -579,6 +654,13 @@ def analyse_pdf_pipeline(
         )
         if detail.text.strip():
             provider_text = f"{provider_text}\n{detail.text}"
+
+    provider_text = _recover_missing_invoice_pages(
+        path, connection, profile, provider_text, locator,
+        start_page=max(2, detail_last_page + 1),
+        include_detail=extraction.method != "pdf_text",
+        page_extractor=provider_detail_extractor,
+    )
 
     bundle = extract_invoice_fields(profile, provider_text)
     candidates = {name: item.value for name, item in bundle.fields.items()}
