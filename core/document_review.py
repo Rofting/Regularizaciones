@@ -820,6 +820,14 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
         if issue is None or issue["status"] != "open":
             raise LookupError("Incidencia no encontrada")
         normalized_value = _validate_issue_value(str(issue["field_name"]), normalized_value)
+        if issue["code"] == "manual_community_assignment":
+            destination = connection.execute(
+                """SELECT c.codigo FROM regularization_cases r
+                   JOIN comunidades c ON c.id_comunidad=r.id_comunidad
+                   WHERE r.id_case=?""", (issue["id_case"],),
+            ).fetchone()
+            if destination is None or normalized_value != str(destination[0]):
+                raise ValueError("Confirma el código de la comunidad de este expediente")
         if issue["code"] == _COUNTER_RESET_CODE:
             raise ValueError(
                 "Un reinicio de contador sólo se puede cerrar con una estimación aprobada"

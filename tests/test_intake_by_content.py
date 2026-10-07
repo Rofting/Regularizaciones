@@ -17,10 +17,12 @@ for folder in (PROJECT_ROOT / "core", PROJECT_ROOT / "tests"):
 
 import case_ingestion
 import community_discovery
+import document_review
 import expedient_service
 import gestor_bd
 import intake_routing
 from test_source_preview import write_pdf
+from source_analysis import SourceAnalysis
 
 CIF_658, CIF_701 = "H10000008", "H10000016"
 
@@ -130,6 +132,83 @@ class IntakeByContentTest(unittest.TestCase):
         result = intake_routing.ingest_route(self.database, targets["999"], archive_root=self.root / "archivo")
         self.assertEqual(0, result.created)
         self.assertTrue(result.errors)
+
+    def test_manual_conflict_is_audited_and_never_applied_without_review(self):
+        conflict = self.pdf("701_gas.pdf", "Factura gas", f"Cliente CIF {CIF_658}")
+        proposal = community_discovery.build_global_intake((conflict,), connection=self.connection)
+        reason = proposal.reason_for(conflict)
+        self.assertIn("contradictorias", reason)
+        assignments = intake_routing.assignments_from_proposal(proposal, {conflict: "658"})
+        decision = intake_routing.ManualAssignment(conflict, "658", reason, "CIF y titular comprobados")
+        target = intake_routing.plan_routes(
+            self.connection, assignments, manual_assignments=(decision,),
+        )[0]
+        complete = SourceAnalysis.invoice({
+            "tipo_suministro": "GAS", "fecha_inicio": "2026-01-01",
+            "fecha_fin": "2026-01-31", "importe_total": "120.00",
+        })
+        analyse = lambda _path, **_kwargs: complete
+        result = intake_routing.ingest_route(
+            self.database, target, archive_root=self.root / "archivo", analyser=analyse,
+        )
+        self.assertEqual((1, (), []), (result.created, result.foreign, result.errors))
+        row = self.connection.execute(
+            "SELECT id_document,status FROM source_documents WHERE original_name=?", (conflict.name,),
+        ).fetchone()
+        self.assertNotEqual("validated", row["status"])
+        issue = self.connection.execute(
+            "SELECT id_issue,message,detected_value FROM review_issues WHERE id_document=? AND code=?",
+            (row["id_document"], "manual_community_assignment"),
+        ).fetchone()
+        self.assertIn(reason, issue["message"])
+        self.assertIn("CIF y titular comprobados", issue["message"])
+        with self.assertRaisesRegex(ValueError, "comunidad"):
+            document_review.resolve_issue(
+                self.connection, issue["id_issue"], value="701", reason="Equivocación",
+            )
+        again = intake_routing.ingest_route(
+            self.database, target, archive_root=self.root / "archivo", analyser=analyse,
+        )
+        self.assertEqual((0, 1), (again.created, again.duplicates))
+        self.assertNotEqual("validated", self.connection.execute(
+            "SELECT status FROM source_documents WHERE id_document=?", (row["id_document"],)
+        ).fetchone()[0])
+        document_review.resolve_issue(
+            self.connection, issue["id_issue"], value="658", reason="CIF contrastado en el original",
+        )
+        third = intake_routing.ingest_route(
+            self.database, target, archive_root=self.root / "archivo", analyser=analyse,
+        )
+        self.assertEqual((0, 1), (third.created, third.duplicates))
+        self.assertEqual(0, self.connection.execute(
+            """SELECT COUNT(*) FROM review_issues WHERE id_document=?
+               AND code='manual_community_assignment' AND status='open'""",
+            (row["id_document"],),
+        ).fetchone()[0])
+
+    def test_manual_conflict_needs_reason_and_fresh_evidence(self):
+        conflict = self.pdf("701_gas.pdf", f"Cliente CIF {CIF_658}")
+        proposal = community_discovery.build_global_intake((conflict,), connection=self.connection)
+        reason = proposal.reason_for(conflict)
+        assignments = {"658": [conflict]}
+        missing_reason = intake_routing.ManualAssignment(conflict, "658", reason)
+        target = intake_routing.plan_routes(
+            self.connection, assignments, manual_assignments=(missing_reason,),
+        )[0]
+        rejected = intake_routing.ingest_route(
+            self.database, target, archive_root=self.root / "archivo",
+        )
+        self.assertEqual(0, rejected.created)
+        self.assertTrue(rejected.errors)
+        stale = intake_routing.ManualAssignment(conflict, "658", "Otra evidencia", "Revisado")
+        target = intake_routing.plan_routes(
+            self.connection, assignments, manual_assignments=(stale,),
+        )[0]
+        rejected = intake_routing.ingest_route(
+            self.database, target, archive_root=self.root / "archivo",
+        )
+        self.assertEqual(0, rejected.created)
+        self.assertTrue(rejected.errors)
 
 
 if __name__ == "__main__":

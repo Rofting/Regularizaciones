@@ -17,6 +17,14 @@ from typing import Callable, Iterable, Mapping, Sequence
 
 
 @dataclass(frozen=True)
+class ManualAssignment:
+    path: Path
+    code: str
+    identity_reason: str
+    justification: str = ""
+
+
+@dataclass(frozen=True)
 class RouteTarget:
     code: str
     community_id: int | None
@@ -24,6 +32,7 @@ class RouteTarget:
     case_id: int | None
     case_label: str | None
     paths: tuple[Path, ...]
+    manual_assignments: tuple[ManualAssignment, ...] = ()
 
     @property
     def blocked_reason(self) -> str | None:
@@ -66,6 +75,7 @@ def open_case_for(connection: sqlite3.Connection, code: str):
 
 def plan_routes(
     connection: sqlite3.Connection, assignments: Mapping[str, Sequence[Path]],
+    *, manual_assignments: Sequence[ManualAssignment] = (),
 ) -> tuple[RouteTarget, ...]:
     targets = []
     for code in sorted(assignments, key=lambda value: (len(value), value)):
@@ -73,7 +83,8 @@ def plan_routes(
         if not paths:
             continue
         community_id, name, case_id, label = open_case_for(connection, code)
-        targets.append(RouteTarget(code, community_id, name, case_id, label, paths))
+        decisions = tuple(item for item in manual_assignments if item.code == code and item.path in paths)
+        targets.append(RouteTarget(code, community_id, name, case_id, label, paths, decisions))
     return tuple(targets)
 
 
@@ -100,6 +111,35 @@ def ingest_route(
         accepted, foreign = community_discovery.partition_sources_for_community(
             target.paths, target.code, connection=connection,
         )
+        accepted = list(accepted)
+        foreign = list(foreign)
+        valid_manual = {}
+        for decision in target.manual_assignments:
+            if decision.path not in target.paths or decision.code != target.code:
+                continue
+            identity = community_discovery.identify_source(decision.path, connection)
+            if identity.reason != decision.identity_reason:
+                archived_in_target = connection.execute(
+                    """SELECT 1 FROM source_documents
+                       WHERE id_case=? AND sha256=? LIMIT 1""",
+                    (target.case_id, community_discovery._sha256(decision.path)),
+                ).fetchone() is not None
+                original_identity = community_discovery.identify_source(
+                    decision.path, connection, include_archived=False,
+                )
+                if not archived_in_target or original_identity.reason != decision.identity_reason:
+                    result.errors.append((decision.path.name, "Las evidencias han cambiado; vuelve a revisar el reparto"))
+                    if decision.path in accepted:
+                        accepted.remove(decision.path)
+                    continue
+            if identity.points_elsewhere and not decision.justification.strip():
+                result.errors.append((decision.path.name, "Justifica la elección ante evidencias contradictorias"))
+                continue
+            if decision.path in foreign:
+                foreign.remove(decision.path)
+                accepted.append(decision.path)
+            if decision.path in accepted:
+                valid_manual[decision.path] = decision
         connection.commit()
     finally:
         connection.close()
@@ -120,6 +160,7 @@ def ingest_route(
             added = case_ingestion.add_analysed_document_to_case(
                 connection, target.case_id, source_path=item.path,
                 archive_root=archive_root, analysis=item.analysis,
+                manual_routing=(valid_manual[item.path] if item.path in valid_manual else None),
             )
         except Exception as error:  # se informa por archivo y se sigue
             result.errors.append((item.path.name, str(error)))
@@ -152,5 +193,5 @@ def assignments_from_proposal(proposal, manual: Mapping[Path, str] | None = None
 
 
 __all__ = [
-    "RouteResult", "RouteTarget", "assignments_from_proposal", "ingest_route", "open_case_for", "plan_routes",
+    "ManualAssignment", "RouteResult", "RouteTarget", "assignments_from_proposal", "ingest_route", "open_case_for", "plan_routes",
 ]

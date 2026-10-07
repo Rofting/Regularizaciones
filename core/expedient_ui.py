@@ -580,6 +580,7 @@ def _show_detected_communities(
         ).pack(anchor="w", pady=(2, 0))
 
     manual: dict[Path, tk.StringVar] = {}
+    manual_reasons: dict[Path, tk.StringVar] = {}
     if proposal.unassigned_paths:
         ctk.CTkLabel(
             body,
@@ -602,6 +603,11 @@ def _show_detected_communities(
             manual[path] = variable
             ctk.CTkComboBox(row, values=options, variable=variable, width=240, state="readonly",
                             border_color=C["borde"]).pack(side="right", padx=10)
+            if "contradictorias" in proposal.reason_for(path).lower() or "insuficiente" in proposal.reason_for(path).lower():
+                reason = tk.StringVar(master=dialog)
+                manual_reasons[path] = reason
+                ctk.CTkEntry(text, textvariable=reason, width=490,
+                             placeholder_text="Motivo de la elección manual (obligatorio)").pack(anchor="w", pady=(5, 0))
 
     if not candidates:
         ctk.CTkLabel(
@@ -671,10 +677,23 @@ def _show_detected_communities(
     def distribute():
         chosen = {path: variable.get().split(" — ", 1)[0] for path, variable in manual.items()
                   if " — " in variable.get()}
+        missing = [path.name for path in chosen if path in manual_reasons
+                   and not manual_reasons[path].get().strip()]
+        if missing:
+            messagebox.showwarning(
+                "Justificación necesaria",
+                "Explica por qué asignas estos documentos pese a sus evidencias:\n" + "\n".join(missing),
+                parent=dialog,
+            )
+            return
+        decisions = tuple(intake_routing.ManualAssignment(
+            path, code, proposal.reason_for(path),
+            manual_reasons[path].get().strip() if path in manual_reasons else "",
+        ) for path, code in chosen.items())
         assignments = intake_routing.assignments_from_proposal(proposal, chosen)
         connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
         try:
-            targets = intake_routing.plan_routes(connection, assignments)
+            targets = intake_routing.plan_routes(connection, assignments, manual_assignments=decisions)
         finally:
             connection.close()
         ready = [target for target in targets if not target.blocked_reason]
@@ -1063,6 +1082,12 @@ def open_cases_overview_dialog(app: "AppGestionFincas") -> None:
 def issue_guidance(field_name: str) -> dict[str, str]:
     """Traduce campos técnicos a instrucciones accionables de revisión."""
     guides = {
+        "document.community": {
+            "label": "Comunidad del documento",
+            "what_to_find": "Comprueba el CIF, el CUPS y el titular en el original antes de confirmar la comunidad.",
+            "format": "Escribe el código de la comunidad del expediente y explica la comprobación.",
+            "why": "El documento se asignó manualmente y sus datos no deben aplicarse sin revisión.",
+        },
         "document_kind": {
             "label": "Tipo de documento",
             "what_to_find": "Consulta el original y confirma si es una factura, una lectura o un listado de propietarios.",
@@ -1166,6 +1191,7 @@ def issue_guidance(field_name: str) -> dict[str, str]:
 
 
 _ISSUE_TITLES = {
+    "manual_community_assignment": "Comunidad asignada manualmente",
     "PROVIDER_UNKNOWN": "Proveedor sin identificar",
     "INVOICE_OUTSIDE_PERIOD": "Factura fuera del período",
     "ELIGIBILITY_REVIEW_REQUIRED": "Factura por confirmar",
