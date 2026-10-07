@@ -176,7 +176,9 @@ def _known_community_cifs(connection: sqlite3.Connection) -> dict[str, str]:
     return cifs
 
 
-def identify_source(path: Path, connection: sqlite3.Connection | None = None) -> SourceIdentity:
+def identify_source(
+    path: Path, connection: sqlite3.Connection | None = None, *, include_archived: bool = True,
+) -> SourceIdentity:
     """Reúne evidencias de comunidad y sólo asigna si todas coinciden.
 
     Evidencias: código en el nombre o la carpeta, el mismo archivo ya archivado
@@ -193,7 +195,7 @@ def identify_source(path: Path, connection: sqlite3.Connection | None = None) ->
         return _decide(votes, None, None)
 
     digest = _sha256(path)
-    if digest:
+    if digest and include_archived:
         for row in connection.execute(
             """SELECT DISTINCT c.codigo, r.nombre FROM source_documents d
                JOIN regularization_cases r ON r.id_case=d.id_case

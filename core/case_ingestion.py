@@ -1293,6 +1293,7 @@ def add_analysed_document_to_case(
     source_path: str | Path,
     archive_root: str | Path,
     analysis: SourceAnalysis,
+    manual_routing=None,
 ) -> IngestionResult:
     """Registra una fuente y conserva el resultado de su clasificación."""
     analysis = _normalised_analysis(analysis)
@@ -1306,6 +1307,21 @@ def add_analysed_document_to_case(
     _persist_analysis(
         connection, case_id, document, analysis, reanalysis=not created,
     )
+    already_reviewed = connection.execute(
+        """SELECT 1 FROM review_issues WHERE id_document=?
+           AND code='manual_community_assignment' AND status='resolved' LIMIT 1""",
+        (document.id_document,),
+    ).fetchone() is not None
+    if manual_routing is not None and not already_reviewed:
+        explanation = manual_routing.justification.strip() or "Comunidad elegida manualmente por el usuario"
+        document_review.create_review_issue(
+            connection, case_id, document.id_document,
+            code="manual_community_assignment", field_name="document.community",
+            detected_value=manual_routing.code,
+            message=(f"Asignación manual a la comunidad {manual_routing.code}. "
+                     f"Evidencia inicial: {manual_routing.identity_reason}. "
+                     f"Justificación: {explanation}. Revisa los datos antes de aplicarlos."),
+        )
     document = _auto_apply_clean_analysis(connection, case_id, document, analysis)
     return IngestionResult(
         _source_document(connection, document.id_document),
