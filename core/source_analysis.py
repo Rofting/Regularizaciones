@@ -425,7 +425,7 @@ def reading_table_analysis(table, locator: SourceLocator | None = None) -> Sourc
 
 def _generic_reading_from_pdf(path: Path, text: str, locator: SourceLocator) -> SourceAnalysis | None:
     from reading_tables import parse_reading_document, tables_from_pdf
-    table = parse_reading_document(text=text, table_rows=tables_from_pdf(path))
+    table = parse_reading_document(text=text, table_rows=tables_from_pdf(path, text=text))
     if table is None or not any(
         row.get("val_ant") is not None and row.get("val_act") is not None for row in table.rows
     ):
