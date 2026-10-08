@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import keywords
+import reading_formats
 
 
 ROLES_REQUIRED = ("vivienda", "val_ant", "val_act")
@@ -45,6 +46,7 @@ class ReadingTable:
     company: str | None
     confidence: str
     diagnostics: tuple[str, ...] = field(default_factory=tuple)
+    format_metadata: dict | None = None
 
     @property
     def service(self) -> str | None:
@@ -181,7 +183,7 @@ def _resolve_reading_columns(columns: list[_Column]) -> dict[str | None, tuple[_
     return pairs
 
 
-def _find_header(rows: Sequence[Sequence[object]]):
+def _find_header(rows: Sequence[Sequence[object]], learned=None):
     limit = min(len(rows), 40)
     for index in range(limit):
         candidates = [(index, list(rows[index]))]
@@ -193,7 +195,20 @@ def _find_header(rows: Sequence[Sequence[object]]):
             ]
             candidates.append((index + 1, merged))
         for last_header_row, cells in candidates:
-            columns = _classify_header(cells)
+            mapping = (learned or {}).get(reading_formats.header_signature(cells))
+            if mapping and any(item["index"] >= len(cells) for item in mapping):
+                mapping = None
+            if mapping and any(item["role"] == "lectura_fecha" and not _date_in(cells[item["index"]])
+                               for item in mapping):
+                mapping = None
+            if mapping:
+                columns = []
+                for item in mapping:
+                    when = _date_in(cells[item["index"]])
+                    columns.append(_Column(item["index"], item["role"], item["service"],
+                                           when[0] if when else None, when[1] if when else False))
+            else:
+                columns = _classify_header(cells)
             if not any(column.role == "vivienda" for column in columns):
                 continue
             pairs = _resolve_reading_columns(columns)
@@ -204,10 +219,14 @@ def _find_header(rows: Sequence[Sequence[object]]):
 
 # ── Tabla ────────────────────────────────────────────────────────────────
 
-def parse_reading_rows(rows: Sequence[Sequence[object]], text: str = "") -> ReadingTable | None:
+def parse_reading_rows(rows: Sequence[Sequence[object]], text: str = "", *, connection=None) -> ReadingTable | None:
     """Interpreta una tabla de lecturas; ``None`` si no hay una reconocible."""
     rows = [list(row) for row in rows if row is not None]
-    found = _find_header(rows)
+    company = detect_company(text + " " + " ".join(
+        str(cell or "") for row in rows[:6] for cell in row
+    ))
+    learned = reading_formats.formats_for(connection, company)
+    found = _find_header(rows, learned)
     if found is None:
         return None
     header_index, header_cells, columns, pairs = found
@@ -269,16 +288,18 @@ def parse_reading_rows(rows: Sequence[Sequence[object]], text: str = "") -> Read
         return None
 
     diagnostics = []
+    signature = reading_formats.header_signature(header_cells)
     start, end = _period(pairs, text)
     if checked:
         ratio = matched / checked
-        confidence = "high" if ratio >= 0.9 else "medium"
-        if ratio < 0.9:
+        confidence = "high" if ratio == 1 else "medium"
+        if ratio < 1:
             diagnostics.append(f"consumo_no_cuadra:{checked - matched}/{checked}")
     else:
         complete = sum(row["val_ant"] is not None and row["val_act"] is not None for row in extracted)
         confidence = "high" if complete == len(extracted) and len(extracted) >= 2 else "medium"
     if negatives:
+        confidence = "medium"
         diagnostics.append(f"lecturas_decrecientes:{negatives}")
     if summary_consumptions and len(consumption_values) == len(extracted):
         if abs(sum(consumption_values) - sum(summary_consumptions)) > 0.6:
@@ -287,10 +308,19 @@ def parse_reading_rows(rows: Sequence[Sequence[object]], text: str = "") -> Read
     if any(service is None for service in services):
         confidence = "medium"
         diagnostics.append("servicio_sin_identificar")
+    if learned and signature not in learned:
+        confidence = "medium"
+        diagnostics.append("formato_lecturas_modificado")
+    elif connection is not None and company and signature not in learned:
+        confidence = "medium"  # el primer informe enseña el formato al confirmarlo
+    metadata = {
+        "company": company, "header_signature": signature,
+        "extractor_version": reading_formats.EXTRACTOR_VERSION,
+        "mapping": [{"index": c.index, "role": c.role, "service": c.service} for c in columns],
+    } if company else None
     return ReadingTable(
         tuple(extracted), tuple(s for s in services if s), start, end,
-        detect_company(text + " " + " ".join(str(c or "") for c in header_cells)),
-        confidence, tuple(diagnostics),
+        company, confidence, tuple(diagnostics), metadata,
     )
 
 
@@ -377,13 +407,13 @@ def tables_from_pdf(path: str | Path, *, max_pages: int = 15, text: str = "") ->
 
 
 def parse_reading_document(
-    *, text: str = "", table_rows: Iterable[Sequence[object]] = (),
+    *, text: str = "", table_rows: Iterable[Sequence[object]] = (), connection=None,
 ) -> ReadingTable | None:
     """Prueba primero las tablas estructuradas y después las líneas de texto."""
     rows = list(table_rows)
-    best = parse_reading_rows(rows, text) if rows else None
+    best = parse_reading_rows(rows, text, connection=connection) if rows else None
     if best is None or best.confidence != "high":
-        from_text = parse_reading_rows(rows_from_text(text), text) if text else None
+        from_text = parse_reading_rows(rows_from_text(text), text, connection=connection) if text else None
         if from_text is not None and (best is None or len(from_text.rows) > len(best.rows)
                                       or (len(from_text.rows) == len(best.rows)
                                           and from_text.confidence == "high"

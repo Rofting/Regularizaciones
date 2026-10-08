@@ -26,6 +26,7 @@ _AUTOMATIC_REVIEW_CODES = (
     _CLASSIFICATION_REQUIRED_CODE,
     _ARCHIVED_SOURCE_DUPLICATE_CODE,
     _ARCHIVED_SOURCE_MISSING_CODE,
+    "READING_FORMAT_REVIEW",
 )
 _VALIDATION_STATUSES = {"candidate", "validated", "rejected"}
 _ISSUE_ORIGINS = {"automatic", "manual"}
@@ -459,6 +460,15 @@ def create_invalid_field_issue(
         message=message,
         detected_value=detected_value,
         origin="automatic",
+    )
+
+
+def create_reading_format_issue(connection, case_id, document_id, *, message, detected_value):
+    """Conserva el motivo de un formato nuevo o unas lecturas incoherentes."""
+    return _create_review_issue(
+        connection, case_id, document_id, code="READING_FORMAT_REVIEW",
+        field_name="reading.format_review", message=message,
+        detected_value=detected_value, origin="automatic",
     )
 
 

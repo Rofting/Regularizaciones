@@ -600,6 +600,112 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
         self.confirm(self.ingest(analysis, self.reading_file))
         self.assertEqual(2, self.connection.execute("SELECT COUNT(*) FROM lecturas_vecino").fetchone()[0])
 
+    def test_confirmed_reading_format_is_reused_and_changed_columns_are_reviewed(self):
+        from reading_tables import parse_reading_rows
+        self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'A','Vecino')", (self.community_id,))
+        self.reading_file.write_text(
+            "ista metering Lecturas ACS\nVivienda;Lectura 01/01/2026;Lectura 31/01/2026;Consumo\nA;100;120;20\n",
+            encoding="utf-8",
+        )
+        analysis = source_analysis.analyse_tabular(self.reading_file, connection=self.connection)
+        self.assertEqual("medium", analysis.confidence)
+        document = self.ingest(analysis, self.reading_file)
+        self.assertEqual(0, self.connection.execute("SELECT COUNT(*) FROM learned_reading_formats").fetchone()[0])
+        self.confirm(document)
+        learned = self.connection.execute("SELECT company,confirmed_by,id_document FROM learned_reading_formats").fetchone()
+        self.assertEqual(("ISTA", "Jose", document.id_document), tuple(learned))
+        rows = [["Vivienda", "Lectura 01/02/2026", "Lectura 28/02/2026", "Consumo"], ["B", 30, 40, 10]]
+        with patch("reading_tables._classify_header", return_value=[]):
+            reused = parse_reading_rows(rows, "ista metering ACS Comunidad diferente", connection=self.connection)
+        self.assertEqual("2026-02-28", reused.rows[0]["fecha_act"])
+        self.assertEqual("B", reused.rows[0]["vivienda"])
+        self.assertEqual("high", reused.confidence)
+        from document_text_service import TextExtraction
+        with patch("reading_tables.tables_from_pdf", return_value=rows):
+            pdf_analysis = source_analysis.analyse_source(
+                self.source_path, community_code="OTRA", connection=self.connection,
+                text_extractor=lambda *_: TextExtraction("ista metering Informe de lecturas ACS", "pdf_text", (1,), {}, 1, False),
+            )
+        self.assertEqual("reading", pdf_analysis.kind)
+        self.assertEqual("high", pdf_analysis.confidence)
+        self.assertEqual("2026-02-28", pdf_analysis.candidates["fecha_fin"])
+        # El mismo mapeo sirve en otro expediente sin copiar viviendas ni fechas.
+        from openpyxl import Workbook
+        other_id = gestor_bd.obtener_o_crear_comunidad(self.connection, "OTRA", "Otra comunidad")
+        other_case = expedient_service.create_case(
+            self.connection, other_id, name="Febrero", start_date=date(2026, 2, 1), end_date=date(2026, 2, 28),
+        )
+        self.connection.execute("INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'B','Otro vecino')", (other_id,))
+        workbook = Workbook()
+        workbook.active.append(["ista metering ACS"])
+        for row in rows:
+            workbook.active.append(row)
+        other_path = self.root / "otro-informe.xlsx"
+        workbook.save(other_path)
+        workbook.close()
+        analysis = source_analysis.analyse_source(other_path, community_code="OTRA", connection=self.connection)
+        other_document = self.ingest(analysis, other_path, other_case)
+        self.assertEqual("validated", other_document.status)
+        self.assertEqual([30.0, 40.0], [r[0] for r in self.connection.execute(
+            "SELECT valor_acumulado FROM lecturas_vecino l JOIN propietarios p USING(id_propietario) WHERE p.id_comunidad=? ORDER BY fecha_lectura", (other_id,))])
+        self.assertEqual(("Jose", document.id_document), tuple(self.connection.execute(
+            "SELECT confirmed_by,id_document FROM learned_reading_formats").fetchone()))
+        changed = parse_reading_rows(
+            [["Vivienda", "Consumo", "Lectura 01/02/2026", "Lectura 28/02/2026"], ["B", 10, 30, 40]],
+            "ista metering ACS", connection=self.connection,
+        )
+        self.assertEqual("medium", changed.confidence)
+        self.assertIn("formato_lecturas_modificado", changed.diagnostics)
+        changed_path = self.root / "columnas-cambiadas.csv"
+        changed_path.write_text("ista metering ACS\nVivienda;Consumo;Lectura 01/02/2026;Lectura 28/02/2026\nB;10;30;40\n", encoding="utf-8")
+        changed_document = self.ingest(
+            source_analysis.analyse_tabular(changed_path, connection=self.connection), changed_path, other_case,
+        )
+        issues = document_review.list_open_issues(self.connection, other_case.id_case)
+        self.assertEqual("READING_FORMAT_REVIEW", issues[0].code)
+        self.assertIn("Las columnas difieren", issues[0].message)
+        with self.assertRaisesRegex(ValueError, "incidencias"):
+            self.confirm(changed_document, other_case)
+        document_review.resolve_issue(self.connection, issues[0].id_issue, value="Columnas comprobadas", reason="Coincide con la fuente", resolved_by="Jose")
+        self.confirm(changed_document, other_case)
+        self.assertEqual(2, self.connection.execute("SELECT COUNT(*) FROM learned_reading_formats").fetchone()[0])
+        rows[1][-1] = 99
+        incoherent = parse_reading_rows(rows, "ista metering ACS", connection=self.connection)
+        self.assertEqual("medium", incoherent.confidence)
+        self.assertIn("consumo_no_cuadra:1/1", incoherent.diagnostics)
+
+    def test_reading_learning_ignores_old_versions_and_damaged_mappings(self):
+        from reading_tables import parse_reading_rows
+        from reading_formats import EXTRACTOR_VERSION
+        rows = [["Vivienda", "Lectura 01/01/2026", "Lectura 31/01/2026", "Consumo"], ["A", 100, 120, 20]]
+        parsed = parse_reading_rows(rows, "ista metering ACS", connection=self.connection)
+        metadata = parsed.format_metadata
+        self.connection.execute(
+            "INSERT INTO learned_reading_formats(company,header_signature,extractor_version,mapping_json,confirmed_by) VALUES (?,?,?,?,?)",
+            (metadata["company"], metadata["header_signature"], "old-extractor", json.dumps(metadata["mapping"]), "Jose"),
+        )
+        old = parse_reading_rows(rows, "ista metering ACS", connection=self.connection)
+        self.assertEqual("medium", old.confidence)
+        self.connection.execute(
+            "INSERT INTO learned_reading_formats(company,header_signature,extractor_version,mapping_json,confirmed_by) VALUES (?,?,?,?,?)",
+            (metadata["company"], metadata["header_signature"], EXTRACTOR_VERSION, "broken-json", "Jose"),
+        )
+        damaged = parse_reading_rows(rows, "ista metering ACS", connection=self.connection)
+        self.assertEqual("medium", damaged.confidence)
+        other_company = parse_reading_rows(rows, "Techem ACS", connection=self.connection)
+        self.assertEqual("medium", other_company.confidence)
+        unknown = parse_reading_rows(rows, "ACS", connection=self.connection)
+        self.assertIsNone(unknown.format_metadata)
+
+    def test_one_incoherent_reading_among_many_requires_review(self):
+        from reading_tables import parse_reading_rows
+        rows = [["Vivienda", "Lectura 01/01/2026", "Lectura 31/01/2026", "Consumo"]]
+        rows += [[str(i), 100, 120, 20] for i in range(20)]
+        rows[-1][-1] = 99
+        table = parse_reading_rows(rows, "Techem ACS")
+        self.assertEqual("medium", table.confidence)
+        self.assertIn("consumo_no_cuadra:1/20", table.diagnostics)
+
     def test_incomplete_reading_csv_stays_reviewable(self):
         analysis = source_analysis.analyse_tabular(self.reading_file)
         self.assertTrue(analysis.kind == "unknown" or analysis.required_fields,

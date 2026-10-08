@@ -403,6 +403,8 @@ def reading_table_analysis(table, locator: SourceLocator | None = None) -> Sourc
         values["fecha_fin"] = table.end
     if table.company:
         values["empresa_lecturas"] = table.company
+    if table.format_metadata:
+        values["reading.format"] = json.dumps(table.format_metadata, ensure_ascii=False)
     missing = tuple(
         name for name, row_key in (("tipo", "tipo"), ("fecha_inicio", "fecha_ant"), ("fecha_fin", "fecha_act"))
         if not values.get(name) and any(not row.get(row_key) for row in complete)
@@ -412,20 +414,35 @@ def reading_table_analysis(table, locator: SourceLocator | None = None) -> Sourc
     if len(complete) < len(table.rows):
         confidence = "medium"
         notes.append(f"filas_incompletas:{len(table.rows) - len(complete)}")
+    if notes:
+        values["reading.diagnostics"] = json.dumps(notes, ensure_ascii=False)
     message = "Lecturas detectadas automáticamente"
     if table.company:
         message += f" (informe de {table.company.replace('_', ' ').title()})"
     message += ". Revisa servicio, fechas y viviendas antes de confirmar."
     if notes:
-        message += " Avisos: " + ", ".join(notes) + "."
+        descriptions = {
+            "formato_lecturas_modificado": "Las columnas difieren de los formatos confirmados de esta empresa",
+            "consumo_no_cuadra": "Hay consumos que no coinciden con la diferencia entre lecturas",
+            "total_consumo_no_cuadra": "El consumo total no coincide con la suma de las viviendas",
+            "lecturas_decrecientes": "Hay contadores cuya lectura actual es menor que la anterior",
+            "servicio_sin_identificar": "Falta identificar el servicio de las lecturas",
+            "filas_incompletas": "Hay viviendas con lecturas incompletas",
+        }
+        readable = []
+        for note in notes:
+            code, _, detail = note.partition(":")
+            explanation = descriptions.get(code, code.replace("_", " "))
+            readable.append(explanation + (f" ({detail})" if detail else ""))
+        message += " Avisos: " + "; ".join(readable) + "."
     return SourceAnalysis(
         "reading", confidence if not missing else "medium", values, missing, locator, message,
     )
 
 
-def _generic_reading_from_pdf(path: Path, text: str, locator: SourceLocator) -> SourceAnalysis | None:
+def _generic_reading_from_pdf(path: Path, text: str, locator: SourceLocator, connection=None) -> SourceAnalysis | None:
     from reading_tables import parse_reading_document, tables_from_pdf
-    table = parse_reading_document(text=text, table_rows=tables_from_pdf(path, text=text))
+    table = parse_reading_document(text=text, table_rows=tables_from_pdf(path, text=text), connection=connection)
     if table is None or not any(
         row.get("val_ant") is not None and row.get("val_act") is not None for row in table.rows
     ):
@@ -544,6 +561,10 @@ def analyse_pdf_pipeline(
         return SourceAnalysis.owners(locator=locator)
 
     if classification.kind == "reading":
+        generic = _generic_reading_from_pdf(path, extraction.text, locator, connection)
+        if generic is not None:
+            return generic
+
         def process_preloaded(_path, selected_community):
             from lector_pdf import procesar_archivo
             provider_config = ApplicationPaths.resolve().home / "config" / "proveedores.json"
@@ -561,17 +582,12 @@ def analyse_pdf_pipeline(
             community_code=community_code,
             providers=providers,
         )
-        if legacy.kind != "unknown":
-            return legacy
-        # Informe de una empresa de lecturas sin parser propio: se busca su
-        # tabla por el significado de las cabeceras.
-        generic = _generic_reading_from_pdf(path, extraction.text, locator)
-        return generic or legacy
+        return legacy
 
     if classification.kind not in {"invoice", "credit_note"}:
         if classification.kind == "unknown":
-            generic = _generic_reading_from_pdf(path, extraction.text, locator)
-            if generic is not None and generic.confidence == "high":
+            generic = _generic_reading_from_pdf(path, extraction.text, locator, connection)
+            if generic is not None:
                 return generic
         return SourceAnalysis.unknown(locator=locator)
 
@@ -708,7 +724,7 @@ def classify_headers(
     return SourceAnalysis.unknown(locator=locator)
 
 
-def analyse_tabular(path: Path) -> SourceAnalysis:
+def analyse_tabular(path: Path, *, connection=None) -> SourceAnalysis:
     """Extract explicit rows; incomplete or ambiguous tables remain reviewable.
 
     Every sheet is tried (active one first): reports often keep the data on a
@@ -722,6 +738,12 @@ def analyse_tabular(path: Path) -> SourceAnalysis:
         first_failure: SourceAnalysis | None = None
         sheets = []
         for rows, sheet in _tabular_sheets(path):
+            from reading_tables import parse_reading_rows, detect_company
+            title = " ".join(str(cell) for row in rows[:6] for cell in row if cell)
+            if detect_company(f"{sheet or ''} {title}"):
+                table = parse_reading_rows(rows, f"{sheet or ''} {title}", connection=connection)
+                if table is not None:
+                    return reading_table_analysis(table, SourceLocator(sheet=sheet, cell="A1"))
             result = _analyse_rows(rows, sheet)
             if result.kind != "unknown":
                 return result
@@ -731,7 +753,7 @@ def analyse_tabular(path: Path) -> SourceAnalysis:
         from reading_tables import parse_reading_rows
         for rows, sheet in sheets:
             title = " ".join(str(cell) for row in rows[:6] for cell in row if cell)
-            table = parse_reading_rows(rows, f"{sheet or ''} {title}")
+            table = parse_reading_rows(rows, f"{sheet or ''} {title}", connection=connection)
             if table is not None:
                 return reading_table_analysis(table, SourceLocator(sheet=sheet, cell="A1"))
         return first_failure or SourceAnalysis.unknown("El archivo no contiene filas.")
@@ -1085,6 +1107,13 @@ def _sniff_csv(handle):
     try:
         return csv.Sniffer().sniff(sample, delimiters=",;\t|")
     except csv.Error:
+        # Los informes pueden empezar por un título sin delimitadores.
+        lines = [line for line in sample.splitlines() if any(d in line for d in ";\t|")]
+        if lines:
+            try:
+                return csv.Sniffer().sniff("\n".join(lines), delimiters=";\t|")
+            except csv.Error:
+                pass
         return csv.excel
 
 
@@ -1152,5 +1181,5 @@ def analyse_source(path: Path, *, community_code: str, pdf_processor=None,
             providers=providers,
         )
     if suffix in _TABULAR_SUFFIXES:
-        return analyse_tabular(path)
+        return analyse_tabular(path, connection=connection)
     return SourceAnalysis.unknown()

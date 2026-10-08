@@ -1180,6 +1180,12 @@ def issue_guidance(field_name: str) -> dict[str, str]:
             "format": "ACS o CALEFACCION.",
             "why": "Cada servicio se reparte en su propia hoja.",
         },
+        "reading.format_review": {
+            "label": "Formato y cuadre de lecturas",
+            "what_to_find": "Comprueba en el informe el orden de columnas, las fechas y los consumos que señala el aviso.",
+            "format": "Anota qué has comprobado y corregido antes de confirmar la fuente.",
+            "why": "Sólo los informes confirmados enseñan el formato para próximas importaciones.",
+        },
     })
     default = {
         "label": field_name.replace("_", " ").replace(".", " ").capitalize(),
@@ -1199,6 +1205,7 @@ _ISSUE_TITLES = {
     "INVOICE_CONFLICT": "Posible factura duplicada",
     "INVOICE_PERIOD_CONFLICT": "Facturas con períodos solapados",
     "READING_CONFLICT": "Lecturas contradictorias",
+    "READING_FORMAT_REVIEW": "Revisar formato y cuadre de lecturas",
     "OWNER_COEFFICIENT_CONFLICT": "Coeficiente distinto al registrado",
     "COUNTER_RESET": "Contador que baja de valor",
     "READING_ZERO_REVIEW": "Lectura a cero",
