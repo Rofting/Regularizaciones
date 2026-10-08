@@ -511,6 +511,12 @@ def _persist_analysis(
             document_review.create_missing_field_issues(
                 connection, case_id, document.id_document, required_fields,
             )
+        if effective_kind == "reading" and candidates.get("reading.diagnostics"):
+            document_review.create_reading_format_issue(
+                connection, case_id, document.id_document,
+                detected_value=analysis.review_message,
+                message=analysis.review_message or "Comprueba el formato y el cuadre de las lecturas.",
+            )
 
 
 def _source_document(connection: sqlite3.Connection, document_id: int) -> SourceDocument:
@@ -911,6 +917,10 @@ def confirm_source_candidates(connection: sqlite3.Connection, case_id: int,
             _required_confirmed(_confirmed_candidate_values(connection, document_id),
                                 "tipo_suministro", "fecha_inicio", "fecha_fin", "importe_total")
         result = apply_confirmed_source(connection, case_id, document_id)
+        if (document.document_kind == "reading" and result.status == "validated"
+                and confirmed_by.strip() != "deteccion_automatica"):
+            from reading_formats import learn_document_format
+            learn_document_format(connection, document_id, confirmed_by.strip())
         if document.document_kind == "invoice" and result.status == "validated":
             case = expedient_service.get_case(connection, case_id)
             values = _with_invoice_aliases(
