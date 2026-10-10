@@ -1802,7 +1802,7 @@ class AppGestionFincas(ctk.CTk):
     # DIÁLOGOS
     # -----------------------------------------------------------------------
     def _preparar_dialogo(self, titulo: str, ancho: int, alto: int) -> ctk.CTkToplevel:
-        """Crea un CTkToplevel centrado sobre la ventana principal, con fundido."""
+        """Crea un diálogo visible antes de bloquear la ventana principal."""
         dialogo = ctk.CTkToplevel(self, fg_color=C["fondo"])
         dialogo.title(titulo)
         dialogo.resizable(False, False)
@@ -1811,15 +1811,28 @@ class AppGestionFincas(ctk.CTk):
         x = self.winfo_x() + (self.winfo_width()  - ancho) // 2
         y = self.winfo_y() + (self.winfo_height() - alto) // 2
         dialogo.geometry(f"{ancho}x{alto}+{x}+{y}")
-        UIM.aparecer(dialogo)
-        # grab_set diferido: CTkToplevel tarda unos ms en ser 'viewable'
+        # En Windows CTk retira temporalmente la ventana para ajustar su título.
+        # No combinar ese proceso con alpha=0 ni capturar clics a ciegas:
+        # un diálogo invisible dejaría la aplicación aparentemente bloqueada.
+        dialogo.bind("<Escape>", lambda event: dialogo.destroy())
         dialogo.after(150, lambda: self._grab_seguro(dialogo))
         return dialogo
 
     @staticmethod
-    def _grab_seguro(dialogo):
+    def _grab_seguro(dialogo, intentos=20):
         try:
-            dialogo.grab_set()
+            if not dialogo.winfo_exists():
+                return
+            dialogo.deiconify()
+            dialogo.lift()
+            if dialogo.winfo_viewable():
+                dialogo.focus_set()
+                dialogo.grab_set()
+            elif intentos > 0:
+                dialogo.after(50, lambda: AppGestionFincas._grab_seguro(dialogo, intentos - 1))
+            else:
+                # No mantener una ventana oculta que el usuario no puede cerrar.
+                dialogo.destroy()
         except tk.TclError:
             pass
 
@@ -1972,7 +1985,7 @@ class AppGestionFincas(ctk.CTk):
                     "Comunidad guardada en la base de datos",
                     f"Se ha creado el registro directo:\n\n"
                     f"ID: {id_com}\nCódigo: {cod}\nNombre: {nom}\n"
-                    f"CIF: {entradas['cif'].get().strip() or '—'}\n"
+                    f"CIF: {cif or '—'}\n"
                     f"Viviendas: {nviv or '—'}\n\n"
                     "Ya aparece en el selector de comunidades.",
                 )

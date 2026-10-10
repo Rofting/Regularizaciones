@@ -41,7 +41,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            libreoffice-calc libreoffice-writer poppler-utils tesseract-ocr
+            libreoffice-calc libreoffice-writer poppler-utils tesseract-ocr xvfb
 
       - name: Herramientas de documentos · Windows
         if: runner.os == 'Windows'
@@ -92,6 +92,18 @@ jobs:
           python -c "import shutil; assert shutil.which('soffice'), 'LibreOffice no está en el PATH'"
           # Falla si la versión instalada es anterior a la mínima verificada.
           python scripts/comprobar_libreoffice.py
+
+      - name: Alta real de comunidad en la interfaz
+        shell: bash
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+          XDG_CACHE_HOME: ${{ runner.temp }}/cache
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python scripts/comprobar_interfaz.py
+          else
+            python scripts/comprobar_interfaz.py
+          fi
 
       - name: Suite completa desde el checkout limpio
         shell: bash
