@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import traceback
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -63,7 +64,7 @@ def main():
                 assert info.call_count == 1, "No se confirmó el alta"
                 assert not error.called, error.call_args
                 assert not errors, errors
-                with sqlite3.connect(app.RUTA_BD) as connection:
+                with closing(sqlite3.connect(app.RUTA_BD)) as connection:
                     assert connection.execute(
                         "SELECT nombre, num_viviendas FROM comunidades WHERE codigo='TEST'"
                     ).fetchone() == ("Comunidad de prueba", 4)
