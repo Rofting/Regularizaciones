@@ -23,8 +23,6 @@ jobs:
         os: [ubuntu-24.04, windows-2025]
     env:
       PYTHONUTF8: "1"
-      MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
-      XDG_CACHE_HOME: ${{ runner.temp }}/cache
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -36,6 +34,9 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y xvfb
       - name: Abrir, guardar y cerrar el alta
         shell: bash
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+          XDG_CACHE_HOME: ${{ runner.temp }}/cache
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             xvfb-run -a python scripts/comprobar_interfaz.py
