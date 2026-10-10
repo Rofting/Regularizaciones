@@ -13,6 +13,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  gui:
+    name: Alta de comunidad · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    env:
+      PYTHONUTF8: "1"
+      MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+      XDG_CACHE_HOME: ${{ runner.temp }}/cache
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y xvfb
+      - name: Abrir, guardar y cerrar el alta
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python scripts/comprobar_interfaz.py
+          else
+            python scripts/comprobar_interfaz.py
+          fi
+
   tests:
     name: Python 3.12 · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -41,7 +71,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            libreoffice-calc libreoffice-writer poppler-utils tesseract-ocr xvfb
+            libreoffice-calc libreoffice-writer poppler-utils tesseract-ocr
 
       - name: Herramientas de documentos · Windows
         if: runner.os == 'Windows'
@@ -92,18 +122,6 @@ jobs:
           python -c "import shutil; assert shutil.which('soffice'), 'LibreOffice no está en el PATH'"
           # Falla si la versión instalada es anterior a la mínima verificada.
           python scripts/comprobar_libreoffice.py
-
-      - name: Alta real de comunidad en la interfaz
-        shell: bash
-        env:
-          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
-          XDG_CACHE_HOME: ${{ runner.temp }}/cache
-        run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run -a python scripts/comprobar_interfaz.py
-          else
-            python scripts/comprobar_interfaz.py
-          fi
 
       - name: Suite completa desde el checkout limpio
         shell: bash
