@@ -82,6 +82,16 @@ class DatabaseMigrationTest(unittest.TestCase):
             columns = {row[1] for row in con.execute("PRAGMA table_info(generated_letters)")}
             self.assertTrue({"pdf_path", "pdf_pages"}.issubset(columns))
 
+    def test_output_hash_migration_does_not_certify_or_change_existing_documents(self):
+        with closing(sqlite3.connect(':memory:')) as con:
+            con.execute('CREATE TABLE generated_letters(id_generated_letter INTEGER PRIMARY KEY,output_path TEXT,pdf_path TEXT,pdf_pages INTEGER)')
+            con.execute("INSERT INTO generated_letters VALUES(1,'carta.docx','carta.pdf',2)")
+            db_migrations.MIGRATIONS[22](con)
+            self.assertEqual((1, 'carta.docx', 'carta.pdf', 2, None, None), tuple(con.execute('SELECT * FROM generated_letters').fetchone()))
+            con.execute("UPDATE generated_letters SET pdf_sha256='huella ya registrada'")
+            db_migrations.MIGRATIONS[22](con)
+            self.assertEqual('huella ya registrada', con.execute('SELECT pdf_sha256 FROM generated_letters').fetchone()[0])
+
     def test_upgrade_adds_mail_audit_tables(self):
         earlier = {version: migration for version, migration in db_migrations.MIGRATIONS.items() if version < 19}
         with patch.dict(db_migrations.MIGRATIONS, earlier, clear=True), redirect_stdout(StringIO()):

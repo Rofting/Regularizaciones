@@ -448,6 +448,16 @@ def _is_safe_generated_path(raw_path: object, output_directory: Path) -> bool:
     return candidate.is_file()
 
 
+def _verified_generated_path(raw_path: object, digest: object, output_directory: Path) -> bool:
+    """Una ruta existente no certifica que siga siendo la carta de ese vecino."""
+    if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+        return False
+    try:
+        return _is_safe_generated_path(raw_path, output_directory) and _sha256(Path(str(raw_path))) == digest
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def _reusable_completed_run(
     connection: sqlite3.Connection,
     *,
@@ -479,7 +489,7 @@ def _reusable_completed_run(
         except (OSError, TypeError):
             continue
         rows = connection.execute(
-            """SELECT id_propietario,status,output_path,pdf_path,pdf_pages FROM generated_letters
+            """SELECT id_propietario,status,output_path,pdf_path,pdf_pages,output_sha256,pdf_sha256 FROM generated_letters
                WHERE id_letter_run=? ORDER BY id_propietario""",
             (run["id_letter_run"],),
         ).fetchall()
@@ -489,8 +499,8 @@ def _reusable_completed_run(
             continue
         if all(
             row["status"] == "generated"
-            and _is_safe_generated_path(row["output_path"], run_directory)
-            and _is_safe_generated_path(row["pdf_path"], run_directory)
+            and _verified_generated_path(row["output_path"], row["output_sha256"], run_directory)
+            and _verified_generated_path(row["pdf_path"], row["pdf_sha256"], run_directory)
             and row["pdf_pages"] is not None and row["pdf_pages"] > 0
             for row in rows
         ):
@@ -544,9 +554,10 @@ def _mark_generated(
 ) -> None:
     """Confirma que el archivo publicado tiene una auditoría coherente."""
     connection.execute(
-        """UPDATE generated_letters SET status='generated',output_path=?,pdf_path=?,pdf_pages=?,error_message=NULL,
+        """UPDATE generated_letters SET status='generated',output_path=?,pdf_path=?,pdf_pages=?,
+               output_sha256=?,pdf_sha256=?,error_message=NULL,
                updated_at=datetime('now') WHERE id_generated_letter=?""",
-        (str(destination), str(pdf_destination), pdf_pages, generated_row),
+        (str(destination), str(pdf_destination), pdf_pages, _sha256(destination), _sha256(pdf_destination), generated_row),
     )
     connection.commit()
 
@@ -718,7 +729,8 @@ def generate_case_letters(
                 try:
                     connection.rollback()
                     connection.execute(
-                        """UPDATE generated_letters SET status='failed',output_path=NULL,pdf_path=NULL,pdf_pages=NULL,error_message=?,
+                        """UPDATE generated_letters SET status='failed',output_path=NULL,pdf_path=NULL,pdf_pages=NULL,
+                               output_sha256=NULL,pdf_sha256=NULL,error_message=?,
                                updated_at=datetime('now') WHERE id_generated_letter=?""",
                         (message, generated_row),
                     )

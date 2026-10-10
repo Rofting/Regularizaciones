@@ -420,6 +420,30 @@ class CaseLetterServiceTest(unittest.TestCase):
         self.assertEqual(before_runs, self.connection.execute("SELECT COUNT(*) FROM letter_generation_runs").fetchone()[0])
         self.assertEqual(before_letters, self.connection.execute("SELECT COUNT(*) FROM generated_letters").fetchone()[0])
 
+    def test_changed_pdf_or_word_cannot_be_reused_as_a_verified_letter(self):
+        from case_letter_service import generate_case_letters
+        batch = generate_case_letters(self.database_path, id_case=self.case_id, project_root=self.root)
+        for extension in ('pdf', 'docx'):
+            with self.subTest(extension=extension):
+                ana = batch.output_path / f'CARTA_A-1_ANA_VECINA.{extension}'
+                bruno = batch.output_path / f'CARTA_B-2_BRUNO_VECINO.{extension}'
+                ana.write_bytes(bruno.read_bytes())
+                following = generate_case_letters(self.database_path, id_case=self.case_id, project_root=self.root)
+                self.assertNotEqual(batch.id_letter_run, following.id_letter_run)
+                self.assertEqual((2, ()), (following.generated_count, following.failures))
+                batch = following
+
+    def test_old_letters_without_output_hashes_are_regenerated_without_overwriting_them(self):
+        from case_letter_service import generate_case_letters
+        first = generate_case_letters(self.database_path, id_case=self.case_id, project_root=self.root)
+        before = {p.name: p.read_bytes() for p in first.output_path.iterdir()}
+        self.connection.execute('UPDATE generated_letters SET output_sha256=NULL,pdf_sha256=NULL WHERE id_letter_run=?', (first.id_letter_run,))
+        self.connection.commit()
+        second = generate_case_letters(self.database_path, id_case=self.case_id, project_root=self.root)
+        self.assertNotEqual(first.id_letter_run, second.id_letter_run)
+        self.assertEqual((2, ()), (second.generated_count, second.failures))
+        self.assertEqual(before, {p.name: p.read_bytes() for p in first.output_path.iterdir()})
+
     def test_different_concept_selection_starts_a_new_batch(self):
         from case_letter_service import generate_case_letters
 

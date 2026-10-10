@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 21
+CURRENT_SCHEMA_VERSION = 22
 
 
 MIGRATION_1_SQL = (
@@ -927,6 +927,14 @@ def _migration_21(connection: sqlite3.Connection) -> None:
     )""")
 
 
+def _migration_22(connection: sqlite3.Connection) -> None:
+    """Identidad del Word y PDF publicados, sin certificar cartas antiguas."""
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(generated_letters)')}
+    for column in ('output_sha256', 'pdf_sha256'):
+        if column not in columns:
+            connection.execute(f'ALTER TABLE generated_letters ADD COLUMN {column} TEXT')
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -949,6 +957,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     19: _migration_19,
     20: _migration_20,
     21: _migration_21,
+    22: _migration_22,
 }
 
 

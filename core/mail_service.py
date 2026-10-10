@@ -117,7 +117,7 @@ def prepare_mail_run(
     if run is None or run["estado"] not in ("deliveries_generated", "closed"):
         raise ValueError("Primero genera y valida todas las cartas del expediente")
     rows = connection.execute(
-        """SELECT g.id_propietario,g.pdf_path,g.pdf_pages,p.nombre_propietario,p.email
+        """SELECT g.id_propietario,g.pdf_path,g.pdf_pages,g.pdf_sha256,p.nombre_propietario,p.email
            FROM generated_letters g JOIN propietarios p USING(id_propietario)
            WHERE g.id_letter_run=? AND g.status='generated'
            ORDER BY g.id_propietario""", (run["id_letter_run"],),
@@ -138,6 +138,8 @@ def prepare_mail_run(
         subject = _render(subject_template, values, subject=True)
         body = _render(body_template, values)
         attachment_sha = _sha(pdf)
+        if not row['pdf_sha256'] or attachment_sha != row['pdf_sha256']:
+            raise ValueError(f'La carta PDF de {row["nombre_propietario"]} cambió o no tiene una huella verificada. Regenera las cartas antes de preparar el correo.')
         fingerprint = hashlib.sha256(
             "\0".join((recipient.casefold() if recipient else "", sender, subject,
                        body, attachment_sha)).encode("utf-8")
@@ -207,7 +209,7 @@ def generate_eml_drafts(connection: sqlite3.Connection, id_mail_run: int) -> Mai
                                 (run["id_letter_run"],)).fetchone()
     sender = _email(load_office_settings(connection).email)
     rows = connection.execute(
-        """SELECT d.*,p.nombre_propietario,l.pdf_path,c.nombre AS community,per.nombre AS period
+        """SELECT d.*,p.nombre_propietario,l.pdf_path,l.pdf_sha256,c.nombre AS community,per.nombre AS period
            FROM mail_deliveries d JOIN propietarios p USING(id_propietario)
            JOIN generated_letters l ON l.id_letter_run=? AND l.id_propietario=d.id_propietario
            JOIN mail_runs r ON r.id_mail_run=d.id_mail_run
@@ -219,6 +221,8 @@ def generate_eml_drafts(connection: sqlite3.Connection, id_mail_run: int) -> Mai
     for row in rows:
         try:
             pdf = _safe_attachment(row["pdf_path"], Path(letter["output_path"]))
+            if not row['pdf_sha256'] or _sha(pdf) != row['pdf_sha256']:
+                raise ValueError('El PDF no coincide con la carta verificada. Regenera las cartas y prepara el correo de nuevo.')
             if _sha(pdf) != row["attachment_sha256"]:
                 raise ValueError("El PDF cambió desde la preparación del correo")
             values = {"community": row["community"], "period": row["period"],
@@ -324,10 +328,12 @@ def send_mail_run(connection: sqlite3.Connection, id_mail_run: int,
             ).hexdigest() != row["attachment_sha256"]:
                 raise ValueError("El adjunto del borrador ha cambiado")
             letter = connection.execute(
-                "SELECT pdf_path FROM generated_letters WHERE id_letter_run=? AND id_propietario=?",
+                "SELECT pdf_path,pdf_sha256 FROM generated_letters WHERE id_letter_run=? AND id_propietario=?",
                 (run["id_letter_run"], row["id_propietario"]),
             ).fetchone()
-            if letter is None or _sha(Path(letter["pdf_path"])) != row["attachment_sha256"]:
+            if (letter is None or not letter['pdf_sha256']
+                    or _sha(Path(letter['pdf_path'])) != letter['pdf_sha256']
+                    or letter['pdf_sha256'] != row['attachment_sha256']):
                 raise ValueError("El PDF cambió desde la preparación del correo")
             transport.send(message)
             connection.execute("UPDATE mail_deliveries SET status='sent',sent_at=datetime('now'),error_message=NULL WHERE id_mail_delivery=?",

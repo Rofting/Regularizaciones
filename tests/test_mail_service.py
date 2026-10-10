@@ -55,19 +55,32 @@ class MailServiceTest(unittest.TestCase):
         self.assertEqual(["draft", "skipped"], [row[0] for row in rows])
         self.assertEqual(result.id_mail_run, self._prepare().id_mail_run)
 
-    def test_duplicate_recipient_and_changed_attachment_get_separate_audit(self):
+    def test_duplicate_recipient_is_audited_and_swapped_pdf_requires_regeneration(self):
         f = self.fixture
         f.connection.execute("UPDATE propietarios SET email='ana@example.org' WHERE id_propietario=?", (f.owner_two,))
         f.connection.commit()
         first = self._prepare()
         self.assertEqual(1, first.duplicate_count)
         self.assertEqual(1, len(list(first.output_path.glob("*.eml"))))
-        # Sustituir por otro PDF válido cambia la huella y obliga a preparar otro lote.
+        # Otro PDF válido puede pertenecer a un vecino distinto: exige regenerar.
         source = self.letters.output_path / "CARTA_B-2_BRUNO_VECINO.pdf"
         destination = self.letters.output_path / "CARTA_A-1_ANA_VECINA.pdf"
         destination.write_bytes(source.read_bytes())
-        second = self._prepare()
-        self.assertNotEqual(first.id_mail_run, second.id_mail_run)
+        before = f.connection.execute('SELECT COUNT(*) FROM mail_runs').fetchone()[0]
+        with self.assertRaisesRegex(ValueError, 'Regenera las cartas'):
+            self._prepare()
+        self.assertEqual(before, f.connection.execute('SELECT COUNT(*) FROM mail_runs').fetchone()[0])
+
+    def test_letters_without_a_generation_hash_cannot_prepare_or_send_email(self):
+        f = self.fixture
+        run = self._prepare()
+        f.connection.execute('UPDATE generated_letters SET pdf_sha256=NULL WHERE id_letter_run=?', (self.letters.id_letter_run,))
+        f.connection.commit()
+        with self.assertRaisesRegex(ValueError, 'Regenera las cartas'):
+            self._prepare()
+        transport = FakeMailTransport()
+        self.assertEqual((0, 1), send_mail_run(f.connection, run.id_mail_run, transport, confirmed_by='gestor'))
+        self.assertEqual([], transport.messages)
 
     def test_confirmation_failure_and_retry_never_resends_success(self):
         f = self.fixture
