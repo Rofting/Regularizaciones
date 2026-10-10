@@ -1,6 +1,7 @@
 """Prueba gráfica real del alta en una base temporal (Windows o Xvfb)."""
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -10,9 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-def main():
-    with tempfile.TemporaryDirectory(prefix="regularizaciones-ui-") as home:
-        os.environ["REGULARIZACIONES_HOME"] = home
+def check_interface(home):
+    with patch.dict(os.environ, {"REGULARIZACIONES_HOME": home}):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "core"))
         import app
 
@@ -76,6 +76,17 @@ def main():
                 print("Interfaz verificada: abrir alta, guardar comunidad y cerrar con Escape.")
             finally:
                 root.destroy()
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--worker":
+        check_interface(sys.argv[2])
+    else:
+        # Como al cerrar el ejecutable: terminar el proceso libera todos los
+        # handles de Tk y SQLite antes de eliminar su hogar temporal en Windows.
+        with tempfile.TemporaryDirectory(prefix="regularizaciones-ui-") as home:
+            subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                            "--worker", home], check=True, timeout=60)
 
 
 if __name__ == "__main__":
