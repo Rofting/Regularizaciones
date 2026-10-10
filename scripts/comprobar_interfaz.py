@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,7 +29,9 @@ def main():
                     if predicate():
                         return
                     time.sleep(.01)
-                raise AssertionError("La interfaz no respondió dentro del plazo")
+                windows = [(w.title(), w.state(), w.winfo_viewable())
+                           for w in root.winfo_children() if isinstance(w, app.ctk.CTkToplevel)]
+                raise AssertionError(f"La interfaz no respondió dentro del plazo: {windows}; callbacks: {errors}")
 
             def descendants(widget):
                 for child in widget.winfo_children():
@@ -75,4 +78,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        detail = traceback.format_exc().replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print("::error title=Prueba gráfica de alta::" + detail)
+        raise
