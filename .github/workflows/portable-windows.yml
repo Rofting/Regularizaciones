@@ -65,6 +65,18 @@ jobs:
           $second = Start-Process -FilePath $exe -ArgumentList '--self-test' -Wait -PassThru
           if ($second.ExitCode -ne 0) { throw 'No arrancó tras actualizar' }
           python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); assert c.execute('select valor from prueba_actualizacion').fetchone()[0]=='conservado'" "$database"
+      - name: Leer EML y MSG desde el ejecutable empaquetado
+        shell: pwsh
+        run: |
+          $fixtureFolder = Join-Path $env:RUNNER_TEMP 'correos-sinteticos'
+          New-Item -ItemType Directory -Force $fixtureFolder | Out-Null
+          python -c "from pathlib import Path; import sys; from tests.test_email_ingestion import write_eml,write_msg; root=Path(sys.argv[1]); files=(('lecturas.csv',b'vivienda;consumo\nA;10\n'),); write_eml(root/'correo.eml',files); write_msg(root/'correo.msg',files)" "$fixtureFolder"
+          $exe = (Resolve-Path '.\dist\Regularizaciones\Regularizaciones.exe').Path
+          foreach ($extension in @('eml', 'msg')) {
+            $source = Join-Path $fixtureFolder "correo.$extension"
+            $result = Start-Process -FilePath $exe -ArgumentList @('--self-test-email', "`"$source`"") -Wait -PassThru
+            if ($result.ExitCode -ne 0) { throw "El ejecutable no puede leer $extension" }
+          }
       - name: Publicar distribución sin datos del despacho
         uses: actions/upload-artifact@v6
         with:

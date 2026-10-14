@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable
 
 
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 23
 
 
 MIGRATION_1_SQL = (
@@ -935,6 +935,26 @@ def _migration_22(connection: sqlite3.Connection) -> None:
             connection.execute(f'ALTER TABLE generated_letters ADD COLUMN {column} TEXT')
 
 
+def _migration_23(connection: sqlite3.Connection) -> None:
+    connection.execute("""CREATE TABLE email_imports (
+        id_email_document INTEGER PRIMARY KEY REFERENCES source_documents(id_document) ON DELETE CASCADE,
+        subject TEXT NOT NULL DEFAULT '',
+        sender TEXT NOT NULL DEFAULT '',
+        message_date TEXT NOT NULL DEFAULT '',
+        notes_json TEXT NOT NULL DEFAULT '[]'
+    )""")
+    connection.execute("""CREATE TABLE email_attachments (
+        id_email_document INTEGER NOT NULL REFERENCES email_imports(id_email_document) ON DELETE CASCADE,
+        attachment_index INTEGER NOT NULL,
+        original_name TEXT NOT NULL,
+        archived_path TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        id_document INTEGER REFERENCES source_documents(id_document) ON DELETE SET NULL,
+        outcome TEXT NOT NULL,
+        PRIMARY KEY(id_email_document, attachment_index)
+    )""")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migration_1,
     2: _migration_2,
@@ -958,6 +978,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     20: _migration_20,
     21: _migration_21,
     22: _migration_22,
+    23: _migration_23,
 }
 
 

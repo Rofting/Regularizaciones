@@ -2149,7 +2149,12 @@ class AppGestionFincas(ctk.CTk):
 # PUNTO DE ENTRADA
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    if "--self-test" in sys.argv:
+    if "--self-test-email" in sys.argv:
+        from email_sources import read_email_sources
+        source = Path(sys.argv[sys.argv.index("--self-test-email") + 1])
+        if not read_email_sources(source).attachments:
+            raise SystemExit("No se han podido leer los adjuntos del correo de prueba")
+    elif "--self-test" in sys.argv:
         APP_PATHS.prepare()
         from gestor_bd import conectar, crear_bd
         if not RUTA_BD.exists():

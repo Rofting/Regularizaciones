@@ -6,6 +6,7 @@ import sys
 import threading
 import tkinter as tk
 from collections import Counter
+from contextlib import closing
 from dataclasses import dataclass
 import re
 from datetime import date, datetime
@@ -35,6 +36,8 @@ import owner_lists
 import period_selection
 import source_batch
 import source_preview
+import email_ingestion
+from email_sources import EMAIL_SUFFIXES
 import ui_moderna as UIM
 from expedient_models import ReviewIssue
 from ui_moderna import C
@@ -131,6 +134,7 @@ def show_issue_context(app: "AppGestionFincas", issue: ReviewIssue) -> None:
             (issue.id_document, issue.field_name),
         ).fetchone()
         context = row["source_context"] if row else None
+        email_context = email_ingestion.email_provenance(connection, issue.id_document)
         if not context:
             row = connection.execute("SELECT source_context FROM source_documents WHERE id_document=?",
                                      (issue.id_document,)).fetchone()
@@ -139,7 +143,8 @@ def show_issue_context(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         connection.close()
     messagebox.showinfo(
         "Contexto de la fuente",
-        f"{issue.archived_path.name}\n\n{issue_context_label(context)}",
+        f"{issue.archived_path.name}\n\n{issue_context_label(context)}"
+        + ("\n\n" + "\n".join(email_context) if email_context else ""),
         parent=app,
     )
 
@@ -437,17 +442,17 @@ def _is_hidden_source_path(path: Path) -> bool:
     return bool(attributes & hidden_flag)
 
 
-def is_supported_source_file(path: Path) -> bool:
+def is_supported_source_file(path: Path, *, include_emails: bool = False) -> bool:
     """Indica si un documento se puede incorporar de forma segura al expediente."""
     candidate = Path(path)
     return (
         candidate.is_file()
         and not _is_hidden_source_path(candidate)
-        and candidate.suffix.lower() in _SOURCE_SUFFIXES
+        and candidate.suffix.lower() in (_SOURCE_SUFFIXES | EMAIL_SUFFIXES if include_emails else _SOURCE_SUFFIXES)
     )
 
 
-def source_files_in_folder(folder: Path) -> list[Path]:
+def source_files_in_folder(folder: Path, *, include_emails: bool = False) -> list[Path]:
     """Devuelve las fuentes compatibles, visibles y ordenadas de una carpeta.
 
     Incluye sus subcarpetas para que un expediente completo se pueda cargar
@@ -459,7 +464,7 @@ def source_files_in_folder(folder: Path) -> list[Path]:
     return sorted(
         (
             path for path in root.rglob("*")
-            if is_supported_source_file(path)
+            if is_supported_source_file(path, include_emails=include_emails)
             and not any(
                 _is_hidden_source_path(root.joinpath(*path.relative_to(root).parts[:index]))
                 for index in range(1, len(path.relative_to(root).parts))
@@ -2702,7 +2707,8 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 parent=dialog,
                 title="Seleccionar fuentes",
                 filetypes=(
-                    ("Documentos compatibles", "*.pdf *.xlsx *.xls *.csv"),
+                    ("Documentos compatibles", "*.pdf *.xlsx *.xls *.csv *.eml *.msg"),
+                    ("Correos guardados", "*.eml *.msg"),
                     ("PDF", "*.pdf"),
                     ("Excel", "*.xlsx *.xls"),
                     ("CSV", "*.csv"),
@@ -2710,12 +2716,12 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 ),
             )
         selected_paths = tuple(Path(path) for path in paths)
-        paths = tuple(str(path) for path in selected_paths if is_supported_source_file(path))
+        paths = tuple(str(path) for path in selected_paths if is_supported_source_file(path, include_emails=True))
         ignored_count = len(selected_paths) - len(paths)
         if not paths:
             messagebox.showwarning(
                 "Sin fuentes compatibles",
-                "Selecciona PDF, XLSX, XLS o CSV que no sean ocultos ni temporales.",
+                "Selecciona PDF, XLSX, XLS, CSV, EML o MSG que no sean ocultos ni temporales.",
                 parent=dialog,
             )
             return
@@ -2735,6 +2741,9 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
             duplicate_count = 0
             errors = []
             kinds = []
+            email_notes = []
+            email_count = 0
+            email_foreign_count = 0
             lookup = gestor_bd.conectar(database_path)
             try:
                 case_ingestion.assert_case_belongs_to_community(
@@ -2746,10 +2755,35 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 community_code = community["codigo"]
             finally:
                 lookup.close()
+            email_paths = tuple(Path(path) for path in paths if Path(path).suffix.lower() in EMAIL_SUFFIXES)
+            regular_paths = tuple(Path(path) for path in paths if Path(path).suffix.lower() not in EMAIL_SUFFIXES)
+            for email_path in email_paths:
+                connection = gestor_bd.conectar(database_path)
+                try:
+                    app._estado(f"Leyendo adjuntos: {email_path.name}", procesando=True)
+                    imported = email_ingestion.import_email_to_case(
+                        connection, case_id, source_path=email_path, archive_root=archive_root,
+                    )
+                    email_count += 1
+                    errors.extend(imported.errors)
+                    email_foreign_count += imported.foreign_count
+                    email_notes.extend(f"{email_path.name}: {note}" for note in imported.notes)
+                    for result in imported.results:
+                        created_count += int(result.created)
+                        duplicate_count += int(not result.created)
+                        kinds.append(result.document.document_kind)
+                    for note in imported.notes:
+                        app.log(f"{email_path.name}: {note}", "aviso")
+                    for name, error in imported.errors:
+                        app.log(f"{email_path.name} / {name}: {error}", "error")
+                except Exception as error:
+                    errors.append((email_path.name, str(error)))
+                finally:
+                    connection.close()
             lookup = gestor_bd.conectar(database_path)
             try:
                 accepted_paths, foreign_paths = community_discovery.partition_sources_for_community(
-                    (Path(path) for path in paths), community_code, connection=lookup,
+                    regular_paths, community_code, connection=lookup,
                 )
                 lookup.commit()
             finally:
@@ -2856,6 +2890,7 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                 messagebox.showinfo(
                     "Fuentes analizadas",
                     f"{source_summary(kinds)}\n\n{created_count} nuevas · {duplicate_count} duplicadas · {len(errors)} con error\n"
+                    + (f"{email_count} correo(s) archivado(s); {email_foreign_count} adjunto(s) de otra comunidad apartado(s).\n" if email_count else "")
                     + (
                         f"Se aplicaron automáticamente {automatic} fuente(s) completas. "
                         "El expediente está listo para generar el Excel oficial."
@@ -2867,6 +2902,7 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
                         "Usa Bandeja global para clasificarlas."
                         if foreign_paths else ""
                     )
+                    + ("\n\n" + "\n".join(email_notes) if email_notes else "")
                     + ("\n\n" + "\n".join(f"{name}: {error}" for name, error in errors) if errors else ""),
                     parent=app,
                 )
@@ -2883,11 +2919,11 @@ def open_add_sources_dialog(app: "AppGestionFincas", case_id: int) -> None:
         )
         if not folder:
             return
-        paths = tuple(str(path) for path in source_files_in_folder(Path(folder)))
+        paths = tuple(str(path) for path in source_files_in_folder(Path(folder), include_emails=True))
         if not paths:
             messagebox.showwarning(
                 "Sin fuentes compatibles",
-                "La carpeta no contiene PDF, XLSX, XLS o CSV visibles.",
+                "La carpeta no contiene PDF, XLSX, XLS, CSV, EML o MSG visibles.",
                 parent=dialog,
             )
             return
@@ -3355,6 +3391,8 @@ def _show_source_preview(app: "AppGestionFincas", issue: ReviewIssue, path: Path
     if evidence.fragment:
         details.append(f"Fragmento guardado: «{evidence.fragment}»")
     details.extend(result.notes)
+    with closing(gestor_bd.conectar(str(app.ruta_bd_expedientes))) as connection:
+        details.extend(email_ingestion.email_provenance(connection, issue.id_document))
     ctk.CTkLabel(panel, text="\n".join(details), font=UIM.fuente(10), text_color=C["texto_sec"],
                  wraplength=860, justify="left").pack(anchor="w", padx=18, pady=(4, 8))
 

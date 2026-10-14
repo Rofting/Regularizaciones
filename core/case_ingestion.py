@@ -1415,6 +1415,10 @@ def reanalyze_case_documents(
                 _open_issue_count(connection, case_id),
             ))
             continue
+        if document.document_kind == "email":
+            # El correo es la evidencia original; se analizan sus documentos
+            # adjuntos, no el cuerpo ni las cabeceras como si fueran facturas.
+            continue
         _persist_analysis(
             connection,
             case_id,

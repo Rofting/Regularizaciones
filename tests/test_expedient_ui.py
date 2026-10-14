@@ -321,6 +321,28 @@ class SourceActionsTest(unittest.TestCase):
         self.assertEqual(["fecha_inicio", "fecha_fin", "document_kind"], [issue.field_name for issue in issues])
         self.assertIn("1 factura detectada · 1 lectura · 1 documento por revisar", self.messages.showinfo.call_args.args[1])
 
+    def test_saved_eml_and_broken_msg_use_same_intake_and_summary(self):
+        from tests.test_email_ingestion import write_eml
+        from source_analysis import SourceAnalysis
+        email = write_eml(self.root / "correo.eml", (("factura.pdf", b"pdf fixture"),))
+        broken = self.root / "roto.msg"
+        broken.write_bytes(b"no es un MSG")
+        expedient_ui.open_add_sources_dialog(self.app, self.case.id_case)
+        with patch("expedient_ui.filedialog.askopenfilenames", return_value=(str(email), str(broken))), \
+                patch("source_analysis.analyse_pdf", return_value=SourceAnalysis.invoice({"importe_total": "123"})):
+            self.click("Añadir archivos")
+            self.complete()
+        rows = self.connection.execute("SELECT document_kind,status FROM source_documents ORDER BY id_document").fetchall()
+        self.assertEqual(["email", "invoice", "email"], [row[0] for row in rows])
+        self.assertEqual("not_applicable", rows[0][1])
+        summary = self.messages.showinfo.call_args.args[1]
+        self.assertIn("1 factura detectada", summary)
+        self.assertIn("2 correo(s) archivado(s)", summary)
+        self.assertIn("1 con error", summary)
+        issue = expedient_ui.document_review.list_open_issues(self.connection, self.case.id_case)[0]
+        expedient_ui.show_issue_context(self.app, issue)
+        self.assertIn("Correo de origen: correo.eml", self.messages.showinfo.call_args.args[1])
+
     def test_clean_folder_intake_advances_without_opening_confirmation_dialog(self):
         """Un lote limpio debe dejar visible el siguiente paso al terminar."""
         from source_analysis import SourceAnalysis

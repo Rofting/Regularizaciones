@@ -34,6 +34,8 @@ hiddenimports = [
 ]
 hiddenimports += collect_submodules("rapidocr")
 hiddenimports += collect_submodules("keyring.backends")
+hiddenimports += collect_submodules("extract_msg")
+hiddenimports += collect_submodules("ebcdic")
 
 a = Analysis(
     [str(ROOT / "core" / "app.py")],
