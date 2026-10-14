@@ -20,6 +20,7 @@ import case_ingestion
 import expedient_service
 import expedient_ui
 import gestor_bd
+import db_migrations
 from source_analysis import SourceAnalysis
 from tests.test_source_preview import write_pdf
 
@@ -227,3 +228,10 @@ class EmailIngestionTest(unittest.TestCase):
         self.assertFalse(result.errors)
         self.assertEqual(1, len(result.results))
         self.assertEqual("Facturas de prueba", self.connection.execute("SELECT subject FROM email_imports").fetchone()[0])
+
+    def test_repeated_migration_preserves_email_and_attachment_links(self):
+        result = self.ingest(write_eml(self.root / "correo.eml", (("factura.pdf", self.pdf.read_bytes()),)))
+        db_migrations.MIGRATIONS[23](self.connection)
+        db_migrations.MIGRATIONS[23](self.connection)
+        row = self.connection.execute("SELECT id_email_document,id_document FROM email_attachments").fetchone()
+        self.assertEqual((result.email_document_id, result.results[0].document.id_document), tuple(row))

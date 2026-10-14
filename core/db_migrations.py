@@ -936,14 +936,14 @@ def _migration_22(connection: sqlite3.Connection) -> None:
 
 
 def _migration_23(connection: sqlite3.Connection) -> None:
-    connection.execute("""CREATE TABLE email_imports (
+    connection.execute("""CREATE TABLE IF NOT EXISTS email_imports (
         id_email_document INTEGER PRIMARY KEY REFERENCES source_documents(id_document) ON DELETE CASCADE,
         subject TEXT NOT NULL DEFAULT '',
         sender TEXT NOT NULL DEFAULT '',
         message_date TEXT NOT NULL DEFAULT '',
         notes_json TEXT NOT NULL DEFAULT '[]'
     )""")
-    connection.execute("""CREATE TABLE email_attachments (
+    connection.execute("""CREATE TABLE IF NOT EXISTS email_attachments (
         id_email_document INTEGER NOT NULL REFERENCES email_imports(id_email_document) ON DELETE CASCADE,
         attachment_index INTEGER NOT NULL,
         original_name TEXT NOT NULL,
