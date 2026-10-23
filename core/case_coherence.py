@@ -183,11 +183,30 @@ def evaluate(con: sqlite3.Connection, case_id: int, profile) -> CoherenceReport:
         if start == end:
             # Un servicio puntual (reparación, revisión) puede durar un día; en
             # un suministro suele ser un error de lectura. Se pide confirmarlo.
+            # Las facturas sin consumo (mantenimiento, reparaciones, lecturas)
+            # son puntuales por naturaleza: no deben exigir una aceptación cada una.
+            if not invoice['unidad_consumo'] and not _number(invoice['consumo_total'] or 0):
+                continue
             add(f'invoice_single_day:{invoice["id_factura"]}',
                 f'Factura {invoice["num_factura"] or invoice["id_factura"]} de {invoice["tipo_suministro"]}: '
                 f'empieza y termina el {start}. Confirma que es un servicio puntual o corrige el período.')
             continue
         dated.append((invoice, start, end))
+    for invoice in invoices:
+        try:
+            fixed, variable, total = (_number(invoice[k] or 0) for k in ('termino_fijo', 'termino_variable', 'importe_total'))
+        except ValueError:
+            continue
+        components = fixed + variable
+        if not components or not total or abs(components - total) <= Decimal('0.01'):
+            continue
+        ratio = total / components
+        if ratio < Decimal('0.98') or ratio > Decimal('1.40'):
+            add(f'invoice_components:{invoice["id_factura"]}',
+                f'Factura {invoice["num_factura"] or invoice["id_factura"]} de {invoice["tipo_suministro"]}: '
+                f'término fijo + variable = {components} € y total = {total} €. La diferencia es mayor que '
+                'los impuestos habituales; revisa el desglose en la factura. El Excel reparte el total '
+                'entre fijo y variable en proporción a ese desglose.')
     for index, (first, start, end) in enumerate(dated):
         for second, other_start, other_end in dated[index + 1:]:
             if first['tipo_suministro'] != second['tipo_suministro']:

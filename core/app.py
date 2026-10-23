@@ -550,7 +550,7 @@ class AppGestionFincas(ctk.CTk):
         if include_companions:
             owners = filedialog.askopenfilename(
                 title="Selecciona el listado de propietarios (opcional en otras comunidades)",
-                filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+                filetypes=[("Listado Excel o CSV", "*.csv *.xlsx *.xls"), ("Todos", "*.*")],
             )
             if not owners:
                 return

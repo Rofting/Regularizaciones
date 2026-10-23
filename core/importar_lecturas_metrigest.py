@@ -276,7 +276,7 @@ def apply_confirmed_readings(
     por un reinicio de contador). El llamador conserva la transacción completa.
     """
     owner_rows = con.execute(
-        "SELECT id_propietario,codigo_vivienda FROM propietarios WHERE id_comunidad=?",
+        "SELECT id_propietario,codigo_vivienda,tipo_unidad FROM propietarios WHERE id_comunidad=?",
         (community_id,),
     ).fetchall()
     owners = {_normalizar_vivienda(row["codigo_vivienda"]): row for row in owner_rows}
@@ -311,6 +311,14 @@ def apply_confirmed_readings(
             raise ValueError("Las fechas de lectura no forman un intervalo válido")
         initial_value = _confirmed_number(reading.get("val_ant"))
         final_value = _confirmed_number(reading.get("val_act"))
+        if (
+            initial_value == 0 and final_value == 0
+            and (owner["tipo_unidad"] or "vivienda") != "vivienda"
+        ):
+            # Locales y garajes figuran en el informe con 0 → 0 porque no tienen
+            # contador: no participan en el reparto por consumo ni son una
+            # lectura dudosa que revisar.
+            continue
         field_name = f"reading.{owner['codigo_vivienda']}.{service}"
         reset_status = _counter_reset_status(con, document_id, field_name, initial_date, final_date)
 

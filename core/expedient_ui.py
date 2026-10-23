@@ -3500,6 +3500,12 @@ def resolution_route_for_issue(issue: ReviewIssue) -> str:
     """Selecciona la ruta de revisión sin crear controles de Tk."""
     if issue.code == "COUNTER_RESET":
         return "counter_reset_estimate"
+    from excel_bootstrap_importer import master_invoice_row
+    if master_invoice_row(issue.field_name) is not None:
+        # Fila de factura del Excel maestro histórico: se puede corregir el
+        # dato (la fecha arrastrada del año anterior, por ejemplo) o excluir
+        # la fila, sin descartar el libro entero.
+        return "master_row"
     if issue.code == "INVOICE_OUTSIDE_PERIOD":
         return "dismiss_invoice_outside_period"
     if issue.code == "DOCUMENT_CLASSIFICATION_REQUIRED":
@@ -4330,7 +4336,7 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         text_color=C["texto_sec"],
     ).pack(side="right")
 
-    optional_reason = route in {"generic_correction", "dismiss_invoice_outside_period"}
+    optional_reason = route in {"generic_correction", "dismiss_invoice_outside_period", "master_row"}
     reanalyse_after = route == "classify_unknown" or issue.field_name == "document.provider"
 
     def save(open_next: bool = False):
@@ -4417,6 +4423,47 @@ def open_issue_dialog(app: "AppGestionFincas", issue: ReviewIssue) -> None:
         border_width=1,
         border_color=C["exito"],
     ).pack(side="right", padx=(0, 8))
+    if route == "master_row":
+        def exclude_row():
+            if app._procesando:
+                return
+            if not messagebox.askyesno(
+                "Excluir fila",
+                "La factura de esta fila no se incorporará al ejercicio "
+                "(por ejemplo, una previsión «sin recibir aún» o una factura de otro año).\n\n"
+                "¿Excluirla?",
+                parent=dialog,
+            ):
+                return
+            connection = gestor_bd.conectar(str(app.ruta_bd_expedientes))
+            try:
+                document_review.exclude_master_invoice_row(
+                    connection, issue.id_issue,
+                    reason=reason.get().strip() or "Fila excluida del ejercicio",
+                    excluded_by="usuario_local",
+                )
+                remaining = len(document_review.list_open_issues(connection, issue.id_case))
+                if not remaining and not document_review.case_has_unapplied_sources(
+                    connection, issue.id_case,
+                ):
+                    document_review.validate_case_ready(connection, issue.id_case)
+            except Exception as error:
+                messagebox.showwarning("No se pudo excluir", str(error), parent=dialog)
+                return
+            finally:
+                connection.close()
+            dialog.destroy()
+            app._refrescar_lista_expedientes(select_case_id=issue.id_case)
+            app._refrescar_expediente()
+            app.log(f"{remaining} incidencia(s) por resolver", "aviso" if remaining else "ok")
+            if remaining:
+                app.after(50, app._accion_resolver_incidencias)
+
+        ctk.CTkButton(
+            actions, text="Excluir fila", command=exclude_row,
+            height=38, corner_radius=9, font=UIM.fuente(12),
+            **UIM.secondary_button_kwargs(),
+        ).pack(side="left")
     if route != "counter_reset_estimate":
         ctk.CTkButton(
             actions, text="Guardar y siguiente", command=lambda: save(open_next=True),

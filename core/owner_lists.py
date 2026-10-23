@@ -128,7 +128,8 @@ def read_owner_rows(path: str | Path) -> list[OwnerRow]:
         vivienda, nombre = cell("vivienda"), cell("nombre")
         email_match = _EMAIL.search(cell("email") or " ".join(_clean(value) for value in cells))
         email = email_match.group(0).lower() if email_match else ""
-        if not vivienda and (not nombre or _EMAIL.fullmatch(nombre)):
+        continuation = not vivienda or (email and email in vivienda.lower())
+        if continuation and (not nombre or _EMAIL.fullmatch(nombre)):
             # Algunos programas imprimen el correo en la línea siguiente.
             if email and result and not result[-1].email:
                 last = result[-1]

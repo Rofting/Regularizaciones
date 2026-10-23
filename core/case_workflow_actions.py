@@ -430,6 +430,16 @@ def run_bootstrap_import(
             "Selecciona ambas fuentes complementarias o deja ambas vacías"
         )
     _emit(progress, "validate_case", id_case=id_case)
+    if owner_list_path:
+        # El listado puede venir en Excel o en CSV de otro programa: se
+        # convierte al CSV canónico sin tocar el original, como en el alta.
+        import owner_lists
+        try:
+            owner_list_path = owner_lists.normalise_owner_list(
+                Path(owner_list_path), Path(database_path).parent / "importaciones",
+            )
+        except ValueError as error:
+            raise WorkflowBlockedError(f"Listado de propietarios: {error}") from error
     connection, profile = _with_case_profile(
         database_path, id_case=id_case, active_community_id=active_community_id,
         project_root=project_root,

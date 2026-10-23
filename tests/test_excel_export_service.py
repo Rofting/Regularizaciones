@@ -389,8 +389,10 @@ class ExcelExportServiceTest(unittest.TestCase):
         self.assertIsInstance(workbook["LECTURAS ACS M3"]["B8"].value, date)
         self.assertIsNone(workbook["LECTURAS ACS M3"]["A8"].value)
         self.assertEqual("=D8-F8", workbook["LECTURAS ACS M3"]["G8"].value)
-        self.assertEqual(182, workbook["LECTURAS ACS M3"]["H8"].value)
-        self.assertEqual(78, workbook["LECTURAS ACS M3"]["I9"].value)
+        # La hoja de lecturas es la de lo COBRADO (ANALISIS!H66/J66 la suman):
+        # sin cuotas anotadas recibe los importes cobrados, no el coste real.
+        self.assertEqual(168, workbook["LECTURAS ACS M3"]["H8"].value)
+        self.assertEqual(112, workbook["LECTURAS ACS M3"]["I9"].value)
         self.assertEqual("=SUM(H8:I8)", workbook["LECTURAS ACS M3"]["J8"].value)
         self.assertEqual("=H8/G8", workbook["LECTURAS ACS M3"]["L8"].value)
         self.assertEqual("=I9/'DATOS'!$D$4", workbook["LECTURAS ACS M3"]["M9"].value)

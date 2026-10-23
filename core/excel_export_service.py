@@ -10,6 +10,7 @@ import sqlite3
 from copy import copy
 from dataclasses import dataclass
 from datetime import date, datetime
+import re
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -611,6 +612,31 @@ def _write_derived_formula(
         _set_cell_value(celda, total_value)
 
 
+def invoice_components_with_taxes(fixed: Any, variable: Any, total: Any) -> tuple[float, float]:
+    """Término fijo y variable con su parte de impuestos, de modo que sumen el total.
+
+    Las facturas suelen dar el desglose antes de impuestos (impuesto eléctrico,
+    alquiler de equipos, IVA) y el total con todo incluido. El estudio calcula
+    los % de término fijo y variable como fijo/total y variable/total: con el
+    desglose sin impuestos esos % no suman 100 y una parte del coste no se
+    reparte a nadie. Como en el estudio manual, los impuestos se reparten entre
+    ambos términos en proporción a su importe. Sin desglose se devuelve tal cual.
+    """
+    fixed_value = Decimal(str(fixed or 0))
+    variable_value = Decimal(str(variable or 0))
+    total_cents = _cents(total)
+    components = fixed_value + variable_value
+    if not components:
+        return float(fixed_value), float(variable_value)
+    # Todo en céntimos: fijo + variable = total exacto, también cuando el
+    # libro maestro trae importes con más de dos decimales.
+    if abs(components - Decimal(total_cents) / 100) <= Decimal("0.01"):
+        fixed_cents = _cents(fixed_value)
+    else:
+        fixed_cents = _cents(Decimal(total_cents) * fixed_value / components / 100)
+    return fixed_cents / 100, (total_cents - fixed_cents) / 100
+
+
 _TEMPORADA_POR_DEFECTO = ("12-01", "05-31")
 
 
@@ -699,15 +725,18 @@ def _write_invoice_table(
     derived = _derived_columns(table)
     season = _season_columns(connection, case, module, table)
     for row_number, invoice in zip(available_rows, invoices):
+        fixed, variable = invoice_components_with_taxes(
+            invoice["termino_fijo"], invoice["termino_variable"], invoice["importe_total"],
+        )
         values = {
             "invoice_date": _safe_date(invoice["fecha_factura"]),
             "days": int(invoice["dias_facturados"] or 0),
             "start_date": _safe_date(invoice["fecha_inicio"]),
             "end_date": _safe_date(invoice["fecha_fin"]),
             "consumption": float(invoice["consumo_total"] or 0),
-            "fixed": float(invoice["termino_fijo"] or 0),
-            "variable": float(invoice["termino_variable"] or 0),
-            "total": float(invoice["importe_total"]),
+            "fixed": fixed,
+            "variable": variable,
+            "total": _cents(invoice["importe_total"]) / 100,
             "provider": invoice["proveedor"] or "",
         }
         for key, column in columns.items():
@@ -738,6 +767,30 @@ def _write_invoice_table(
             )
         else:
             _set_cell_value(sheet[str(period_span_days_cell)], None)
+
+
+_RATIO_FORMULA = re.compile(r"^=\s*\$?([A-Z]{1,3})\$?(\d+)\s*/\s*\$?([A-Z]{1,3})\$?(\d+)\s*$")
+
+
+def _guard_informative_ratios(sheet, table: Mapping[str, Any]) -> None:
+    """Evita #DIV/0! en los precios medios de la fila de sumas.
+
+    El modelo calcula, por ejemplo, el precio medio por m³ del gas aunque la
+    comunidad lo facture sólo en kWh: la columna de m³ queda a cero y la
+    celda mostraba #DIV/0! en el Excel entregado. Si el divisor es cero, la
+    celda queda vacía; con datos el resultado es el mismo de siempre.
+    """
+    summary_row = int(table["end_row"]) + 1
+    for cell in sheet[summary_row]:
+        value = cell.value
+        if not isinstance(value, str):
+            continue
+        match = _RATIO_FORMULA.match(value)
+        if match is None:
+            continue
+        numerator = f"{match[1]}{match[2]}"
+        divisor = f"{match[3]}{match[4]}"
+        cell.value = f'=IF({divisor}=0,"",{numerator}/{divisor})'
 
 
 def _write_other_expenses(connection, workbook, case, table) -> None:
@@ -938,16 +991,24 @@ def _write_meter_readings(
         cierre.setdefault("initial_date", _safe_date(fecha_inicial))
         cierre["final"], cierre["initial"] = final, initial
     else:
+        # Esta hoja es la de lo COBRADO a los vecinos: si el período tiene los
+        # importes cobrados (por ejemplo, importados del maestro), van ellos.
+        # Escribir aquí el coste real hacía que lo cobrado coincidiera siempre
+        # con el coste y la regularización saliera a cero.
+        def cobrado(kind: str) -> float:
+            billed = parameters.get(f"{prefix}_{kind}_billed")
+            return float(billed if billed is not None else parameters[f"{prefix}_{kind}_actual"])
+
         filas = [
             {
                 "charge_date": _safe_date(fecha_final),
                 "final_date": _safe_date(fecha_final), "final": final,
                 "initial_date": _safe_date(fecha_inicial), "initial": initial,
-                "variable_fee": float(parameters[f"{prefix}_variable_actual"]),
+                "variable_fee": cobrado("variable"),
             },
             {
                 "charge_date": _safe_date(case["fecha_fin"]),
-                "fixed_fee": float(parameters[f"{prefix}_fixed_actual"]),
+                "fixed_fee": cobrado("fixed"),
             },
         ]
     if len(filas) > len(available_rows):
@@ -1151,6 +1212,7 @@ def _write_workbook(
                 table.setdefault("period_span_days_cell", "D23")
             if module in ("GAS", "ELECTRICIDAD", "AGUA"):
                 _write_invoice_table(connection, workbook, case, module, table)
+                _guard_informative_ratios(workbook[table["sheet"]], table)
             elif module == "OTROS_GASTOS":
                 _write_other_expenses(connection, workbook, case, table)
             elif module in ("ACS", "CALEFACCION"):
@@ -1311,21 +1373,37 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
     for key in profile.workbook_layout["total_checks"]:
         if key.startswith("invoice_total:"):
             module = key.split(":", 1)[1]
-            value = connection.execute(
-                """SELECT COALESCE(SUM(importe_total),0) FROM facturas
-                   WHERE id_comunidad=? AND id_periodo=? AND tipo_suministro=?""",
-                (case["id_comunidad"], case["id_periodo"], module),
-            ).fetchone()[0]
+            # Céntimo a céntimo por factura, como se escribe y se valida la hoja.
+            value = Decimal(sum(
+                _cents(row[0]) for row in connection.execute(
+                    """SELECT importe_total FROM facturas
+                       WHERE id_comunidad=? AND id_periodo=? AND tipo_suministro=?""",
+                    (case["id_comunidad"], case["id_periodo"], module),
+                ).fetchall()
+            )) / 100
         elif key.startswith("invoice_component:"):
             _, module, component = key.split(":", 2)
-            value = connection.execute(
-                """SELECT COALESCE(SUM(c.amount),0)
-                   FROM invoice_components c
-                   JOIN facturas f ON f.id_factura=c.id_factura
-                   WHERE f.id_comunidad=? AND f.id_periodo=?
-                     AND f.tipo_suministro=? AND c.component_key=?""",
-                (case["id_comunidad"], case["id_periodo"], module, component),
-            ).fetchone()[0]
+            # Lo mismo que escribe la hoja: el desglose con su parte de impuestos.
+            index = {"fixed": 0, "variable": 1}.get(component)
+            if index is None:
+                value = connection.execute(
+                    """SELECT COALESCE(SUM(c.amount),0)
+                       FROM invoice_components c
+                       JOIN facturas f ON f.id_factura=c.id_factura
+                       WHERE f.id_comunidad=? AND f.id_periodo=?
+                         AND f.tipo_suministro=? AND c.component_key=?""",
+                    (case["id_comunidad"], case["id_periodo"], module, component),
+                ).fetchone()[0]
+            else:
+                # Céntimo a céntimo por fila, igual que suma la validación las celdas.
+                value = Decimal(sum(
+                    _cents(invoice_components_with_taxes(*row)[index])
+                    for row in connection.execute(
+                        """SELECT termino_fijo,termino_variable,importe_total FROM facturas
+                           WHERE id_comunidad=? AND id_periodo=? AND tipo_suministro=?""",
+                        (case["id_comunidad"], case["id_periodo"], module),
+                    ).fetchall()
+                )) / 100
         elif key.startswith("parameter:"):
             parameter_key = key.split(":", 1)[1]
             if parameter_key in calculados_por_el_libro:

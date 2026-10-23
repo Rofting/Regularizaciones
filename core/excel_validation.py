@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
@@ -265,6 +267,20 @@ def _dimensions_preserved(esperadas, obtenidas) -> bool:
 
 
 
+_GUARDED_RATIO = re.compile(
+    r'^=IF\(\s*([A-Z]{1,3}\d+)\s*=\s*0\s*,\s*""\s*,\s*([A-Z]{1,3}\d+)\s*/\s*\1\s*\)$'
+)
+
+
+def _unguarded_ratio(value):
+    """El exportador protege los precios medios con IF(divisor=0;"";…): mismo diseño."""
+    if isinstance(value, str):
+        match = _GUARDED_RATIO.match(value.replace("$", ""))
+        if match:
+            return f"={match[2]}/{match[1]}"
+    return value
+
+
 def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerprint:
     """Huella del diseño del libro, comparable entre Excel y LibreOffice.
 
@@ -316,7 +332,8 @@ def workbook_fingerprint(path: Path, profile: ExcelProfile) -> WorkbookFingerpri
                 # llevaba formato desaparece al recalcular y no es una pérdida.
                 if cell.value is not None:
                     immutable_cells.append((
-                        sheet.title, cell.coordinate, cell.value, cell.data_type,
+                        sheet.title, cell.coordinate, _unguarded_ratio(cell.value),
+                        cell.data_type,
                     ))
                     immutable_styles.append((
                         sheet.title, cell.coordinate, cell.style_id == 0,

@@ -580,6 +580,68 @@ def _cell_has_value(cell) -> bool:
     return cell is not None and _clean(cell.value) != ""
 
 
+@dataclass(frozen=True)
+class _CorrectedCell:
+    """Celda del maestro con el valor confirmado por el gestor en una incidencia."""
+
+    original: Any
+    value: Any
+
+    @property
+    def coordinate(self) -> str:
+        return self.original.coordinate
+
+    @property
+    def column(self) -> int:
+        return self.original.column
+
+    @property
+    def row(self) -> int:
+        return self.original.row
+
+
+def _manual_corrections(connection: sqlite3.Connection, id_document: int) -> dict[str, str]:
+    """Valores confirmados a mano para celdas concretas del maestro archivado."""
+    return {
+        str(row[0]): str(row[1])
+        for row in connection.execute(
+            """SELECT field_name,value FROM extraction_candidates
+               WHERE id_document=? AND source='manual' AND validation_status='validated'""",
+            (id_document,),
+        ).fetchall()
+    }
+
+
+MASTER_ROW_FIELD = re.compile(r"^(?P<sheet>GAS|ELECTRICIDAD|AGUA)\.(?P<column>[A-Z]{1,3})(?P<row>\d+)\.")
+
+
+def master_invoice_row(field_name: str) -> tuple[str, int] | None:
+    """Hoja y fila del maestro a la que se refiere una incidencia de factura."""
+    match = MASTER_ROW_FIELD.match(str(field_name or ""))
+    return (match["sheet"], int(match["row"])) if match else None
+
+
+def _excluded_invoice_rows(connection: sqlite3.Connection, id_document: int) -> set[tuple[str, int]]:
+    """Filas que el gestor ha excluido expresamente del ejercicio."""
+    rows = set()
+    for (field_name,) in connection.execute(
+        "SELECT field_name FROM review_issues WHERE id_document=? AND status='dismissed'",
+        (id_document,),
+    ).fetchall():
+        location = master_invoice_row(str(field_name))
+        if location is not None:
+            rows.add(location)
+    return rows
+
+
+def _is_empty_invoice_row(cells: Iterable[Any]) -> bool:
+    """Fila preparada en la plantilla (fecha o fórmulas a cero) sin ningún importe."""
+    return all(
+        cell is None or _number(cell.value) in (None, 0.0)
+        for cell in cells
+    )
+
+
 def _is_invoice_summary(value: Any) -> bool:
     label = _header(value)
     return label.startswith("SUMA") or label.startswith("TOTAL") or label.startswith("SUBTOTAL")
@@ -616,6 +678,73 @@ def _layout_invoice_columns(profile: ExcelProfile, service: str) -> tuple[int, i
     if any(columns[key] is None for key in required) or not columns["consumption"]:
         raise ValueError(f"El perfil no declara todas las columnas de factura de {service}")
     return int(table["start_row"]), int(table["end_row"]), columns
+
+
+_LAYOUT_HEADER_RULES = {
+    "date": lambda label: label.startswith(("FECHA FRA", "FECHA FACTURA")),
+    "start": lambda label: label.startswith("FECHA INI"),
+    "end": lambda label: label.startswith("FECHA FIN"),
+    "fixed": lambda label: "FIJ" in label,
+    "variable": lambda label: "VARIABLE" in label or label.startswith("EUR VAR"),
+    "total": lambda label: "TOTAL" in label,
+    "notes": lambda label: label.startswith("NOTA") or "PROVEEDOR" in label,
+}
+
+
+def _realign_layout_with_headers(sheet, layout: tuple[int, int, dict[str, Any]]):
+    """Corrige columnas del perfil cuando el maestro de otro año las tiene desplazadas.
+
+    Los estudios de años anteriores no siempre tienen la misma estructura que
+    el perfil (por ejemplo, la columna «estimada» del gas no existía y todo lo
+    que sigue queda una columna a la izquierda). Si el rótulo de la columna
+    declarada contradice su significado, se busca la única columna del mismo
+    encabezado que sí lo cumple. Sin rótulo o sin una alternativa única se
+    conserva el perfil.
+    """
+    start_row, end_row, columns = layout
+    header_row = max(1, start_row - 2)
+    labels = {
+        cell.column: _header(cell.value)
+        for cell in sheet[header_row]
+        if cell.value is not None and _header(cell.value)
+    }
+    if not labels:
+        return layout
+    realigned = dict(columns)
+
+    def unique(predicate, near: int) -> int | None:
+        # Los porcentajes de reparto repiten «fijo»/«variable»: no son importes.
+        found = sorted(
+            (abs(column - near), column) for column, label in labels.items()
+            if predicate(label) and not label.startswith("%")
+            and not str(sheet.cell(header_row, column).value or "").strip().startswith("%")
+        )
+        if not found or (len(found) > 1 and found[0][0] == found[1][0]):
+            return None
+        return found[0][1]
+
+    for key, rule in _LAYOUT_HEADER_RULES.items():
+        column = columns.get(key)
+        if column is None:
+            continue
+        label = labels.get(int(column))
+        if label is None or rule(label):
+            continue
+        replacement = unique(rule, int(column))
+        if replacement is not None:
+            realigned[key] = replacement
+    consumption = tuple(columns.get("consumption") or ())
+    if consumption:
+        label = labels.get(int(consumption[0]))
+        if label is not None and "CONSUMO" not in label:
+            unit = "M3" if "M3" in label else "KWH"
+            near = int(consumption[0])
+            replacement = unique(lambda text: "CONSUMO" in text and unit in text, near)
+            if replacement is None:
+                replacement = unique(lambda text: "CONSUMO" in text and "KWH" in text, near)
+            if replacement is not None:
+                realigned["consumption"] = (replacement,)
+    return start_row, end_row, realigned
 
 
 def _layout_has_declared_rows(sheet, layout: tuple[int, int, dict[str, Any]]) -> bool:
@@ -655,11 +784,21 @@ def _parse_invoice_sheets(
     profile: ExcelProfile | None = None,
 ) -> int:
     inserted = 0
+    corrections = _manual_corrections(connection, id_document)
+    excluded = _excluded_invoice_rows(connection, id_document)
     for sheet_name, schema in _INVOICE_SCHEMAS.items():
         if sheet_name not in workbook.sheetnames:
             continue
         sheet = workbook[sheet_name]
+
+        def corrected(cell, key: str, _sheet: str = sheet_name):
+            if cell is None:
+                return None
+            value = corrections.get(f"{_sheet}.{cell.coordinate}.{key}")
+            return cell if value is None else _CorrectedCell(cell, value)
         layout = _layout_invoice_columns(profile, sheet_name) if profile else None
+        if layout is not None:
+            layout = _realign_layout_with_headers(sheet, layout)
         found = _find_invoice_header(sheet, schema)
         if layout is None or not _layout_has_declared_rows(sheet, layout):
             if found is None:
@@ -678,10 +817,16 @@ def _parse_invoice_sheets(
             header_row = max(1, start_row - 2)
             data_rows = range(start_row, end_row + 1)
         for row in data_rows:
-            date_cell = sheet.cell(row, int(columns["date"]))
-            start_cell = sheet.cell(row, int(columns["start"])) if columns["start"] else None
-            end_cell = sheet.cell(row, int(columns["end"])) if columns["end"] else None
-            total_cell = sheet.cell(row, int(columns["total"]))
+            if (sheet_name, row) in excluded:
+                continue
+            date_cell = corrected(sheet.cell(row, int(columns["date"])), "invoice_date")
+            start_cell = corrected(
+                sheet.cell(row, int(columns["start"])) if columns["start"] else None, "start_date"
+            )
+            end_cell = corrected(
+                sheet.cell(row, int(columns["end"])) if columns["end"] else None, "end_date"
+            )
+            total_cell = corrected(sheet.cell(row, int(columns["total"])), "total")
             notes_cell = sheet.cell(row, int(columns["notes"])) if columns["notes"] else None
             relevant_cells = [date_cell, start_cell, end_cell, total_cell, notes_cell]
             relevant_cells.extend(
@@ -693,6 +838,17 @@ def _parse_invoice_sheets(
             if not any(_cell_has_value(cell) for cell in relevant_cells):
                 continue
             if _is_invoice_summary(date_cell.value):
+                continue
+            amount_cells = [total_cell]
+            amount_cells.extend(
+                sheet.cell(row, int(column)) for column in columns["consumption"]
+            )
+            for key in ("fixed", "variable"):
+                if columns[key]:
+                    amount_cells.append(sheet.cell(row, int(columns[key])))
+            if _is_empty_invoice_row(amount_cells):
+                # Las filas de previsión que el estudio deja preparadas (sólo
+                # una fecha y fórmulas que dan cero) no son facturas.
                 continue
             invoice_date = _date(date_cell.value)
             if invoice_date is None:
@@ -764,15 +920,21 @@ def _parse_invoice_sheets(
             )
             consumption_cell = next(
                 (
-                    sheet.cell(row, int(column))
-                    for column in columns["consumption"]
-                    if _number(sheet.cell(row, int(column)).value) is not None
+                    cell
+                    for cell in (
+                        corrected(sheet.cell(row, int(column)), "consumption")
+                        for column in columns["consumption"]
+                    )
+                    if _number(cell.value) is not None
                 ),
                 None,
             )
-            fixed_cell = sheet.cell(row, int(columns["fixed"])) if columns["fixed"] else None
-            variable_cell = (
-                sheet.cell(row, int(columns["variable"])) if columns["variable"] else None
+            fixed_cell = corrected(
+                sheet.cell(row, int(columns["fixed"])) if columns["fixed"] else None, "fixed"
+            )
+            variable_cell = corrected(
+                sheet.cell(row, int(columns["variable"])) if columns["variable"] else None,
+                "variable",
             )
             consumption = _number(consumption_cell.value) if consumption_cell else None
             fixed = _number(fixed_cell.value) if fixed_cell else None
@@ -1297,6 +1459,52 @@ def import_master_excel(
     )
 
 
+def reapply_master_corrections(
+    connection: sqlite3.Connection,
+    *,
+    id_case: int,
+    id_document: int,
+    profile: ExcelProfile,
+) -> int:
+    """Vuelve a leer las facturas del maestro aplicando las correcciones confirmadas.
+
+    Al resolver una incidencia del maestro (una fecha de factura arrastrada del
+    ejercicio anterior, un extremo vacío…) sólo se guardaba el valor corregido:
+    la factura nunca llegaba a importarse y el Excel se bloqueaba después por
+    falta de facturas. Las filas ya importadas no se duplican y las que el
+    gestor excluyó del ejercicio no se vuelven a proponer.
+    """
+    case, period_id = _case_context(connection, id_case, profile)
+    document = connection.execute(
+        """SELECT archived_path,sha256,document_kind FROM source_documents
+           WHERE id_document=? AND id_case=?""",
+        (id_document, id_case),
+    ).fetchone()
+    if document is None or document["document_kind"] != "excel_master_bootstrap":
+        raise LookupError("El documento no es un maestro importado en este expediente")
+    batch = _existing_batch(
+        connection, case.community_id, str(document["sha256"]), "excel_master_bootstrap"
+    )
+    if batch is None:
+        return 0
+    archived_path = Path(str(document["archived_path"]))
+    archived_bytes = archived_path.read_bytes()
+    if hashlib.sha256(archived_bytes).hexdigest() != str(document["sha256"]):
+        raise ValueError("El maestro archivado no coincide con su huella registrada")
+    values_book = load_workbook(BytesIO(archived_bytes), data_only=True)
+    try:
+        inserted = _parse_invoice_sheets(
+            connection, workbook=values_book, id_case=id_case,
+            id_document=id_document, id_batch=int(batch["id_batch"]),
+            community_id=case.community_id, period_id=period_id, case=case,
+            archived_path=str(document["archived_path"]), profile=profile,
+        )
+    finally:
+        values_book.close()
+    _validate_document_if_clean(connection, id_document)
+    return inserted
+
+
 def _import_owner_source(
     connection: sqlite3.Connection,
     *,
@@ -1543,7 +1751,7 @@ def _import_reading_source(
         owners = {
             _owner_key(row["codigo_vivienda"]): row
             for row in connection.execute(
-                """SELECT id_propietario,codigo_vivienda FROM propietarios
+                """SELECT id_propietario,codigo_vivienda,tipo_unidad FROM propietarios
                    WHERE id_comunidad=? AND activo=1""",
                 (case.community_id,),
             )
@@ -1663,7 +1871,9 @@ def _import_reading_source(
                         message="El contador disminuye y requiere una estimación aprobada",
                         detected_value=f"{initial} -> {final}",
                     )
-        for owner in owners.values():
+        # Sólo las viviendas participan en el reparto por contador; locales y
+        # garajes sin contador de ACS no deben bloquear el expediente.
+        for owner in (row for row in owners.values() if row["tipo_unidad"] == "vivienda"):
             count = connection.execute(
                 """SELECT COUNT(*) FROM lecturas_vecino
                    WHERE id_propietario=? AND id_periodo=? AND tipo=?
@@ -1830,7 +2040,8 @@ def _validate_configured_reading_ranges(connection, *, id_case, case, period_id,
             (id_case, binding["source_sha256s"][0]),
         ).fetchone()
         for owner in connection.execute(
-            "SELECT id_propietario,codigo_vivienda FROM propietarios WHERE id_comunidad=? AND activo=1",
+            "SELECT id_propietario,codigo_vivienda FROM propietarios "
+            "WHERE id_comunidad=? AND activo=1 AND tipo_unidad='vivienda'",
             (case.community_id,),
         ).fetchall():
             readings = connection.execute(

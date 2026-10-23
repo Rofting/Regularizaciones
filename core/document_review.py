@@ -18,6 +18,7 @@ _MISSING_FIELD_CODE = "MISSING_REQUIRED_FIELD"
 _COUNTER_RESET_CODE = "COUNTER_RESET"
 _READING_ZERO_CODE = "READING_ZERO_REVIEW"
 _INVOICE_OUTSIDE_PERIOD_CODE = "INVOICE_OUTSIDE_PERIOD"
+_BOOTSTRAP_MASTER_KIND = "excel_master_bootstrap"
 _CLASSIFICATION_REQUIRED_CODE = "DOCUMENT_CLASSIFICATION_REQUIRED"
 _ARCHIVED_SOURCE_DUPLICATE_CODE = "ARCHIVED_SOURCE_DUPLICATE"
 _ARCHIVED_SOURCE_MISSING_CODE = "ARCHIVED_SOURCE_MISSING"
@@ -67,6 +68,12 @@ def _normalise_value(value: str | None) -> str | None:
 
 def _validate_issue_value(field_name: str, value: str) -> str:
     """Reject placeholders before they can become a manual canonical value."""
+    suffix = field_name.rsplit(".", 1)[-1] if field_name.count(".") >= 2 else None
+    if suffix in {"invoice_date", "start_date", "end_date"}:
+        # Celdas del Excel maestro: «GAS.B10.invoice_date».
+        field_name = "fecha_factura"
+    elif suffix in {"total", "fixed", "variable"}:
+        field_name = "importe_total"
     if field_name in {"fecha_inicio", "fecha_fin", "fecha_factura"}:
         for pattern in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
             try:
@@ -880,6 +887,11 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
                    validation_status = excluded.validation_status""",
             (issue["id_document"], issue["field_name"], normalized_value),
         )
+        if issue["code"] in {"MISSING_READING_RANGE", "MISSING_REQUIRED_FIELD"}:
+            _apply_manual_boundary_readings(
+                connection, issue, normalized_value,
+                reason=normalized_reason, resolved_by=normalized_resolved_by,
+            )
         if issue["code"] == _CLASSIFICATION_REQUIRED_CODE:
             next_status = "not_applicable" if normalized_value == "other" else "under_review"
             connection.execute(
@@ -898,14 +910,111 @@ def resolve_issue(connection: sqlite3.Connection, issue_id: int, *, value: str,
     return review_issue_from_row(resolved)
 
 
+_MANUAL_READING_FIELD = re.compile(r"^reading\.(?P<code>.+)\.(?P<service>ACS|CALEFACCION)$")
+
+
+def _apply_manual_boundary_readings(connection, issue, value: str, *, reason: str,
+                                    resolved_by: str) -> None:
+    """Una lectura que falta en el informe se completa con el valor confirmado.
+
+    Antes la incidencia se cerraba pero no se guardaba ninguna lectura: el
+    expediente pasaba a «listo» y el Excel se bloqueaba después con «Faltan
+    lecturas». Se guarda como estimación manual aprobada por quien la confirma.
+    Si faltan las dos lecturas del período se indican «inicial;final».
+    """
+    match = _MANUAL_READING_FIELD.match(str(issue["field_name"]))
+    if match is None:
+        return
+    kind = connection.execute(
+        "SELECT document_kind FROM source_documents WHERE id_document=?",
+        (issue["id_document"],),
+    ).fetchone()
+    if kind is None or kind["document_kind"] != "meter_readings":
+        return
+    case = connection.execute(
+        """SELECT id_comunidad,id_periodo,fecha_inicio,fecha_fin FROM regularization_cases
+           WHERE id_case=?""",
+        (issue["id_case"],),
+    ).fetchone()
+    owner = connection.execute(
+        """SELECT id_propietario FROM propietarios
+           WHERE id_comunidad=? AND codigo_vivienda=? AND activo=1""",
+        (case["id_comunidad"], match["code"]),
+    ).fetchone()
+    if owner is None or case["id_periodo"] is None:
+        return
+    service = match["service"]
+    missing = [
+        boundary for boundary in (case["fecha_inicio"], case["fecha_fin"])
+        if connection.execute(
+            """SELECT 1 FROM period_readings WHERE id_propietario=? AND tipo=?
+               AND fecha_lectura=?""",
+            (owner["id_propietario"], service, boundary),
+        ).fetchone() is None
+    ]
+    if not missing:
+        return
+    parts = [part.strip() for part in re.split(r"[;/]", value) if part.strip()]
+    if len(parts) != len(missing):
+        raise ValueError(
+            "Indica la lectura que falta en m³"
+            if len(missing) == 1
+            else "Faltan las dos lecturas: indícalas como «inicial;final» en m³"
+        )
+    numbers = []
+    for part in parts:
+        try:
+            number = Decimal(part.replace(",", "."))
+        except InvalidOperation:
+            raise ValueError("La lectura debe ser un número en m³") from None
+        if not number.is_finite() or number < 0:
+            raise ValueError("La lectura debe ser un número en m³")
+        numbers.append(float(number))
+    for boundary, number in zip(missing, numbers):
+        connection.execute(
+            """INSERT INTO lecturas_vecino
+               (id_propietario,id_periodo,tipo,fecha_lectura,valor_acumulado,estado,
+                metodo_estimacion,fuente,notas,approved_by,approved_at)
+               VALUES (?,?,?,?,?,'estimado','manual','manual',?,?,datetime('now'))""",
+            (owner["id_propietario"], case["id_periodo"], service, boundary, number,
+             reason, resolved_by),
+        )
+    # La otra incidencia de la misma lectura queda resuelta con este dato.
+    connection.execute(
+        """UPDATE review_issues SET status='resolved',resolved_at=datetime('now')
+           WHERE id_document=? AND field_name=? AND status='open' AND id_issue<>?
+             AND code IN ('MISSING_READING_RANGE','MISSING_REQUIRED_FIELD')""",
+        (issue["id_document"], issue["field_name"], issue["id_issue"]),
+    )
+
+
 def _reapply_reviewed_document(connection, case_id, document_id):
-    document = connection.execute("SELECT confirmed_by FROM source_documents WHERE id_document=?",
-                                  (document_id,)).fetchone()
+    document = connection.execute(
+        "SELECT confirmed_by,document_kind FROM source_documents WHERE id_document=?",
+        (document_id,)).fetchone()
+    if document["document_kind"] == _BOOTSTRAP_MASTER_KIND:
+        _reapply_bootstrap_master(connection, case_id, document_id)
+        return
     marker = connection.execute("SELECT 1 FROM archivos_procesados WHERE nombre_archivo=?",
                                 (f'source_document:{document_id}',)).fetchone()
     if document['confirmed_by'] or marker:
         from case_ingestion import apply_confirmed_source
         apply_confirmed_source(connection, case_id, document_id)
+
+
+def _reapply_bootstrap_master(connection, case_id, document_id):
+    """Una corrección del maestro histórico se incorpora a sus facturas en el acto."""
+    from case_workflow_actions import resolve_case_profile
+    from excel_bootstrap_importer import reapply_master_corrections
+
+    case = get_case(connection, case_id)
+    profile = resolve_case_profile(
+        connection, id_case=case_id, active_community_id=case.community_id,
+        project_root=ApplicationPaths.resolve().home,
+    )
+    reapply_master_corrections(
+        connection, id_case=case_id, id_document=document_id, profile=profile,
+    )
 
 
 def approve_counter_reset_estimate(
@@ -1243,6 +1352,23 @@ def dismiss_invoice_outside_period(
                WHERE id_issue=?""",
             (issue_id,),
         )
+        kind = connection.execute(
+            "SELECT document_kind FROM source_documents WHERE id_document=?",
+            (issue["id_document"],),
+        ).fetchone()
+        if kind is not None and kind["document_kind"] == _BOOTSTRAP_MASTER_KIND:
+            # En un maestro histórico la incidencia es una fila: se excluye
+            # esa factura y el resto del libro sigue siendo válido.
+            still_open = connection.execute(
+                "SELECT 1 FROM review_issues WHERE id_document=? AND status='open' LIMIT 1",
+                (issue["id_document"],),
+            ).fetchone()
+            if still_open is None:
+                connection.execute(
+                    "UPDATE source_documents SET status='validated' WHERE id_document=?",
+                    (issue["id_document"],),
+                )
+            return review_issue_from_row(_issue_row(connection, issue_id))
         marker = connection.execute(
             """SELECT processed.id_factura,cases.id_periodo
                FROM archivos_procesados AS processed
@@ -1265,6 +1391,72 @@ def dismiss_invoice_outside_period(
         )
         dismissed = _issue_row(connection, issue_id)
     return review_issue_from_row(dismissed)
+
+
+def exclude_master_invoice_row(
+    connection: sqlite3.Connection,
+    issue_id: int,
+    *,
+    reason: str,
+    excluded_by: str,
+) -> ReviewIssue:
+    """Excluye del ejercicio una fila de factura del maestro histórico.
+
+    Sirve para previsiones («sin recibir aún»), filas de otro ejercicio o
+    restos de plantilla. Se cierran todas las incidencias de esa fila y el
+    resto del libro sigue siendo válido; la fila no se importa.
+    """
+    from excel_bootstrap_importer import master_invoice_row
+
+    normalized_reason = reason.strip()
+    normalized_actor = excluded_by.strip()
+    if not normalized_reason:
+        raise ValueError("El motivo de la exclusión es obligatorio")
+    if not normalized_actor:
+        raise ValueError("La persona responsable de la exclusión es obligatoria")
+    with _transaction(connection):
+        issue = _issue_row(connection, issue_id)
+        if issue is None or issue["status"] != "open":
+            raise LookupError("Incidencia no encontrada")
+        kind = connection.execute(
+            "SELECT document_kind FROM source_documents WHERE id_document=?",
+            (issue["id_document"],),
+        ).fetchone()
+        location = master_invoice_row(str(issue["field_name"]))
+        if kind is None or kind["document_kind"] != _BOOTSTRAP_MASTER_KIND or location is None:
+            raise LookupError("La incidencia no corresponde a una fila de factura del maestro")
+        same_row = [
+            row for row in connection.execute(
+                """SELECT id_issue,field_name,detected_value FROM review_issues
+                   WHERE id_document=? AND status='open'""",
+                (issue["id_document"],),
+            ).fetchall()
+            if master_invoice_row(str(row["field_name"])) == location
+        ]
+        for row in same_row:
+            connection.execute(
+                """INSERT INTO manual_corrections
+                   (id_issue,original_value,corrected_value,reason,resolved_by)
+                   VALUES (?,?,?,?,?)""",
+                (row["id_issue"], row["detected_value"], "fila_excluida_del_ejercicio",
+                 normalized_reason, normalized_actor),
+            )
+            connection.execute(
+                """UPDATE review_issues SET status='dismissed',resolved_at=datetime('now')
+                   WHERE id_issue=?""",
+                (row["id_issue"],),
+            )
+        still_open = connection.execute(
+            "SELECT 1 FROM review_issues WHERE id_document=? AND status='open' LIMIT 1",
+            (issue["id_document"],),
+        ).fetchone()
+        if still_open is None:
+            connection.execute(
+                "UPDATE source_documents SET status='validated' WHERE id_document=?",
+                (issue["id_document"],),
+            )
+        excluded = _issue_row(connection, issue_id)
+    return review_issue_from_row(excluded)
 
 
 def ignore_source_document(

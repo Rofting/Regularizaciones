@@ -584,7 +584,14 @@ class DocumentReviewTest(unittest.TestCase):
         )
 
         self.assertEqual("counter_reset_estimate", expedient_ui.resolution_route_for_issue(counter))
-        self.assertEqual("dismiss_invoice_outside_period", expedient_ui.resolution_route_for_issue(invoice))
+        # Una fila del Excel maestro se corrige o se excluye sin descartar el libro.
+        self.assertEqual("master_row", expedient_ui.resolution_route_for_issue(invoice))
+        pdf_invoice = document_review.create_review_issue(
+            self.connection, self.case.id_case, self.document.id_document,
+            code="INVOICE_OUTSIDE_PERIOD", field_name="document.eligibility",
+            message="Fuera de período", detected_value="period_outside_case",
+        )
+        self.assertEqual("dismiss_invoice_outside_period", expedient_ui.resolution_route_for_issue(pdf_invoice))
         self.assertEqual("generic_correction", expedient_ui.resolution_route_for_issue(generic))
 
 
