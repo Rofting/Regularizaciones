@@ -59,9 +59,20 @@ def _active_modules_for_case(
                 matching.append(profile)
     except (LookupError, ValueError, OSError):
         return None
-    if len(matching) != 1:
+    if len(matching) > 1:
         return None
-    return tuple(matching[0].active_modules)
+    if matching:
+        return tuple(matching[0].active_modules)
+    # Comunidad nueva sin perfil todavía: al generar el Excel se creará desde
+    # el modelo común, así que sus módulos son los que rigen. Sin esto, una
+    # factura de otro ejercicio se aplicaba sin comprobar su período.
+    try:
+        import json
+        base = project_root / "config" / "modelo_excel" / "perfil_base.json"
+        modules = json.loads(base.read_text(encoding="utf-8")).get("active_modules")
+    except (OSError, ValueError):
+        return None
+    return tuple(modules) if modules else None
 
 
 def _invoice_eligibility_for_case(
@@ -542,6 +553,13 @@ def _community_has_owners(connection: sqlite3.Connection, case_id: int) -> bool:
 
 
 
+def _is_zero_amount(value: str | None) -> bool:
+    try:
+        return float(str(value).replace(",", ".")) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _auto_apply_clean_analysis(
     connection: sqlite3.Connection,
     case_id: int,
@@ -589,6 +607,16 @@ def _auto_apply_clean_analysis(
     }
     if any(not values.get(field) for field in required_by_kind[document.document_kind]):
         return document
+    if document.document_kind == "invoice" and _is_zero_amount(values.get("importe_total")):
+        # Un total 0,00 suele ser un importe que no se ha podido leer (copia
+        # escaneada, sello encima). Aplicarla en silencio dejaba la factura
+        # fuera del reparto sin que nadie lo viera.
+        document_review.create_invalid_field_issue(
+            connection, case_id, document.id_document, field_name="importe_total",
+            detected_value="0.00",
+            message="El importe total leído es 0,00 €. Compruébalo en la factura e indica el importe.",
+        )
+        return _source_document(connection, document.id_document)
     try:
         return confirm_source_candidates(
             connection, case_id, document.id_document,

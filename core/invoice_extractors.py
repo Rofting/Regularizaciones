@@ -44,7 +44,12 @@ _RANGE_SEPARATOR = r"\s*(?:a|al|hasta(?:\s+el)?|y(?:\s+el)?|-|–|—)\s*"
 _MONEY_CORE = (
     r"-?(?:\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2})-?"
 )
-_MONEY_RE = re.compile(rf"(?<![\d.,])({_MONEY_CORE})(?![\d])(?!\s?%)")
+# Una cifra seguida de una unidad de consumo («980,00 kWh», «12,50 m³») no es
+# un importe: sin esto «Consumo Total 980,00 kWh» pasaba por el total.
+_MONEY_RE = re.compile(
+    rf"(?<![\d.,])({_MONEY_CORE})(?![\d])(?!\s?%)"
+    r"(?!\s?(?i:kwh|kw\b|mwh|m3|m³|m\^3|litros|l\b|d[ií]as|€/|eur/))"
+)
 _QUANTITY = r"(?P<value>-?\d{1,3}(?:\.\d{3})+(?:,\d+)?|-?\d+(?:[.,]\d+)?)"
 _TOKEN = r"(?=[A-Z0-9/._-]*\d)[A-Z0-9][A-Z0-9/._-]{1,30}"
 _CUPS_RE = re.compile(
@@ -321,7 +326,9 @@ def _candidates_after_label(
             tail = line[label.end():]
             amounts = _money_in(tail)
             fragment = line[label.start():]
-            if not amounts and index + 1 < len(lines):
+            # Si la etiqueta ya lleva una cifra que no es un importe («Consumo
+            # Total 980,00 kWh»), la línea siguiente no es su valor.
+            if not amounts and index + 1 < len(lines) and not re.search(r"\d", tail):
                 nxt = lines[index + 1]
                 amounts = _money_in(nxt)
                 fragment = f"{line.strip()} {nxt.strip()}"

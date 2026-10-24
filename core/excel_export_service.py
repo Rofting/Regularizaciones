@@ -1035,7 +1035,25 @@ def _write_meter_readings(
             )
         es_variable = "variable_fee" in values
         if es_variable and consumption:
-            if "final" in values and "initial" in values:
+            otras = sum(
+                float(other.get("consumption") or 0)
+                for _row, other in escritas
+                if other is not values and "variable_fee" in other
+            )
+            if "final" in values and "initial" in values and otras:
+                # Las liquidaciones anteriores ya llevan su consumo: la fila de
+                # cierre aporta sólo lo que falta hasta las lecturas del
+                # período. Con D-F se sumaba dos veces y el m³ total (y el
+                # precio por m³ del análisis) salía mal.
+                resto = (final - initial) - otras
+                if resto < 0:
+                    raise ExportBlockedError(
+                        f"Las liquidaciones de {module} suman {otras:g} m³ y los contadores "
+                        f"sólo {final - initial:g} m³ en el período. Revisa los consumos de "
+                        "las cuotas cobradas."
+                    )
+                _set_cell_value(sheet[f"{consumption}{row}"], resto)
+            elif "final" in values and "initial" in values:
                 _set_cell_value(
                     sheet[f"{consumption}{row}"],
                     final - initial
