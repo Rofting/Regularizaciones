@@ -41,15 +41,26 @@ def evaluate_invoice_eligibility(
     period_start: date | None,
     period_end: date | None,
     community_confidence: str,
+    issue_date: date | None = None,
 ) -> EligibilityDecision:
+    """Decide si una factura entra en el expediente.
+
+    Criterio del despacho: cuenta la factura emitida dentro del ejercicio,
+    aunque su consumo sea del mes anterior. Sólo cuando la factura no trae
+    fecha de emisión se juzga por el período facturado.
+    """
     if document_kind.lower() not in {"invoice", "credit_note"}:
         return EligibilityDecision("not_applicable", "document_type_not_billable")
     if not community_code or community_confidence.lower() != "high":
         return EligibilityDecision("review_required", "community_unknown")
-    if period_start is None or period_end is None or period_start > period_end:
-        return EligibilityDecision("review_required", "period_unknown")
-    if period_end < case_start or period_start > case_end:
-        return EligibilityDecision("review_required", "period_outside_case")
+    if issue_date is not None:
+        if not case_start <= issue_date <= case_end:
+            return EligibilityDecision("review_required", "period_outside_case")
+    else:
+        if period_start is None or period_end is None or period_start > period_end:
+            return EligibilityDecision("review_required", "period_unknown")
+        if period_end < case_start or period_start > case_end:
+            return EligibilityDecision("review_required", "period_outside_case")
 
     family = str(service_family or "").strip().upper()
     concepts = SERVICE_MODULES.get(family)

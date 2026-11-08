@@ -21,6 +21,7 @@ from openpyxl import load_workbook
 import document_review
 import cuotas_servicio
 from fixed_costs import load_fixed_costs, write_fixed_costs, unconfirmed_template_costs, inherited_cost_message
+import other_expenses
 import case_coherence
 from excel_profiles import (
     ExcelProfile,
@@ -525,6 +526,23 @@ def _input_hash(
     history = reference_snapshot(connection, case)
     if history:
         payload['historical_reference'] = history
+    # Lo deducido de las facturas (mantenimiento, lecturas y reparaciones a 5
+    # años) también entra en el Excel; si cambia, el libro deja de estar al día.
+    derived = {
+        key: str(value) for key, value in other_expenses.automatic_fixed_costs(
+            connection, case["id_comunidad"], case["fecha_inicio"], case["fecha_fin"],
+        ).items()
+    }
+    if derived:
+        payload['derived_fixed_costs'] = derived
+    shares = [
+        (item.invoice_id, str(item.share))
+        for item in other_expenses.repair_shares(
+            connection, case["id_comunidad"], case["fecha_inicio"], case["fecha_fin"],
+        )
+    ]
+    if shares:
+        payload['derived_repair_shares'] = shares
     # Lo cobrado a los vecinos alimenta el «importe cobrado» del análisis: si
     # cambia una cuota, el Excel y el reparto dejan de estar al día. Sólo se
     # incluye cuando existe, para no invalidar huellas de comunidades sin cuotas.
@@ -793,16 +811,55 @@ def _guard_informative_ratios(sheet, table: Mapping[str, Any]) -> None:
         cell.value = f'=IF({divisor}=0,"",{numerator}/{divisor})'
 
 
+def _effective_fixed_costs(connection, case) -> dict:
+    """Gastos fijos del ejercicio: lo deducido de las facturas, y encima lo anotado a mano."""
+    values = other_expenses.automatic_fixed_costs(
+        connection, case["id_comunidad"], case["fecha_inicio"], case["fecha_fin"],
+    )
+    values.update(load_fixed_costs(connection, case["id_comunidad"], case["id_periodo"]))
+    return values
+
+
+def _other_expense_rows(connection, case) -> list[tuple[str, str, float]]:
+    """Filas de «OTROS GASTOS»: fecha, descripción e importe que cuenta en el ejercicio."""
+    rows: list[tuple[str, str, float]] = []
+    for share in other_expenses.repair_shares(
+        connection, case["id_comunidad"], case["fecha_inicio"], case["fecha_fin"],
+    ):
+        rows.append((
+            share.invoice_date,
+            f"{share.description} (1/{share.years} de {share.total:.2f} €)".replace(".", ","),
+            float(share.share),
+        ))
+    start = _safe_date(case["fecha_inicio"])
+    window = date(start.year - (other_expenses.REPAIR_YEARS - 1), start.month, min(start.day, 28))
+    for expense in connection.execute(
+        """SELECT fecha,descripcion,importe_total,COALESCE(años_amortizacion,1) AS years
+           FROM gastos_extra
+           WHERE id_comunidad=? AND activo=1 AND fecha BETWEEN ? AND ?
+           ORDER BY fecha,id_gasto""",
+        (case["id_comunidad"], window.isoformat(), case["fecha_fin"]),
+    ).fetchall():
+        years = max(int(expense["years"] or 1), 1)
+        spent = _safe_date(expense["fecha"])
+        if years > 1 and spent.year + years <= _safe_date(case["fecha_fin"]).year:
+            continue  # ya terminó de amortizarse
+        if years == 1 and expense["fecha"] < case["fecha_inicio"]:
+            continue
+        amount = float(expense["importe_total"]) / years
+        description = expense["descripcion"] if years == 1 else (
+            f"{expense['descripcion']} (1/{years} de {float(expense['importe_total']):.2f} €)".replace(".", ",")
+        )
+        rows.append((expense["fecha"], description, round(amount, 2)))
+    rows.sort(key=lambda row: row[0])
+    return rows
+
+
 def _write_other_expenses(connection, workbook, case, table) -> None:
     sheet = workbook[table["sheet"]]
     available_rows = _available_table_rows(sheet, table)
     _clear_table(sheet, table)
-    expenses = connection.execute(
-        """SELECT fecha,descripcion,importe_total FROM gastos_extra
-           WHERE id_comunidad=? AND activo=1 AND fecha BETWEEN ? AND ?
-           ORDER BY fecha,id_gasto""",
-        (case["id_comunidad"], case["fecha_inicio"], case["fecha_fin"]),
-    ).fetchall()
+    expenses = _other_expense_rows(connection, case)
     if not expenses:
         parameter = connection.execute(
             """SELECT numeric_value FROM period_parameters
@@ -1213,11 +1270,7 @@ def _write_workbook(
             if (str(lecturas["O6"].value or "").strip().upper().startswith("PERIODO")
                     and not (isinstance(label, str) and label.startswith("="))):
                 _set_cell_value(lecturas["P6"], metadata_values["meter_period_label"])
-        write_fixed_costs(
-            workbook,
-            load_fixed_costs(connection, case["id_comunidad"], case["id_periodo"]),
-            _set_cell_value,
-        )
+        write_fixed_costs(workbook, _effective_fixed_costs(connection, case), _set_cell_value)
 
         tables = profile.workbook_layout["tables"]
         for module in profile.active_modules:
@@ -1587,7 +1640,7 @@ def generate_official_excel(
     if "OTROS_GASTOS" in profile.active_modules and (project_root / profile.template_relative_path).is_file():
         findings = unconfirmed_template_costs(
             project_root / profile.template_relative_path,
-            load_fixed_costs(connection, case["id_comunidad"], case["id_periodo"]),
+            _effective_fixed_costs(connection, case),
         )
         if findings:
             raise ExportBlockedError(inherited_cost_message(findings))

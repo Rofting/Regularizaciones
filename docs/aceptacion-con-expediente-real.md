@@ -28,15 +28,25 @@ varios puntos. Las correcciones de esta entrega tienen su prueba en
 | Cada factura de mantenimiento de un solo día pedía una aceptación en «Coherencia». | Sólo se avisa en los suministros con consumo. |
 | Las facturas de Gómez Group Metering y algunos importes de Mantenimientos Zaragoza no se reconocían. | Se han ajustado sus reglas en el catálogo de proveedores. |
 
-## Pendiente de decisión del despacho
+## Decisiones del despacho, ya aplicadas
 
-- **Criterio de fecha.** El estudio manual incluye las facturas emitidas en el
-  ejercicio aunque el consumo sea del mes anterior. La aplicación las marca
-  como «fuera del período».
-- **Gastos de mantenimiento y lecturas de contadores en «OTROS GASTOS».** Las
-  facturas se reconocen pero no llegan a la hoja. El mantenimiento mensual y
-  el servicio de lecturas se introducen en «Gastos fijos». Las reparaciones
-  se reparten en cinco años en el estudio manual.
+- **Criterio de fecha.** Cuenta la factura emitida dentro del ejercicio, aunque
+  el consumo sea del mes anterior. Sólo si la factura no trae fecha de emisión
+  se juzga por el período facturado.
+- **Mantenimiento y lecturas de contadores.** Se deducen de las facturas del
+  ejercicio y se escriben en las filas de «OTROS GASTOS» como importe mensual
+  medio, de modo que el anual es exactamente la suma de las facturas. Lo que se
+  anote en «Gastos fijos» manda sobre lo deducido.
+- **Reparaciones.** Entran por una quinta parte en el ejercicio de la factura y
+  en los cuatro siguientes (también las anotadas en `gastos_extra`). La
+  descripción de la fila indica «1/5 de …». Una factura de mantenimiento es
+  reparación si su texto (o su nota) habla de reparación, avería o sustitución.
+- **Previsiones («sin recibir aún»).** No cuentan; se excluyen con «Excluir fila».
+
+## Pendiente
+
 - **Lecturas del ejercicio.** Un informe tiene todos los contadores a cero.
   Otro muestra que los contadores se cambiaron (la lectura final es menor que
   la inicial). Hace falta decidir la estimación de esos contadores.
+- **Placas solares.** No se distinguen del resto del mantenimiento: todo el
+  mantenimiento va a «sala de calderas» salvo que se anote a mano.

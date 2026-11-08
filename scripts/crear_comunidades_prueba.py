@@ -92,6 +92,18 @@ def _months():
         current = following
 
 
+def _invoice_months():
+    """Meses facturados dentro del ejercicio.
+
+    El despacho cuenta la factura por su fecha de emisión: la de julio se emite
+    en agosto. Para que las doce facturas queden dentro del ejercicio, el
+    consumo facturado empieza un mes antes.
+    """
+    for start, _end in _months():
+        previous_end = start - timedelta(days=1)
+        yield date(previous_end.year, previous_end.month, 1), previous_end
+
+
 def _write_pdf(path: Path, lines: list[str]) -> Path:
     """PDF de texto (no escaneado) con las líneas dadas, una página."""
     import matplotlib
@@ -124,7 +136,7 @@ def _es(day: date) -> str:
 
 def _gas_invoices():
     winter = {11: 2.6, 12: 4.1, 1: 4.4, 2: 3.6, 3: 2.2}
-    for number, (start, end) in enumerate(_months(), start=1):
+    for number, (start, end) in enumerate(_invoice_months(), start=1):
         kwh = round(3800 * winter.get(start.month, 1.0))
         variable = round(kwh * 0.0784, 2)
         fixed = 41.30
@@ -140,7 +152,7 @@ def _gas_invoices():
 
 
 def _electricity_invoices():
-    for number, (start, end) in enumerate(_months(), start=1):
+    for number, (start, end) in enumerate(_invoice_months(), start=1):
         kwh = round(980 + 60 * (start.month in (12, 1, 2)), 3)
         fixed, variable = 20.82, round(kwh * 0.192, 2)
         yield dict(
@@ -153,7 +165,7 @@ def _electricity_invoices():
 
 
 def _water_invoices():
-    months = list(_months())
+    months = list(_invoice_months())
     for number, index in enumerate(range(0, 12, 2), start=1):
         start, end = months[index][0], months[index + 1][1]
         m3 = 70 + 9 * number
@@ -332,11 +344,11 @@ def _service_fees(connection, community_id: int, period_id: int) -> None:
 
 def _fixed_costs(connection, community_id: int, period_id: int) -> None:
     import fixed_costs
+    # Sólo se confirma que no hay lecturas de calefacción ni placas solares. El
+    # mantenimiento de calderas y las lecturas de ACS salen de las facturas.
     fixed_costs.save_fixed_costs(connection, community_id, period_id, {
-        "fixed_cost_meter_reading_acs": "60",
         "fixed_cost_meter_reading_heating": "",
         "fixed_cost_solar_maintenance": "",
-        "fixed_cost_boiler_maintenance": "123,35",
     })
 
 

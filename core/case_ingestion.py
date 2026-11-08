@@ -84,13 +84,22 @@ def _invoice_eligibility_for_case(
     service = str(candidates.get("tipo_suministro") or "").strip()
     start_value = str(candidates.get("fecha_inicio") or "").strip()
     end_value = str(candidates.get("fecha_fin") or "").strip()
-    if modules is None or not service or not start_value or not end_value:
+    issue_value = str(candidates.get("fecha_factura") or "").strip()
+    try:
+        issue_date = date.fromisoformat(issue_value) if issue_value else None
+    except ValueError:
+        issue_date = None
+    if modules is None or not service:
+        return None
+    if issue_date is None and (not start_value or not end_value):
         return None
     try:
-        period_start = date.fromisoformat(start_value)
-        period_end = date.fromisoformat(end_value)
+        period_start = date.fromisoformat(start_value) if start_value else None
+        period_end = date.fromisoformat(end_value) if end_value else None
     except ValueError:
-        return None
+        if issue_date is None:
+            return None
+        period_start = period_end = None
     case = connection.execute(
         """SELECT communities.codigo,cases.fecha_inicio,cases.fecha_fin
              FROM regularization_cases cases
@@ -111,6 +120,7 @@ def _invoice_eligibility_for_case(
         period_start=period_start,
         period_end=period_end,
         community_confidence="high",
+        issue_date=issue_date,
     )
     return decision.status, decision.reason
 
