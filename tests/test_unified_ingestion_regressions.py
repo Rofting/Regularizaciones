@@ -2,6 +2,7 @@
 import json
 import sqlite3
 import unittest
+from pathlib import Path
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -920,6 +921,72 @@ class UnifiedIngestionRegressionTest(unittest.TestCase):
                 "SELECT status FROM reading_observations ORDER BY fecha_lectura"
             )],
         )
+
+    def _reading_document(self, rows):
+        # Un archivo distinto por informe: con el mismo contenido sería el mismo documento.
+        source = Path(self.reading_file).with_name(f"lecturas_{abs(hash(str(rows)))}.csv")
+        source.write_text(str(rows), encoding="utf-8")
+        return case_ingestion.add_document_to_case(
+            self.connection, self.case.id_case, source_path=str(source),
+            archive_root=self.archive_root, document_kind="reading",
+            candidates={"vecinos": json.dumps([
+                {"vivienda": "B", "tipo": "ACS", "fecha_ant": a, "val_ant": va,
+                 "fecha_act": b, "val_act": vb} for a, va, b, vb in rows
+            ])},
+            required_fields=(),
+        ).document
+
+    def _prepare_zero_chain_case(self):
+        self.connection.execute(
+            "UPDATE regularization_cases SET fecha_inicio='2025-07-01',fecha_fin='2026-07-31' WHERE id_case=?",
+            (self.case.id_case,),
+        )
+        self.connection.execute(
+            "INSERT INTO propietarios (id_comunidad,codigo_vivienda,nombre_propietario) VALUES (?,'B','Vecino B')",
+            (self.community_id,),
+        )
+        self.connection.commit()
+
+    def test_zero_that_arrived_first_keeps_the_reading_confirmed_later(self):
+        """Los informes no se confirman en orden: el cero espera a la lectura anterior."""
+        self._prepare_zero_chain_case()
+        zero = self._reading_document([("2026-02-01", 0, "2026-03-31", 0)])
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, zero.id_document)
+        self.assertTrue(any(
+            issue.code == "READING_ZERO_REVIEW"
+            for issue in document_review.list_open_issues(self.connection, self.case.id_case)
+        ))
+
+        real = self._reading_document([("2025-11-30", 590, "2026-01-31", 599)])
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, real.id_document)
+
+        self.assertFalse([
+            issue for issue in document_review.list_open_issues(self.connection, self.case.id_case)
+            if issue.code == "READING_ZERO_REVIEW"
+        ])
+        readings = {
+            row["fecha_lectura"]: (row["valor_acumulado"], row["estado"])
+            for row in self.connection.execute(
+                "SELECT fecha_lectura,valor_acumulado,estado FROM lecturas_vecino"
+            )
+        }
+        self.assertEqual((599.0, "estimado"), readings["2026-03-31"])
+        self.assertEqual((599.0, "estimado"), readings["2026-02-01"])
+
+    def test_carried_reading_follows_a_real_reading_confirmed_after_it(self):
+        """Una lectura conservada no se queda con el valor viejo (consumo perdido)."""
+        self._prepare_zero_chain_case()
+        first = self._reading_document([("2025-07-31", 579, "2025-11-30", 590)])
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, first.id_document)
+        later = self._reading_document([("2026-03-31", 0, "2026-07-31", 16)])
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, later.id_document)
+        middle = self._reading_document([("2025-11-30", 590, "2026-01-31", 599)])
+        case_ingestion.apply_confirmed_source(self.connection, self.case.id_case, middle.id_document)
+
+        final = self.connection.execute(
+            "SELECT valor_acumulado FROM lecturas_vecino WHERE fecha_lectura='2026-07-31'"
+        ).fetchone()
+        self.assertEqual(599.0, final["valor_acumulado"])
 
     def test_confirming_zeroes_preserves_an_approved_counter_reset_reading(self):
         self.connection.execute(

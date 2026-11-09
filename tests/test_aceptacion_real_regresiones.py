@@ -320,5 +320,69 @@ class CompanionReadingsTest(_MasterCase):
         self.assertIsNone(self._issue("reading.P1-B.ACS"))
 
 
+class TotalEnergiesBreakdownTest(unittest.TestCase):
+    """El desglose fijo/variable de TotalEnergies suma el total y no bloquea el Excel."""
+
+    TEXT = """Factura gas
+Importe factura gas: {total} €
+CDAD. PROP. PRUEBA
+Nº Factura: FGAS2600099999
+FECHA FACTURA: 28 de abril de 2026
+Periodo de facturación: De 31/03/2026 al 23/04/2026
+Término Fijo {fixed} €
+Término Variable {variable} €
+Cuota GTS y Tasa CNMC {gts} €
+IEH {ieh} €
+Alquiler {rental} €
+Otros {tolls} €
+Impuesto Aplicado {iva} €
+TOTAL IMPORTE FACTURA {total} €
+Base imponible 1.100,00 €
+Impuesto IVA 10,00 % sobre 1.100,00 €
+{iva} €
+TOTAL FACTURA {total} €
+"""
+
+    def _extract(self, sign=""):
+        import json
+        import lector_pdf
+        config = json.loads((PROJECT_ROOT / "config" / "proveedores.json").read_text(
+            encoding="utf-8"))["proveedores"]["TOTALENERGIES_GAS"]
+        text = self.TEXT.format(
+            total=f"{sign}1.210,00", iva=f"{sign}110,00", fixed=f"{sign}100,00",
+            variable=f"{sign}500,00", gts=f"{sign}10,00", ieh=f"{sign}40,00",
+            rental=f"{sign}10,00", tolls=f"{sign}300,00",
+        )
+        return lector_pdf.extraer_datos_totalenergies(text, config)
+
+    def test_fixed_includes_tolls_gts_and_rental_and_sums_to_the_total(self):
+        data = self._extract()
+        # (100 + 300 + 10 + 10) = 420 antes de IVA; con el 10 % de IVA, 462.
+        self.assertEqual(462.00, data["termino_fijo"])
+        self.assertEqual(748.00, data["termino_variable"])
+        self.assertEqual(1210.00, round(data["termino_fijo"] + data["termino_variable"], 2))
+
+    def test_tax_only_shown_as_impuesto_aplicado(self):
+        import json
+        import lector_pdf
+        config = json.loads((PROJECT_ROOT / "config" / "proveedores.json").read_text(
+            encoding="utf-8"))["proveedores"]["TOTALENERGIES_GAS"]
+        text = (
+            "Nº Factura: FGAS2600099998\nFECHA FACTURA: 28 de abril de 2026\n"
+            "Periodo de facturación: De 31/03/2026 al 23/04/2026\nFactura resumen\n"
+            "Término Fijo 180,65 €\nTérmino Variable 4968,48 €\nCuota GTS y Tasa CNMC 18,90 €\n"
+            "IEH 91,46 € Término Fijo\nAlquiler 7,43 € Término Variable\nOtros 1086,07 € Cuota GTS\n"
+            "Impuesto Aplicado 635,30 €\nTOTAL IMPORTE FACTURA 6.988,29 €\n"
+        )
+        data = lector_pdf.extraer_datos_totalenergies(text, config)
+        self.assertEqual(1422.36, data["termino_fijo"])
+        self.assertEqual(5565.93, data["termino_variable"])
+
+    def test_credit_note_keeps_the_same_proportion_with_negative_signs(self):
+        data = self._extract(sign="-")
+        self.assertEqual(-462.00, data["termino_fijo"])
+        self.assertEqual(-748.00, data["termino_variable"])
+
+
 if __name__ == "__main__":
     unittest.main()

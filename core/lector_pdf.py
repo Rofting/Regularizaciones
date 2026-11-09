@@ -1281,6 +1281,45 @@ def extraer_datos_naturgy(texto: str, config: dict) -> dict:
     return datos
 
 
+_PAT_TOTALENERGIES_FIXED = re.compile(r"T[\xe9e]rmino\s+Fijo\s+(?P<valor>-?[\d.]+,\d{2})\s*(?:€|�)")
+_PAT_TOTALENERGIES_TOLLS = re.compile(r"(?m)^\s*Otros\s+(?P<valor>-?[\d.]+,\d{2})\s*(?:€|�)")
+_PAT_TOTALENERGIES_GTS = re.compile(r"Cuota\s+GTS\s+y\s+Tasa\s+CNMC\s+(?P<valor>-?[\d.]+,\d{2})\s*(?:€|�)")
+_PAT_TOTALENERGIES_RENTAL = re.compile(r"Alquiler\s+(?P<valor>-?[\d.]+,\d{2})\s*(?:€|�)")
+_PAT_TOTALENERGIES_TAX = re.compile(r"Impuesto\s+Aplicado\s+(?P<valor>-?[\d.]+,\d{2})\s*(?:€|�)")
+
+
+def extraer_datos_totalenergies(texto: str, config: dict) -> dict:
+    """Extrae TotalEnergies repartiendo el coste entre fijo y variable.
+
+    El resumen de la factura trae el término fijo, los peajes («Otros»), la cuota
+    GTS/CNMC y el alquiler del equipo, todos antes de IVA. Son costes que no
+    dependen del consumo y forman el término fijo; el resto (energía, impuesto
+    de hidrocarburos, intereses) es el variable. Igual que en Naturgy, ambos
+    se escalan con el total realmente cobrado para que sumen hasta el céntimo.
+    """
+    datos = extraer_datos_factura(texto, config)
+    total = float(datos.get("importe_total") or 0)
+    iva = float(datos.get("iva") or 0)
+    if not iva and (tax := _PAT_TOTALENERGIES_TAX.search(texto)):
+        # Según el diseño del PDF, el IVA solo aparece como «Impuesto Aplicado».
+        iva = _limpiar_numero(tax.group("valor"))
+    fixed_parts = [
+        _limpiar_numero(match.group("valor"))
+        for pattern in (
+            _PAT_TOTALENERGIES_FIXED, _PAT_TOTALENERGIES_TOLLS,
+            _PAT_TOTALENERGIES_GTS, _PAT_TOTALENERGIES_RENTAL,
+        )
+        if (match := pattern.search(texto))
+    ]
+    base = total - iva
+    if fixed_parts and total and iva and base:
+        factor = total / base
+        fixed_with_tax = round(sum(fixed_parts) * factor, 2)
+        datos["termino_fijo"] = fixed_with_tax
+        datos["termino_variable"] = round(total - fixed_with_tax, 2)
+    return datos
+
+
 # ---------------------------------------------------------------------------
 # EXTRACCIÓN ESPECIAL — METRIGEST (lecturas por vecino)
 # ---------------------------------------------------------------------------
@@ -1633,6 +1672,8 @@ def procesar_archivo(ruta_archivo: str, codigo_comunidad: str = None,
                 datos["lec_fin"] = datos.get("lec_fin") or recovered.get("lec_fin")
     elif clave_prov == "NATURGY_CLIENTES_GAS":
         datos = extraer_datos_naturgy(texto, config_prov)
+    elif clave_prov == "TOTALENERGIES_GAS":
+        datos = extraer_datos_totalenergies(texto, config_prov)
     else:
         datos = extraer_datos_factura(texto, config_prov)
 

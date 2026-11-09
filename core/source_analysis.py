@@ -293,6 +293,7 @@ def _legacy_invoice_candidates(
         extraer_datos_agua_zaragoza,
         extraer_datos_factura,
         extraer_datos_naturgy,
+        extraer_datos_totalenergies,
     )
 
     config = dict(profile.legacy)
@@ -300,6 +301,8 @@ def _legacy_invoice_candidates(
         extracted = extraer_datos_agua_zaragoza(text, config)
     elif profile.key == "NATURGY_CLIENTES_GAS":
         extracted = extraer_datos_naturgy(text, config)
+    elif profile.key == "TOTALENERGIES_GAS":
+        extracted = extraer_datos_totalenergies(text, config)
     else:
         extracted = extraer_datos_factura(text, config)
     candidates: dict[str, str | None] = {}
@@ -684,7 +687,7 @@ def analyse_pdf_pipeline(
     legacy_candidates, legacy_evidence = _legacy_invoice_candidates(
         profile, provider_text, locator,
     )
-    specialised = profile.key in {"AGUA_ZARAGOZA", "NATURGY_CLIENTES_GAS"}
+    specialised = profile.key in {"AGUA_ZARAGOZA", "NATURGY_CLIENTES_GAS", "TOTALENERGIES_GAS"}
     for name, value in legacy_candidates.items():
         if specialised and value not in (None, ""):
             candidates[name] = value
