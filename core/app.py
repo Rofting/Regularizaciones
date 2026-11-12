@@ -231,8 +231,11 @@ class AppGestionFincas(ctk.CTk):
         self.botones["Crear expediente · principal"] = self.workspace_primary
         # Se rellena en _actualizar_workspace con las etapas repetibles del estado.
         self.workspace_repeat_actions = ctk.CTkFrame(work, fg_color="transparent")
+        # Resumen del ejercicio en cifras; se rellena en _refrescar_resumen.
+        self.resumen_frame = ctk.CTkFrame(work, fg_color="transparent")
         panel = ctk.CTkFrame(work, fg_color=C["panel_2"], corner_radius=11)
         panel.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        self._panel_incidencias = panel
         self.lbl_incidencias_bandeja = ctk.CTkLabel(panel, text="Incidencias pendientes", font=UIM.fuente(10, "bold"), text_color=C["texto_sec"])
         self.lbl_incidencias_bandeja.pack(anchor="w", padx=14, pady=(12, 3))
         self.bandeja_incidencias = ctk.CTkScrollableFrame(panel, fg_color="transparent")
@@ -242,7 +245,9 @@ class AppGestionFincas(ctk.CTk):
         self.lbl_estado_resumen = self.workspace_detail
         self.log_area = tk.Text(work, height=1, state="disabled")
         self.barra_estado = ctk.CTkFrame(self, fg_color=C["panel"], corner_radius=0, height=34)
-        self.barra_estado.pack(fill="x", side="bottom")
+        # Antes del cuerpo en el orden de empaquetado: si falta altura, se
+        # encoge el cuerpo y la barra de estado sigue visible.
+        self.barra_estado.pack(fill="x", side="bottom", before=body)
         self.punto_estado = UIM.PuntoEstado(self.barra_estado); self.punto_estado.pack(side="left", padx=(20, 6), pady=7)
         self.lbl_estado = ctk.CTkLabel(self.barra_estado, text="Listo", font=UIM.fuente(10), text_color=C["texto"]); self.lbl_estado.pack(side="left")
         self.lbl_bd = ctk.CTkLabel(self.barra_estado, text="Datos locales", font=UIM.fuente(10), text_color=C["texto_sec"]); self.lbl_bd.pack(side="right", padx=20)
@@ -1207,6 +1212,135 @@ class AppGestionFincas(ctk.CTk):
             row = self.workflow_step_rows.get(step.key)
             if row is not None:
                 row.set_status(step.status)
+        self._refrescar_resumen()
+
+    _SUPPLY_COLORS = {
+        "GAS": ("#F59E0B", "#FBBF24"),
+        "ELECTRICIDAD": ("#6366F1", "#818CF8"),
+        "AGUA": ("#0EA5E9", "#38BDF8"),
+        "MANTENIMIENTO": ("#94A3B8", "#64748B"),
+    }
+
+    def _refrescar_resumen(self):
+        """Pinta las cifras del expediente: facturas, cobrado, resultado y consumo."""
+        frame = self.resumen_frame
+        for child in frame.winfo_children():
+            child.destroy()
+        summary = None
+        if self.id_expediente and MOD.get("gestor_bd"):
+            try:
+                import case_summary
+                connection = MOD["gestor_bd"].conectar(str(self.ruta_bd_expedientes))
+                try:
+                    summary = case_summary.summarise_case(connection, int(self.id_expediente))
+                finally:
+                    connection.close()
+            except Exception:
+                summary = None  # El resumen es informativo: nunca bloquea el flujo.
+        if summary is None or not (summary.invoice_count or summary.charged_entries or summary.has_distribution):
+            frame.pack_forget()
+            return
+        import case_summary
+        euros, quantity = case_summary.euros, case_summary.quantity
+
+        def tile(column, title, value, detail, value_color=None):
+            box = ctk.CTkFrame(frame, fg_color=C["panel_2"], corner_radius=11,
+                               border_width=1, border_color=C["borde"])
+            box.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 10, 0))
+            ctk.CTkLabel(box, text=title.upper(), font=UIM.fuente(9, "bold"),
+                         text_color=C["texto_sec"], anchor="w").pack(fill="x", padx=14, pady=(10, 0))
+            ctk.CTkLabel(box, text=value, font=UIM.fuente(19, "bold"),
+                         text_color=value_color or C["texto"], anchor="w").pack(fill="x", padx=14)
+            ctk.CTkLabel(box, text=detail, font=UIM.fuente(10), text_color=C["texto_sec"],
+                         anchor="w", justify="left").pack(fill="x", padx=14, pady=(0, 8))
+            return box
+
+        if summary.open_issues:
+            # Con decisiones pendientes manda la bandeja: el resumen se queda
+            # en una línea para no quitarle sitio.
+            strip = ctk.CTkFrame(frame, fg_color=C["panel_2"], corner_radius=9,
+                                 border_width=1, border_color=C["borde"])
+            strip.pack(fill="x")
+            chips = [
+                (f"{summary.invoice_count} factura(s) · {euros(summary.invoice_cents)}", C["texto"]),
+                ((f"Cobrado {euros(summary.charged_cents)}", C["texto"]) if summary.charged_entries
+                 else ("Cuotas cobradas sin anotar", C["aviso"])),
+                (f"{summary.open_issues} decisión(es) pendiente(s)", C["revision"]),
+            ]
+            for index, (text, colour) in enumerate(chips):
+                ctk.CTkLabel(strip, text=("" if index == 0 else "·   ") + text, font=UIM.fuente(11, "bold"),
+                             text_color=colour).pack(side="left", padx=(14 if index == 0 else 0, 12), pady=7)
+            if not frame.winfo_manager():
+                frame.pack(fill="x", padx=24, pady=(0, 12), before=self._panel_incidencias)
+            return
+
+        for column in range(4):
+            frame.grid_columnconfigure(column, weight=1, uniform="resumen")
+
+        invoices = tile(
+            0, "Facturas del ejercicio", euros(summary.invoice_cents),
+            f"{summary.invoice_count} factura(s) en el expediente" if summary.invoice_count else "Aún no hay facturas",
+        )
+        positive = [item for item in summary.supplies if item.cents > 0]
+        if positive:
+            bar = ctk.CTkFrame(invoices, fg_color=C["borde"], height=8, corner_radius=4)
+            bar.pack(fill="x", padx=14, pady=(0, 5))
+            total = sum(item.cents for item in positive)
+            offset = 0.0
+            for item in positive:
+                share = item.cents / total
+                ctk.CTkFrame(
+                    bar, height=8, corner_radius=0,
+                    fg_color=self._SUPPLY_COLORS.get(item.key, ("#A78BFA", "#8B5CF6")),
+                ).place(relx=offset, rely=0, relwidth=share, relheight=1)
+                offset += share
+            short = {"Electricidad": "Luz", "Mantenimiento": "Mant."}
+            for start in (0, 2):
+                line = ctk.CTkFrame(invoices, fg_color="transparent", height=15)
+                line.pack(fill="x", padx=14, pady=(0, 9 if start else 0))
+                for item in positive[start:start + 2]:
+                    ctk.CTkLabel(
+                        line, height=15, font=UIM.fuente(9, "bold"),
+                        text=f"■ {short.get(item.label, item.label)} {round(item.cents * 100 / total)} %",
+                        text_color=self._SUPPLY_COLORS.get(item.key, ("#A78BFA", "#8B5CF6")),
+                    ).pack(side="left", padx=(0, 12))
+
+        if summary.charged_entries:
+            tile(1, "Cobrado a los vecinos", euros(summary.charged_cents),
+                 f"Cuota fija {euros(summary.charged_fixed_cents)}\n"
+                 f"Por consumo {euros(summary.charged_variable_cents)}")
+        else:
+            tile(1, "Cobrado a los vecinos", "Sin anotar",
+                 "Anótalo en «Cuotas cobradas»:\nsin ello no hay con qué comparar.",
+                 value_color=C["aviso"])
+
+        if not summary.has_distribution:
+            tile(2, "Resultado del reparto", "Pendiente", "Se calcula en el paso 3,\ntras generar el Excel.",
+                 value_color=C["texto_sec"])
+        elif summary.difference_cents < 0:
+            tile(2, "Resultado del reparto", f"A devolver {euros(-summary.difference_cents)}",
+                 f"Coste real {euros(summary.actual_cents)}\n"
+                 f"{summary.owners_to_refund} reciben · {summary.owners_to_pay} pagan",
+                 value_color=C["exito"])
+        elif summary.difference_cents > 0:
+            tile(2, "Resultado del reparto", f"A cobrar {euros(summary.difference_cents)}",
+                 f"Coste real {euros(summary.actual_cents)}\n"
+                 f"{summary.owners_to_pay} pagan · {summary.owners_to_refund} reciben",
+                 value_color=C["revision"])
+        else:
+            tile(2, "Resultado del reparto", "Cuadrado", f"Coste real {euros(summary.actual_cents)}",
+                 value_color=C["exito"])
+
+        consumption = (
+            f"{quantity(summary.consumption)} {summary.consumption_unit}".strip()
+            if summary.consumption is not None else "—"
+        )
+        tile(3, "Consumo y cartas", consumption,
+             (f"{summary.owners} vivienda(s) en el reparto\n" if summary.owners else "Sin reparto todavía\n")
+             + (f"{summary.letters} carta(s) generada(s)" if summary.letters else "Cartas sin generar"))
+
+        if not frame.winfo_manager():
+            frame.pack(fill="x", padx=24, pady=(0, 12), before=self._panel_incidencias)
 
     _REPEAT_LABELS = {
         "reevaluar_fuentes": "Reevaluar fuentes",
@@ -1251,6 +1385,46 @@ class AppGestionFincas(ctk.CTk):
             ).pack(side="left", padx=(0, 6))
         if not frame.winfo_manager():
             frame.pack(anchor="w", padx=24, pady=(0, 14), after=self.workspace_primary)
+
+    def _apartar_facturas_fuera_de_periodo(self, issues):
+        """Cierra de una vez las facturas que pertenecen a otro ejercicio."""
+        if self._procesando or not issues:
+            return
+        expedient_ui = MOD.get("expedient_ui")
+        names = [expedient_ui.source_display_name(item.archived_path) for item in issues]
+        listed = "\n".join(f"  • {name}" for name in names[:12])
+        if len(names) > 12:
+            listed += f"\n  … y {len(names) - 12} más"
+        if not messagebox.askyesno(
+            "Apartar facturas de otro ejercicio",
+            f"Estas {len(names)} facturas quedan fuera de las fechas del expediente:\n\n"
+            f"{listed}\n\nSe apartan sin modificarlas ni incluirlas en el cálculo; "
+            "la decisión queda anotada en el historial. ¿Continuar?",
+            parent=self,
+        ):
+            return
+        connection = MOD["gestor_bd"].conectar(str(self.ruta_bd_expedientes))
+        closed, failures = 0, []
+        try:
+            for item in issues:
+                try:
+                    MOD["document_review"].dismiss_invoice_outside_period(
+                        connection, item.id_issue,
+                        reason="No corresponde al período del expediente (apartadas en bloque)",
+                        dismissed_by="usuario_local",
+                    )
+                    closed += 1
+                except Exception as error:  # una incidencia ya cerrada no detiene el resto
+                    failures.append(str(error))
+            connection.commit()
+        finally:
+            connection.close()
+        self.log(f"{closed} factura(s) de otro ejercicio apartadas.", "ok")
+        if failures:
+            messagebox.showwarning(
+                "Algunas no se pudieron apartar", "\n".join(sorted(set(failures))[:5]), parent=self,
+            )
+        self._refrescar_expediente()
 
     def _refrescar_bandeja_incidencias(self, issues=()):
         issues = tuple(issues)
@@ -1323,6 +1497,15 @@ class AppGestionFincas(ctk.CTk):
                     **UIM.secondary_button_kwargs(),
                 ).pack(side="right")
 
+            outside = [item for item in issues if item.code == "INVOICE_OUTSIDE_PERIOD"]
+            if len(outside) > 1:
+                ctk.CTkButton(
+                    controls, text=f"Apartar las {len(outside)} facturas de otro ejercicio",
+                    height=26, corner_radius=7, font=UIM.fuente(10, "bold"),
+                    command=lambda items=tuple(outside): self._apartar_facturas_fuera_de_periodo(items),
+                    **UIM.secondary_button_kwargs(),
+                ).pack(side="right", padx=(8, 0))
+
             for grouped in visible_groups:
                 issue = grouped["representative"]
                 reset_count = int(grouped["count"])
@@ -1374,7 +1557,7 @@ class AppGestionFincas(ctk.CTk):
                     text_color=C["texto_sec"],
                     anchor="w",
                     justify="left",
-                    wraplength=560,
+                    wraplength=470,
                 ).pack(fill="x", pady=(2, 0))
                 actions = ctk.CTkFrame(row, fg_color="transparent")
                 actions.pack(side="right", padx=8, pady=7)
@@ -1406,7 +1589,7 @@ class AppGestionFincas(ctk.CTk):
                     command=lambda current=issue: expedient_ui.open_archived_file(
                         self, current
                     ),
-                ).pack(pady=(0, 4))
+                ).pack(side="left", padx=(0, 5))
                 ctk.CTkButton(
                     actions,
                     text="Revisar grupo" if (is_reset_group or is_zero_group) else "Resolver",
@@ -1416,7 +1599,7 @@ class AppGestionFincas(ctk.CTk):
                     fg_color=C["primario"],
                     hover_color=C["primario_hover"],
                     command=resolve_command,
-                ).pack()
+                ).pack(side="left")
                 # Salida para las fuentes que no deben entrar en el expediente:
                 # sin ella, una sola incidencia irresoluble lo bloquea entero.
                 ctk.CTkButton(
@@ -1433,7 +1616,7 @@ class AppGestionFincas(ctk.CTk):
                     command=lambda current=issue: expedient_ui.open_skip_source_dialog(
                         self, current
                     ),
-                ).pack(pady=(4, 0))
+                ).pack(side="left", padx=(5, 0))
 
         self.after(0, update_tray)
 

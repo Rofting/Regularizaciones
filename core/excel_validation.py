@@ -60,6 +60,23 @@ def _input_columns(table) -> Mapping[str, str]:
     return table.get("input_columns", table.get("columns", {}))
 
 
+REPAIR_YEAR_COLUMNS = 4
+
+
+def other_expense_year_columns(table) -> list[str]:
+    """Columnas «AÑO 1…AÑO 4» a la derecha del importe en «OTROS GASTOS».
+
+    El análisis no lee el importe de la reparación sino la parte que toca a
+    cada año, así que el exportador también rellena estas columnas.
+    """
+    from openpyxl.utils import column_index_from_string, get_column_letter
+    amount = _input_columns(table).get("amount")
+    if not amount:
+        return []
+    first = column_index_from_string(str(amount)) + 1
+    return [get_column_letter(first + offset) for offset in range(REPAIR_YEAR_COLUMNS)]
+
+
 def _mutable_addresses(profile: ExcelProfile) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     layout = profile.workbook_layout
@@ -80,6 +97,11 @@ def _mutable_addresses(profile: ExcelProfile) -> dict[str, set[str]]:
         for row in range(int(table["start_row"]), int(table["end_row"]) + 1):
             for column in (*_input_columns(table).values(), *table.get("derived_columns", {}).values()):
                 result.setdefault(sheet_name, set()).add(f"{column}{row}")
+    other = layout.get("tables", {}).get("OTROS_GASTOS")
+    if other:
+        for row in range(int(other["start_row"]), int(other["end_row"]) + 1):
+            for column in other_expense_year_columns(other):
+                result.setdefault(other["sheet"], set()).add(f"{column}{row}")
     # Dirección y CUPS de las hojas de suministro: identidad de la comunidad
     # que el exportador rellena en cualquier perfil (ver _write_supply_identity).
     for sheet_name, addresses in SUPPLY_IDENTITY_CELLS.items():

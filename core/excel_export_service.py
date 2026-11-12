@@ -29,7 +29,7 @@ from excel_profiles import (
     configured_profile_paths,
     load_profile,
 )
-from excel_validation import SUPPLY_IDENTITY_CELLS, validate_workbook, workbook_fingerprint
+from excel_validation import SUPPLY_IDENTITY_CELLS, other_expense_year_columns, validate_workbook, workbook_fingerprint
 from office_recalculation import (
     LibreOfficeRecalculator, WorkbookRecalculator,
     restore_design_with_calculated_values,
@@ -820,16 +820,20 @@ def _effective_fixed_costs(connection, case) -> dict:
     return values
 
 
-def _other_expense_rows(connection, case) -> list[tuple[str, str, float]]:
-    """Filas de «OTROS GASTOS»: fecha, descripción e importe que cuenta en el ejercicio."""
-    rows: list[tuple[str, str, float]] = []
+def _other_expense_rows(connection, case) -> list[tuple[str, str, float, float, int]]:
+    """Filas de «OTROS GASTOS».
+
+    Cada fila es (fecha, descripción, parte que cuenta en este ejercicio,
+    importe completo, años en que se reparte).
+    """
+    rows: list[tuple[str, str, float, float, int]] = []
     for share in other_expenses.repair_shares(
         connection, case["id_comunidad"], case["fecha_inicio"], case["fecha_fin"],
     ):
         rows.append((
             share.invoice_date,
-            f"{share.description} (1/{share.years} de {share.total:.2f} €)".replace(".", ","),
-            float(share.share),
+            f"{share.description} (a {share.years} años)",
+            float(share.share), float(share.total), share.years,
         ))
     start = _safe_date(case["fecha_inicio"])
     window = date(start.year - (other_expenses.REPAIR_YEARS - 1), start.month, min(start.day, 28))
@@ -846,19 +850,42 @@ def _other_expense_rows(connection, case) -> list[tuple[str, str, float]]:
             continue  # ya terminó de amortizarse
         if years == 1 and expense["fecha"] < case["fecha_inicio"]:
             continue
-        amount = float(expense["importe_total"]) / years
-        description = expense["descripcion"] if years == 1 else (
-            f"{expense['descripcion']} (1/{years} de {float(expense['importe_total']):.2f} €)".replace(".", ",")
-        )
-        rows.append((expense["fecha"], description, round(amount, 2)))
+        total = float(expense["importe_total"])
+        description = expense["descripcion"] if years == 1 else f"{expense['descripcion']} (a {years} años)"
+        rows.append((expense["fecha"], description, round(total / years, 2), round(total, 2), years))
     rows.sort(key=lambda row: row[0])
     return rows
+
+
+def _exercise_year_column(sheet, table, case) -> tuple[list[str], int]:
+    """Columnas de año de la tabla y posición de la del ejercicio en curso.
+
+    La cabecera de la plantilla numera los años (2025, 2026…): el ejercicio es
+    el del año en que termina. Si la cabecera no lo trae, se usa «AÑO 2», que
+    es la columna que lee el análisis.
+    """
+    columns = other_expense_year_columns(table)
+    target = _safe_date(case["fecha_fin"]).year
+    header_row = int(table["start_row"]) - 2
+    if header_row >= 1:
+        for index, column in enumerate(columns):
+            value = sheet[f"{column}{header_row}"].value
+            try:
+                if int(float(str(value).strip())) == target:
+                    return columns, index
+            except (TypeError, ValueError):
+                continue
+    return columns, min(1, len(columns) - 1)
 
 
 def _write_other_expenses(connection, workbook, case, table) -> None:
     sheet = workbook[table["sheet"]]
     available_rows = _available_table_rows(sheet, table)
     _clear_table(sheet, table)
+    year_columns, current = _exercise_year_column(sheet, table, case)
+    for row_number in available_rows:
+        for column in year_columns:
+            sheet[f"{column}{row_number}"].value = None
     expenses = _other_expense_rows(connection, case)
     if not expenses:
         parameter = connection.execute(
@@ -868,14 +895,31 @@ def _write_other_expenses(connection, workbook, case, table) -> None:
             (case["id_comunidad"], case["id_periodo"]),
         ).fetchone()
         if parameter is not None:
-            expenses = [(case["fecha_fin"], "Total de otros gastos", parameter[0])]
+            amount = float(parameter[0] or 0)
+            expenses = [(case["fecha_fin"], "Total de otros gastos", amount, amount, 1)]
     if len(expenses) > len(available_rows):
         raise ExportBlockedError("La plantilla no tiene filas suficientes para otros gastos")
     columns = _input_columns(table)
-    for row_number, expense in zip(available_rows, expenses):
-        _set_cell_value(sheet[f"{columns['date']}{row_number}"], _safe_date(expense[0]))
-        _set_cell_value(sheet[f"{columns['description']}{row_number}"], expense[1])
-        _set_cell_value(sheet[f"{columns['amount']}{row_number}"], float(expense[2]))
+    exercise_start = _safe_date(case["fecha_inicio"])
+    for row_number, (when, description, share, total, years) in zip(available_rows, expenses):
+        _set_cell_value(sheet[f"{columns['date']}{row_number}"], _safe_date(when))
+        _set_cell_value(sheet[f"{columns['description']}{row_number}"], description)
+        # «Debe» lleva el importe completo; el análisis lee la parte del año.
+        _set_cell_value(sheet[f"{columns['amount']}{row_number}"], float(total))
+        if not year_columns:
+            continue
+        # Ejercicios transcurridos desde el de la factura hasta el actual.
+        spent = _safe_date(when)
+        elapsed = 0
+        while elapsed < years - 1 and spent < date(
+            exercise_start.year - elapsed, exercise_start.month, min(exercise_start.day, 28),
+        ):
+            elapsed += 1
+        first = current - elapsed
+        for offset in range(years):
+            index = first + offset
+            if 0 <= index < len(year_columns):
+                _set_cell_value(sheet[f"{year_columns[index]}{row_number}"], float(share))
 
 
 def _boundary_reading_dates(
@@ -889,22 +933,11 @@ def _boundary_reading_dates(
     coincidieran exactamente con las fechas del expediente hacía fallar a
     cualquier comunidad por un día de diferencia.
     """
-    fila = connection.execute(
-        """SELECT
-             (SELECT MAX(fecha_lectura) FROM period_readings r
-               JOIN propietarios p ON p.id_propietario=r.id_propietario
-               WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda' AND r.tipo=?
-                 AND r.fecha_lectura<=?) AS inicial,
-             (SELECT MAX(fecha_lectura) FROM period_readings r
-               JOIN propietarios p ON p.id_propietario=r.id_propietario
-               WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda' AND r.tipo=?
-                 AND r.fecha_lectura<=?) AS final""",
-        (
-            case["id_comunidad"], reading_type, case["fecha_inicio"],
-            case["id_comunidad"], reading_type, case["fecha_fin"],
-        ),
-    ).fetchone()
-    inicial, final = fila["inicial"], fila["final"]
+    from reading_boundaries import boundary_dates
+    inicial, final = boundary_dates(
+        connection, community_id=case["id_comunidad"], period_id=case["id_periodo"],
+        reading_type=reading_type, start=case["fecha_inicio"], end=case["fecha_fin"],
+    )
     if inicial is None or final is None or inicial >= final:
         raise ExportBlockedError(
             f"Faltan lecturas {reading_type} que abran y cierren el período"
@@ -1484,7 +1517,15 @@ def _expected_totals(connection, case, profile) -> dict[str, int]:
                    WHERE id_comunidad=? AND id_periodo=? AND parameter_key=?""",
                 (case["id_comunidad"], case["id_periodo"], parameter_key),
             ).fetchone()
-            if row is None or row[0] is None:
+            derived_rows = (
+                _other_expense_rows(connection, case)
+                if parameter_key == "extraordinary_expense_actual" else []
+            )
+            if derived_rows:
+                # Las reparaciones repartidas a cinco años salen de las facturas:
+                # la hoja lleva esas filas y contra ellas se concilia.
+                value = Decimal(sum(_cents(row[3]) for row in derived_rows)) / 100
+            elif row is None or row[0] is None:
                 # Los importes que el libro calcula en su análisis no se
                 # concilian contra la base: no hay nada con lo que compararlos,
                 # son su resultado. Se comprueban las entradas que los

@@ -751,7 +751,7 @@ def apply_decrease_carry_forward(
         return False
 
     current = con.execute(
-        """SELECT id_lectura,estado,metodo_estimacion FROM lecturas_vecino
+        """SELECT id_lectura,estado,metodo_estimacion,approved_by FROM lecturas_vecino
            WHERE id_propietario=? AND tipo=? AND fecha_lectura=?""",
         (owner_id, service, reading_date),
     ).fetchone()
@@ -773,7 +773,10 @@ def apply_decrease_carry_forward(
         effective_id = int(cursor.lastrowid)
     elif current["estado"] == "contador_averiado" or (
         current["estado"] == "estimado"
-        and current["metodo_estimacion"] in (None, "carry_forward_decrease")
+        # Un cero conservado en la misma fecha vale lo mismo que esta bajada:
+        # ambos publican la última lectura fiable, así que no hay conflicto.
+        and current["metodo_estimacion"] in (None, "carry_forward_decrease", "carry_forward_zero")
+        and not str(current["approved_by"] or "").strip()
     ):
         con.execute(
             """UPDATE lecturas_vecino

@@ -93,6 +93,28 @@ class AutomaticOtherExpensesTest(unittest.TestCase):
             self.connection, self.community, "2031-01-01", "2031-12-31")
         self.assertEqual([], gone)
 
+    def test_repair_is_recognised_by_the_file_name_when_there_is_no_text(self):
+        self.connection.execute(
+            """INSERT INTO facturas(id_comunidad,id_periodo,tipo_suministro,proveedor,num_factura,
+                                    fecha_factura,importe_total,archivo_origen)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (self.community, self.period, "MANTENIMIENTO", "Instalaciones", "F9", "2026-01-13", 370.47,
+             r"C:\\datos\\fuentes\\226e_658_MIZAR_Fra_F260009_Rep_Fuga_MP30.pdf"),
+        )
+        self.connection.execute(
+            """INSERT INTO facturas(id_comunidad,id_periodo,tipo_suministro,proveedor,num_factura,
+                                    fecha_factura,importe_total,archivo_origen)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (self.community, self.period, "MANTENIMIENTO", "Instalaciones", "F10", "2026-05-07", 179.94,
+             "/datos/fuentes/abc_658_MIZAR_Fra_F26260669_Averia_llave_PA4.pdf"),
+        )
+        self.connection.commit()
+        shares = other_expenses.repair_shares(
+            self.connection, self.community, "2026-01-01", "2026-12-31")
+        self.assertEqual([Decimal("74.09"), Decimal("35.99")], [share.share for share in shares])
+        self.assertEqual({}, other_expenses.automatic_fixed_costs(
+            self.connection, self.community, "2026-01-01", "2026-12-31"))
+
     def test_repair_is_spread_over_five_years(self):
         self.connection.execute(
             "INSERT INTO gastos_extra(id_comunidad,descripcion,fecha,importe_total,años_amortizacion)"
@@ -115,7 +137,9 @@ class AutomaticOtherExpensesTest(unittest.TestCase):
             [("2025-06-01", 200.0), ("2026-05-01", 80.0)],
             [(row[0], row[2]) for row in rows],
         )
-        self.assertIn("1/5", rows[0][1])
+        self.assertIn("a 5 años", rows[0][1])
+        # «Debe» lleva el importe completo; la parte del año va en su columna.
+        self.assertEqual([1000.0, 80.0], [row[3] for row in rows])
 
 
 if __name__ == "__main__":

@@ -223,6 +223,23 @@ def _required_parameter_missing(
     return tuple(sorted(required.difference(present)))
 
 
+def _missing_parameters_message(missing: tuple[str, ...]) -> str:
+    """Explica en palabras del despacho qué falta y dónde se anota."""
+    parts = []
+    rest = list(missing)
+    for prefix, service in (("acs", "ACS"), ("heating", "calefacción")):
+        own = [key for key in rest if key.startswith(prefix + "_")]
+        if own:
+            rest = [key for key in rest if key not in own]
+            parts.append(
+                f"Faltan las cuotas cobradas a los vecinos por {service}. "
+                "Anótalas en «Cuotas cobradas» (cuota fija mensual y liquidaciones por consumo)."
+            )
+    if rest:
+        parts.append("Faltan importes requeridos para: " + ", ".join(rest))
+    return " ".join(parts)
+
+
 def _reading_service(concept_key: str) -> str | None:
     if concept_key.startswith("acs_"):
         return "ACS"
@@ -237,22 +254,11 @@ def _owners_missing_boundary_readings(
     owners: tuple[sqlite3.Row, ...],
     service: str,
 ) -> int:
-    initial = connection.execute(
-        """SELECT MAX(r.fecha_lectura)
-           FROM period_readings r
-           JOIN propietarios p ON p.id_propietario=r.id_propietario
-           WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda'
-             AND r.tipo=? AND r.fecha_lectura<=?""",
-        (case["id_comunidad"], service, case["fecha_inicio"]),
-    ).fetchone()[0]
-    final = connection.execute(
-        """SELECT MAX(r.fecha_lectura)
-           FROM period_readings r
-           JOIN propietarios p ON p.id_propietario=r.id_propietario
-           WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda'
-             AND r.tipo=? AND r.fecha_lectura<=?""",
-        (case["id_comunidad"], service, case["fecha_fin"]),
-    ).fetchone()[0]
+    from reading_boundaries import boundary_dates
+    initial, final = boundary_dates(
+        connection, community_id=case["id_comunidad"], period_id=case["id_periodo"],
+        reading_type=service, start=case["fecha_inicio"], end=case["fecha_fin"],
+    )
     if initial is None or final is None or initial >= final:
         return len(owners)
     missing = 0
@@ -402,7 +408,7 @@ def evaluate_case_readiness(
         if missing_parameters:
             blockers.append(ReadinessBlocker(
                 "MISSING_CONCEPT_VALUES", "excel",
-                "Faltan importes requeridos para: " + ", ".join(missing_parameters),
+                _missing_parameters_message(missing_parameters),
                 "review_sources", len(missing_parameters),
             ))
         if owners:

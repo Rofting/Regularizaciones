@@ -28,7 +28,10 @@ _CENT = Decimal("0.01")
 METER_READING_KEY = "fixed_cost_meter_reading_acs"
 MAINTENANCE_KEY = "fixed_cost_boiler_maintenance"
 
-_REPAIR = re.compile(r"\b(reparaci[oó]n(?:es)?|aver[ií]a|sustituci[oó]n|cambio de)\b", re.IGNORECASE)
+_REPAIR = re.compile(
+    r"\b(reparaci[oó]n(?:es)?|reparar|rep\b\.?|aver[ií]as?|fugas?|sustituci[oó]n|sustituir|cambio de)",
+    re.IGNORECASE,
+)
 _METERING = re.compile(r"contador|lectura", re.IGNORECASE)
 
 
@@ -60,6 +63,17 @@ def _document_text(connection: sqlite3.Connection, archived_path: str | None) ->
            WHERE d.archived_path=? ORDER BY c.created_at DESC LIMIT 1""",
         (archived_path,),
     ).fetchone()
+    if row is None:
+        # La carpeta de datos puede haberse movido: el nombre archivado empieza
+        # por la huella del documento y sigue identificándolo.
+        name = str(archived_path).replace("\\", "/").rsplit("/", 1)[-1]
+        row = connection.execute(
+            """SELECT c.text_content FROM source_documents d
+               JOIN document_text_cache c ON c.sha256=d.sha256
+               WHERE replace(d.archived_path,'\\','/') LIKE ? ESCAPE '!'
+               ORDER BY c.created_at DESC LIMIT 1""",
+            ("%/" + name.replace("!", "!!").replace("%", "!%").replace("_", "!_"),),
+        ).fetchone()
     return str(row[0]) if row and row[0] else ""
 
 
@@ -69,7 +83,9 @@ def classify(connection: sqlite3.Connection, invoice: sqlite3.Row) -> str:
     text = _plain(_document_text(connection, invoice["archivo_origen"]))
     if _METERING.search(provider):
         return "meter_reading"
-    if _REPAIR.search(text) or _REPAIR.search(_plain(invoice["notas"])):
+    file_name = _plain(str(invoice["archivo_origen"] or "").replace("\\", "/").rsplit("/", 1)[-1])
+    file_name = file_name.replace("_", " ")
+    if _REPAIR.search(text) or _REPAIR.search(_plain(invoice["notas"])) or _REPAIR.search(file_name):
         return "repair"
     return "maintenance"
 

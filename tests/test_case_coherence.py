@@ -48,6 +48,28 @@ class CaseCoherenceTest(unittest.TestCase):
         self.duplicate()
         self.assertTrue(any(f.key.startswith('overlap:') for f in self.report().pending))
 
+    def test_invoice_and_its_full_credit_note_cancel_out_and_leave_the_rectified_one(self):
+        # Factura, abono íntegro y factura rectificada del mismo tramo: las dos
+        # primeras se anulan y la tercera queda sola, sin solape que revisar.
+        for number, amount in (('F-1', 500), ('AB-1', -500), ('FR-1', 320)):
+            cursor = self.connection.execute('''INSERT INTO facturas(id_comunidad,id_periodo,tipo_suministro,
+                cups_o_referencia,num_factura,fecha_inicio,fecha_fin,importe_total,termino_variable)
+                VALUES (?,?, 'ELECTRICIDAD','PUNTO-X',?,'2026-03-31','2026-04-23',?,?)''',
+                                    (self.community_id, self.period_id, number, amount, amount))
+        self.connection.commit()
+        report = self.report()
+        self.assertFalse([f.key for f in report.pending if f.key.startswith('overlap:')])
+        self.assertTrue(any('se anulan entre sí' in note for note in report.notes))
+
+    def test_partial_credit_note_still_needs_review(self):
+        for number, amount in (('F-1', 500), ('AB-1', -200)):
+            self.connection.execute('''INSERT INTO facturas(id_comunidad,id_periodo,tipo_suministro,
+                cups_o_referencia,num_factura,fecha_inicio,fecha_fin,importe_total,termino_variable)
+                VALUES (?,?, 'ELECTRICIDAD','PUNTO-X',?,'2026-03-31','2026-04-23',?,?)''',
+                                    (self.community_id, self.period_id, number, amount, amount))
+        self.connection.commit()
+        self.assertTrue(any(f.key.startswith('overlap:') for f in self.report().pending))
+
     def test_distinct_supply_points_are_not_duplicates(self):
         self.duplicate(cups='OTRO PUNTO')
         self.assertFalse(any(f.key.startswith('overlap:') for f in self.report().pending))

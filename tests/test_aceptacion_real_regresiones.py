@@ -384,5 +384,28 @@ TOTAL FACTURA {total} €
         self.assertEqual(-748.00, data["termino_variable"])
 
 
+
+
+class InvoiceTotalAmongLinesTest(unittest.TestCase):
+    """El total de la factura no se confunde con el de una línea de detalle."""
+
+    TEXT = (
+        "Factura\nNúmero # F26260669\nFecha 07/05/2026\n"
+        "CONCEPTO DESCRIPCIÓN UNIDADES PRECIO SUBTOTAL IVA TOTAL\n"
+        'Rosca Doble latón 1/2" 2 1,40€ 2,80€ 21% 3,39€\n'
+        'Válvula Tuller MAriposa 1/2" 2 10,69€ 21,38€ 21% 25,87€\n'
+        "Mano de Obra Técnico (horas) 5 23,00€ 115,00€ 21% 139,15€\n"
+        "BASE IMPONIBLE IMPUESTO TOTAL IMPUESTO TOTAL\n"
+        "148,71€ IVA 21% 31,23€ 179,94€\n148,71€ 179,94€\n179,94€\n"
+        "F26260669 - 179,94€ Vencimiento 06/06/2026 Pág. 1 de 1\n"
+    )
+
+    def test_largest_reconciling_total_wins(self):
+        import invoice_extractors
+        fields, diagnostics = {}, []
+        invoice_extractors._extract_amounts(self.TEXT, "periodic_maintenance", fields, diagnostics)
+        self.assertEqual("179.94", fields["importe_total"].value)
+
+
 if __name__ == "__main__":
     unittest.main()

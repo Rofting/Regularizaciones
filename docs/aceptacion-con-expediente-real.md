@@ -40,13 +40,49 @@ varios puntos. Las correcciones de esta entrega tienen su prueba en
 - **Reparaciones.** Entran por una quinta parte en el ejercicio de la factura y
   en los cuatro siguientes (también las anotadas en `gastos_extra`). La
   descripción de la fila indica «1/5 de …». Una factura de mantenimiento es
-  reparación si su texto (o su nota) habla de reparación, avería o sustitución.
+  reparación si su texto, su nota o el nombre del archivo hablan de reparación,
+  avería, fuga o sustitución.
 - **Previsiones («sin recibir aún»).** No cuentan; se excluyen con «Excluir fila».
+
+- **Lecturas.** No se adivinan. Si una lectura falta, viene a cero o baja, se
+  conserva la anterior; cuando llega la lectura real, sustituye a la conservada.
+  La lectura que abre el ejercicio se busca primero entre las del propio
+  período, aunque el cierre del anterior esté fechado unos días después.
+- **Factura, abono y refactura.** Una factura y su abono íntegro (mismo
+  suministro, mismo tramo, importe opuesto) se anulan entre sí y no cuentan
+  como solape; queda la factura rectificada. Un abono parcial sí pide revisión.
+- **TotalEnergies.** El término fijo incluye fijo, peajes («Otros»), cuota
+  GTS/CNMC y alquiler; el variable es el resto. Ambos suman el total cobrado.
+
+## Comprobado con el ejercicio 2025-2026
+
+Con la carpeta real el expediente llega hasta el final: Excel sin errores de
+fórmula, reparto y 50 cartas. Lo que hace falta hacer a mano:
+
+1. Apartar las facturas de otro ejercicio (botón «Apartar las N facturas de
+   otro ejercicio» en la bandeja).
+2. Anotar las cuotas cobradas (400 €/mes desde agosto, 300 €/mes desde enero y
+   las liquidaciones por consumo).
+3. Aceptar en «Coherencia» las variaciones de consumo por vivienda.
+
+Diferencias con el estudio manual, todas por documentos que no están en la carpeta:
+
+| Concepto | App | Estudio | Motivo |
+|---|---|---|---|
+| Gas | 11.553,36 € | 27.789,64 € | La carpeta tiene 8 de las 21 facturas del estudio; las presentes coinciden al céntimo. |
+| Agua | 1.516,57 € | 2.569,46 € | 7 de las 12 facturas; coinciden al céntimo. |
+| Electricidad | 2.554,85 € | 2.554,85 € | Igual. |
+| Lecturas de contadores | 993,44 € | 993,44 € | Igual. |
+| Consumo ACS | 358 m³ | 769 m³ | Ver «Pendiente»: cambio de contadores. |
 
 ## Pendiente
 
-- **Lecturas del ejercicio.** Un informe tiene todos los contadores a cero.
-  Otro muestra que los contadores se cambiaron (la lectura final es menor que
-  la inicial). Hace falta decidir la estimación de esos contadores.
+- **Cambio de contadores (decisión del despacho).** En 2026 se sustituyeron los
+  contadores: el informe de enero a marzo viene entero a cero y el anual acaba
+  en lecturas pequeñas (contador nuevo). Con la regla actual se conserva la
+  última lectura del contador viejo, así que el consumo del ejercicio se queda
+  en 358 m³ y no cuenta lo medido por los contadores nuevos (236 m³). El
+  estudio manual usa 769 m³. Falta decidir si, ante un cambio de contador, se
+  suma la lectura del contador nuevo.
 - **Placas solares.** No se distinguen del resto del mantenimiento: todo el
   mantenimiento va a «sala de calderas» salvo que se anote a mano.

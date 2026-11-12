@@ -207,6 +207,33 @@ def evaluate(con: sqlite3.Connection, case_id: int, profile) -> CoherenceReport:
                 f'término fijo + variable = {components} € y total = {total} €. La diferencia es mayor que '
                 'los impuestos habituales; revisa el desglose en la factura. El Excel reparte el total '
                 'entre fijo y variable en proporción a ese desglose.')
+    # Una factura y su abono íntegro (mismo suministro, mismo período, importe
+    # opuesto) se anulan entre sí: no son un duplicado que revisar y dejan sitio
+    # a la factura rectificada que las sustituye.
+    cancelled: set[int] = set()
+    for index, (first, start, end) in enumerate(dated):
+        if first['id_factura'] in cancelled:
+            continue
+        for second, other_start, other_end in dated[index + 1:]:
+            if second['id_factura'] in cancelled or (start, end) != (other_start, other_end):
+                continue
+            if first['tipo_suministro'] != second['tipo_suministro']:
+                continue
+            a, b = (normalise_cups(r['cups_o_referencia']) for r in (first, second))
+            if a and b and a != b:
+                continue
+            try:
+                one, two = (_number(r['importe_total'] or 0) for r in (first, second))
+            except ValueError:
+                continue
+            if one and one + two == 0:
+                cancelled.update((first['id_factura'], second['id_factura']))
+                notes.append(
+                    f'{first["num_factura"] or first["id_factura"]} y '
+                    f'{second["num_factura"] or second["id_factura"]} de {first["tipo_suministro"]} '
+                    'se anulan entre sí (factura y abono íntegro): no cuentan como solape.')
+                break
+    dated = [item for item in dated if item[0]['id_factura'] not in cancelled]
     for index, (first, start, end) in enumerate(dated):
         for second, other_start, other_end in dated[index + 1:]:
             if first['tipo_suministro'] != second['tipo_suministro']:

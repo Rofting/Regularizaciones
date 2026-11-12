@@ -311,26 +311,16 @@ def _boundary_reading_dates(
     Es el mismo criterio que usa la hoja del estudio, así que el reparto y el
     Excel hablan siempre de las mismas dos lecturas.
     """
-    fila = connection.execute(
-        """SELECT
-             (SELECT MAX(fecha_lectura) FROM period_readings r
-               JOIN propietarios p ON p.id_propietario=r.id_propietario
-               WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda' AND r.tipo=?
-                 AND r.fecha_lectura<=?) AS inicial,
-             (SELECT MAX(fecha_lectura) FROM period_readings r
-               JOIN propietarios p ON p.id_propietario=r.id_propietario
-               WHERE p.id_comunidad=? AND p.tipo_unidad='vivienda' AND r.tipo=?
-                 AND r.fecha_lectura<=?) AS final""",
-        (
-            case["id_comunidad"], reading_type, case["fecha_inicio"],
-            case["id_comunidad"], reading_type, case["fecha_fin"],
-        ),
-    ).fetchone()
-    if fila["inicial"] is None or fila["final"] is None or fila["inicial"] >= fila["final"]:
+    from reading_boundaries import boundary_dates
+    inicial, final = boundary_dates(
+        connection, community_id=case["id_comunidad"], period_id=case["id_periodo"],
+        reading_type=reading_type, start=case["fecha_inicio"], end=case["fecha_fin"],
+    )
+    if inicial is None or final is None or inicial >= final:
         raise DistributionBlockedError(
             f"Faltan lecturas {reading_type} que abran y cierren el período"
         )
-    return fila["inicial"], fila["final"]
+    return inicial, final
 
 
 _CARRY_FORWARD_METHODS = {

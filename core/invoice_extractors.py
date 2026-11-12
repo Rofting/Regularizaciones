@@ -382,9 +382,16 @@ def _select_amounts(
 ) -> tuple[dict[str, _Candidate], bool | None]:
     """Choose one candidate per field; ``True`` means base+IVA=total was verified."""
     if base and iva and total:
-        for b, i, t in itertools.product(base[:6], iva[:6], total[:6]):
-            if _reconciles(b.value, i.value, t.value):
-                return {"base_imponible": b, "iva": i, "importe_total": t}, True
+        # Una línea de detalle («2 uds × 1,40 € = 2,80 €») también cuadra como
+        # base + IVA = total. El total de la factura nunca es menor que el de
+        # una de sus líneas: entre las ternas que cuadran gana la mayor.
+        matches = [
+            (b, i, t) for b, i, t in itertools.product(base[:6], iva[:6], total[:6])
+            if _reconciles(b.value, i.value, t.value)
+        ]
+        if matches:
+            b, i, t = max(matches, key=lambda item: abs(item[2].value))
+            return {"base_imponible": b, "iva": i, "importe_total": t}, True
         return {
             "base_imponible": base[0],
             "iva": iva[0],
